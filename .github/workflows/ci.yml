@@ -98,6 +98,11 @@ jobs:
         shell: pwsh
         run: .\scripts\windows\testar-install.ps1 -Modo sintaxe
 
+      - name: Preparar binários (vendor)
+        if: steps.modo.outputs.tauri == 'true'
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1
+
       - name: Build Tauri (NSIS por usuário, sem atualizador)
         if: steps.modo.outputs.tauri == 'true'
         working-directory: windows
@@ -106,6 +111,7 @@ jobs:
           # installMode currentUser: instala em %LOCALAPPDATA% sem pedir administrador.
           # Em CI não há chave do atualizador (PRs de fora não leem secrets).
           npx --yes @tauri-apps/cli@2 build --bundles nsis --ci \
+            --config src-tauri/tauri.distribuicao.conf.json \
             --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}'
 
       - name: install.ps1 instalando o build do CI (por usuário, atalho, desinstala)

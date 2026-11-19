@@ -78,6 +78,11 @@ jobs:
         if: steps.modo.outputs.tauri == 'true'
         run: cargo test --workspace --all-targets
 
+      - name: Preparar binários (vendor)
+        if: steps.modo.outputs.tauri == 'true'
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1
+
       - name: Build Tauri (NSIS por usuário, sem assinatura do atualizador)
         if: steps.modo.outputs.tauri == 'true'
         working-directory: windows
@@ -86,7 +91,7 @@ jobs:
           VERSAO: ${{ steps.modo.outputs.versao }}
         run: |
           config=$(printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' "$VERSAO")
-          npx --yes @tauri-apps/cli@2 build --bundles nsis --ci --config "$config"
+          npx --yes @tauri-apps/cli@2 build --bundles nsis --ci --config src-tauri/tauri.distribuicao.conf.json --config "$config"
 
       - name: Montar artefato
         if: steps.modo.outputs.tauri == 'true'
