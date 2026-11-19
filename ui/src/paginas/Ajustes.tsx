@@ -1,4 +1,4 @@
-import { CheckCircle, DownloadSimple, FolderOpen, ShieldCheck, Warning, WarningCircle } from "@phosphor-icons/react";
+import { CheckCircle, Copy, DownloadSimple, FolderOpen, ShieldCheck, Warning, WarningCircle } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { Cabecalho } from "@/componentes/Cabecalho";
@@ -21,6 +21,7 @@ const SISTEMA = "__sistema__";
 export function Ajustes({ estado }: { estado?: Estado }) {
   const { dados, recarregar } = useDados<DadosDosAjustes>("ajustes.ler", {}, ["estado"]);
   const [importando, setImportando] = useState(false);
+  const [copiandoRelatorio, setCopiandoRelatorio] = useState(false);
   if (!dados) return <Cabecalho titulo="Ajustes" />;
 
   const win = plataforma() === "windows";
@@ -39,6 +40,18 @@ export function Ajustes({ estado }: { estado?: Estado }) {
       else toast.success(`Importados ${r.ditados} ditados e ${r.termos} termos`);
     } finally {
       setImportando(false);
+    }
+  };
+
+  const copiarRelatorio = async () => {
+    setCopiandoRelatorio(true);
+    try {
+      await chamar<string>("relatorio.copiar");
+      toast.success("Relatório copiado");
+    } catch {
+      toast.error("Não foi possível copiar o relatório");
+    } finally {
+      setCopiandoRelatorio(false);
     }
   };
 
@@ -211,6 +224,19 @@ export function Ajustes({ estado }: { estado?: Estado }) {
               </p>
               <Button icon={DownloadSimple} loading={importando} onClick={importar}>
                 Importar
+              </Button>
+            </Linha>
+          </Grupo>
+        )}
+
+        {win && (
+          <Grupo titulo="Teste">
+            <Linha className="flex items-center gap-4">
+              <p className="min-w-0 flex-1 text-[0.8125rem] text-muted-foreground">
+                Copia a versão, o sistema e os últimos registros do app, sem o texto dos seus ditados, para colar na conversa com quem está testando.
+              </p>
+              <Button icon={Copy} loading={copiandoRelatorio} onClick={copiarRelatorio}>
+                Copiar relatório de teste
               </Button>
             </Linha>
           </Grupo>

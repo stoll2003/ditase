@@ -262,6 +262,15 @@ export function responderDeExemplo(metodo: string, params: Record<string, unknow
       return true;
     case "wispr.importar":
       return { ditados: 44, termos: 2, encontrado: true };
+    case "relatorio.copiar":
+      return [
+        "Relatório de teste do Dita.se para Windows",
+        `Versão: ${estado.versao}`,
+        "Windows: Windows 11 (exemplo)",
+        `Atalho: ${estado.atalho.nome} (gancho instalado)`,
+        "Microfones: 1 encontrado(s); escolhido: padrão",
+        `Fase do ditado: ${estado.fase}`,
+      ].join("\n");
     default:
       return true;
   }
