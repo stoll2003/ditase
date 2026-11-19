@@ -1,0 +1,3 @@
+# Corpus sintético (vozes do macOS, textos inventados, sem dado pessoal): versionado para o CI
+# Windows medir com os mesmos áudios. Gravações reais continuam barradas pelo .gitignore da raiz.
+!*.wav
