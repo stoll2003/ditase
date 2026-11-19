@@ -1,4 +1,4 @@
-import { CheckCircle, DownloadSimple, FolderOpen, ShieldCheck, WarningCircle } from "@phosphor-icons/react";
+import { CheckCircle, DownloadSimple, FolderOpen, ShieldCheck, Warning, WarningCircle } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { useState } from "react";
 import { Cabecalho } from "@/componentes/Cabecalho";
@@ -13,6 +13,7 @@ import { Panel, Shell, ShellHeader } from "@/components/ui/surface";
 import { toast } from "@/components/ui/toast-stack";
 import { useDados } from "@/lib/dados";
 import { tamanhoDeArquivo } from "@/lib/formato";
+import { plataforma } from "@/lib/plataforma";
 import { chamar, type Ajustes as DadosDosAjustes, type Estado } from "@/lib/ponte";
 
 const SISTEMA = "__sistema__";
@@ -22,6 +23,7 @@ export function Ajustes({ estado }: { estado?: Estado }) {
   const [importando, setImportando] = useState(false);
   if (!dados) return <Cabecalho titulo="Ajustes" />;
 
+  const win = plataforma() === "windows";
   const v = dados.valores;
   const definir = (chave: string, valor: string) => chamar("ajustes.definir", { chave, valor }).then(recarregar);
   const limpador = estado?.limpador;
@@ -32,7 +34,7 @@ export function Ajustes({ estado }: { estado?: Estado }) {
     setImportando(true);
     try {
       const r = await chamar<{ ditados: number; termos: number; encontrado: boolean }>("wispr.importar");
-      if (!r.encontrado) toast.error("Não achei o Wispr Flow neste Mac");
+      if (!r.encontrado) toast.error(win ? "Não achei o Wispr Flow neste computador" : "Não achei o Wispr Flow neste Mac");
       else if (r.ditados === 0 && r.termos === 0) toast("Nada novo para importar");
       else toast.success(`Importados ${r.ditados} ditados e ${r.termos} termos`);
     } finally {
@@ -52,6 +54,12 @@ export function Ajustes({ estado }: { estado?: Estado }) {
               onValueChange={(valor) => definir("atalho", valor)}
               options={dados.teclas.map((t) => ({ value: t.id, label: t.nome }))}
             />
+            {win && v.atalho === "altDireito" && (
+              <p role="status" className="mt-2.5 flex items-center gap-2 px-1 text-[0.8125rem] text-warning">
+                <Warning className="size-4 shrink-0" weight="fill" aria-hidden="true" />
+                <span>No teclado brasileiro esta tecla é o AltGr, usada para digitar / e ?. Prefira o Ctrl direito.</span>
+              </p>
+            )}
           </Linha>
           <Linha>
             <dl className="grid grid-cols-[auto_1fr] items-center gap-x-4 gap-y-2 text-[0.8125rem]">
@@ -59,7 +67,7 @@ export function Ajustes({ estado }: { estado?: Estado }) {
               <Gesto teclas={["2 toques"]} texto="Mãos livres: grava até você tocar na tecla de novo. É o modo para ditados longos." />
               <Gesto teclas={["tecla", "Espaço"]} texto="Também entra em mãos livres, sem soltar a tecla." />
               <Gesto teclas={["Esc"]} texto="Cancela a gravação sem colar nada." />
-              <Gesto teclas={["⌘", "⌃", "V"]} texto="Cola de novo o último ditado." />
+              <Gesto teclas={win ? ["Ctrl", "Alt", "V"] : ["⌘", "⌃", "V"]} texto="Cola de novo o último ditado." />
             </dl>
           </Linha>
         </Grupo>
@@ -141,7 +149,7 @@ export function Ajustes({ estado }: { estado?: Estado }) {
           <Linha>
             <Select
               label="Guardar o áudio dos ditados"
-              description="O áudio fica só neste Mac e serve de reserva se a transcrição falhar."
+              description={win ? "O áudio fica só neste computador e serve de reserva se a transcrição falhar." : "O áudio fica só neste Mac e serve de reserva se a transcrição falhar."}
               value={v.guardarAudioDias}
               onValueChange={(valor) => definir("guardarAudioDias", valor)}
               options={[
@@ -177,23 +185,25 @@ export function Ajustes({ estado }: { estado?: Estado }) {
         </Grupo>
 
         {estado && (
-          <Grupo titulo="Permissões" apoio="O que o macOS precisa liberar">
+          <Grupo titulo="Permissões" apoio={win ? "O que o Windows precisa liberar" : "O que o macOS precisa liberar"}>
             <Permissao
               nome="Microfone"
-              texto="Para ouvir a sua voz."
+              texto={win ? "Para ouvir a sua voz. Configurações > Privacidade e segurança > Microfone." : "Para ouvir a sua voz."}
               concedida={estado.permissoes.microfone === "concedida"}
               pedir={() => chamar("permissao.pedir", { qual: "microfone" })}
             />
-            <Permissao
-              nome="Acessibilidade"
-              texto="Para o atalho valer em qualquer app e o texto ser colado no cursor."
-              concedida={estado.permissoes.acessibilidade === "concedida"}
-              pedir={() => chamar("permissao.pedir", { qual: "acessibilidade" })}
-            />
+            {!win && (
+              <Permissao
+                nome="Acessibilidade"
+                texto="Para o atalho valer em qualquer app e o texto ser colado no cursor."
+                concedida={estado.permissoes.acessibilidade === "concedida"}
+                pedir={() => chamar("permissao.pedir", { qual: "acessibilidade" })}
+              />
+            )}
           </Grupo>
         )}
 
-        {estado?.wisprDisponivel && (
+        {!win && estado?.wisprDisponivel && (
           <Grupo titulo="Wispr Flow" apoio="Trazer o que já existe neste Mac">
             <Linha className="flex items-center gap-4">
               <p className="min-w-0 flex-1 text-[0.8125rem] text-muted-foreground">
@@ -208,7 +218,7 @@ export function Ajustes({ estado }: { estado?: Estado }) {
 
         {estado && (
           <p className="px-2 pt-2 text-[0.75rem] text-muted-foreground">
-            Dita.se {estado.versao} · reconhecedor {estado.reconhecedor.nome} · tudo roda neste Mac, sem conta e sem nuvem.
+            Dita.se {estado.versao} · reconhecedor {estado.reconhecedor.nome} · tudo roda neste {win ? "computador" : "Mac"}, sem conta e sem nuvem.
           </p>
         )}
       </div>
@@ -262,20 +272,24 @@ function Permissao({ nome, texto, concedida, pedir }: { nome: string; texto: str
 
 /** Download, progresso e falha do modelo padrão. Só aparece enquanto ele não está instalado. */
 function DownloadDoModelo({ modelo, compacto = false }: { modelo: Estado["modeloIA"]; compacto?: boolean }) {
+  const win = plataforma() === "windows";
   const feito = modelo.feito ?? 0;
   const total = tamanhoDeArquivo(modelo.tamanho);
   const baixar = () => void chamar("modelo.baixar");
   if (modelo.estado === "indisponivel") {
     return (
       <div className="text-[0.8125rem]">
-        <p className="font-medium">Indisponível neste Mac</p>
+        <p className="font-medium">{win ? "Indisponível neste computador" : "Indisponível neste Mac"}</p>
         <p className="mt-1 text-muted-foreground">
-          A IA local precisa do llama-server, que não veio com esta instalação nem está no Homebrew. O ditado funciona normalmente, só com as
-          regras e o dicionário.
+          {win
+            ? "A IA local precisa do llama-server, que não veio com esta instalação. O ditado funciona normalmente, só com as regras e o dicionário."
+            : "A IA local precisa do llama-server, que não veio com esta instalação nem está no Homebrew. O ditado funciona normalmente, só com as regras e o dicionário."}
         </p>
-        <p className="mt-2 text-muted-foreground">
-          Para instalar pelo Terminal: <span className="selecionavel font-mono">brew install llama.cpp</span>
-        </p>
+        {!win && (
+          <p className="mt-2 text-muted-foreground">
+            Para instalar pelo Terminal: <span className="selecionavel font-mono">brew install llama.cpp</span>
+          </p>
+        )}
       </div>
     );
   }
@@ -322,7 +336,7 @@ function DownloadDoModelo({ modelo, compacto = false }: { modelo: Estado["modelo
           </p>
         ) : (
           <p className="mt-1 text-muted-foreground">
-            O {modelo.arquivo.replace(/-Q4_K_M\.gguf$/, "").replace("-", " ")} roda neste Mac, sem nuvem: arruma o texto do ditado e resume reuniões. Baixa uma vez só.
+            O {modelo.arquivo.replace(/-Q4_K_M\.gguf$/, "").replace("-", " ")} roda neste {win ? "computador" : "Mac"}, sem nuvem: arruma o texto do ditado e resume reuniões. Baixa uma vez só.
           </p>
         )}
       </div>
@@ -338,7 +352,7 @@ function SituacaoDaIA({ limpador, modelo }: { limpador: Estado["limpador"]; mode
     case "indisponivel":
       return (
         <StatusPill tone="warning" icon={WarningCircle}>
-          Indisponível neste Mac
+          {plataforma() === "windows" ? "Indisponível neste computador" : "Indisponível neste Mac"}
         </StatusPill>
       );
     case "ausente":

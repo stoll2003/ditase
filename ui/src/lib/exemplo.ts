@@ -2,6 +2,7 @@
  * DADOS DE EXEMPLO, usados só quando a interface roda fora do app (navegador).
  * Nada aqui é dado real do usuário.
  */
+import { plataforma } from "./plataforma";
 import type { Ajustes, Ditado, Estado, Estatisticas, Termo } from "./ponte";
 
 const agora = Math.floor(Date.now() / 1000);
@@ -49,8 +50,22 @@ let termos: Termo[] = [
   { id: 4, termo: "Fulano de Tal", ouvidoComo: [], usos: 0, origem: "wispr", criadoEm: agora },
 ];
 
+const teclasMac = [
+  { id: "fn", nome: "Fn (🌐)", simbolo: "Fn" },
+  { id: "opcaoDireita", nome: "Opção direita (⌥)", simbolo: "⌥ direita" },
+  { id: "comandoDireito", nome: "Comando direito (⌘)", simbolo: "⌘ direito" },
+  { id: "controleDireito", nome: "Controle direito (⌃)", simbolo: "⌃ direito" },
+];
+const teclasWindows = [
+  { id: "controleDireito", nome: "Ctrl direito", simbolo: "Ctrl direito" },
+  { id: "shiftDireito", nome: "Shift direito", simbolo: "Shift direito" },
+  { id: "altDireito", nome: "Alt direito (AltGr)", simbolo: "Alt direito" },
+];
+const noWindows = plataforma() === "windows";
+const atalhoInicial = noWindows ? teclasWindows[0] : teclasMac[1];
+
 const valores: Record<string, string> = {
-  atalho: "opcaoDireita",
+  atalho: atalhoInicial.id,
   limpezaIA: "1",
   modelo: "Qwen3.5-4B-Q4_K_M.gguf",
   sons: "1",
@@ -105,9 +120,9 @@ const estado: Estado = {
   limpador: { estado: "pronto", detalhe: "", ligado: true, modelo: "Qwen3.5-4B-Q4_K_M" },
   modeloIA: { estado: "instalado", arquivo: "Qwen3.5-2B-Q4_K_M.gguf", tamanho: 1_280_835_840, aviso: true },
   permissoes: { microfone: "concedida", acessibilidade: "concedida" },
-  atalho: { tecla: "opcaoDireita", nome: "Opção direita (⌥)", simbolo: "⌥ direita", instalado: true },
+  atalho: { tecla: atalhoInicial.id, nome: atalhoInicial.nome, simbolo: atalhoInicial.simbolo, instalado: true },
   wisprAberto: false,
-  wisprDisponivel: true,
+  wisprDisponivel: !noWindows,
   versao: "0.1.0 (exemplo)",
 };
 
@@ -185,7 +200,7 @@ export function responderDeExemplo(metodo: string, params: Record<string, unknow
         return {
           ...estadoComModelo(estado),
           reconhecedor: { ...estado.reconhecedor, estado: "carregando" },
-          permissoes: { microfone: "pendente", acessibilidade: "pendente" },
+          permissoes: { microfone: "pendente", acessibilidade: noWindows ? "concedida" : "pendente" },
           atalho: { ...estado.atalho, instalado: false },
         };
       }
@@ -225,19 +240,21 @@ export function responderDeExemplo(metodo: string, params: Record<string, unknow
     case "ajustes.ler":
       return {
         valores,
-        teclas: [
-          { id: "fn", nome: "Fn (🌐)" },
-          { id: "opcaoDireita", nome: "Opção direita (⌥)" },
-          { id: "comandoDireito", nome: "Comando direito (⌘)" },
-          { id: "controleDireito", nome: "Controle direito (⌃)" },
-        ],
-        microfones: [{ uid: "embutido", nome: "Microfone do MacBook" }],
+        teclas: (noWindows ? teclasWindows : teclasMac).map(({ id, nome }) => ({ id, nome })),
+        microfones: [{ uid: "embutido", nome: noWindows ? "Microfone integrado" : "Microfone do MacBook" }],
         modelos: ["Qwen3.5-2B-Q4_K_M.gguf", "Qwen3.5-4B-Q4_K_M.gguf"],
-        pastaDeModelos: "~/Library/Application Support/Ditado/Models",
+        pastaDeModelos: noWindows ? "%APPDATA%\\Dita.se\\Modelos" : "~/Library/Application Support/Ditado/Models",
         llamaInstalado: situacaoInicialDoModelo().estado !== "indisponivel",
       } satisfies Ajustes;
     case "ajustes.definir":
       valores[String(params.chave)] = String(params.valor);
+      if (params.chave === "atalho") {
+        const escolhida = (noWindows ? teclasWindows : teclasMac).find((t) => t.id === String(params.valor));
+        if (escolhida) {
+          estado.atalho = { ...estado.atalho, tecla: escolhida.id, nome: escolhida.nome, simbolo: escolhida.simbolo };
+          avisarEstado();
+        }
+      }
       if (params.chave === "avisoModelo" && modeloDemo) {
         modeloDemo = { ...modeloDemo, aviso: params.valor === "1" };
         avisarEstado();
