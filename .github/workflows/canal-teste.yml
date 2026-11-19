@@ -30,6 +30,8 @@ env:
 jobs:
   publicar:
     name: Build e publicação
+    # Só publica a partir da branch windows, mesmo se disparado à mão de outra.
+    if: github.ref == 'refs/heads/windows'
     runs-on: windows-2025
     timeout-minutes: 60
     permissions:
