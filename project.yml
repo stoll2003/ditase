@@ -1,0 +1,80 @@
+name: Ditado
+options:
+  deploymentTarget:
+    macOS: '15.0'
+  xcodeVersion: '27.0'
+packages:
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio.git
+    from: 0.18.3
+  Nucleo:
+    path: Nucleo
+settings:
+  base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+    SWIFT_VERSION: '5.0'
+    MACOSX_DEPLOYMENT_TARGET: '15.0'
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: '-'
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+targets:
+  Ditado:
+    type: application
+    platform: macOS
+    sources:
+      - path: Ditado
+      # prompt-limpeza.md vai para Contents/Resources/Recursos (o código procura em subdirectory "Recursos").
+      - path: Recursos/prompt-limpeza.md
+        buildPhase:
+          copyFiles:
+            destination: resources
+            subpath: Recursos
+      # llama-server e dylibs (llama.cpp b12359) vão para Contents/Resources/llama como pasta azul,
+      # preservando os bits de execução. Ver ServidorLLM.binario.
+      - path: Recursos/llama
+        type: folder
+        buildPhase: resources
+    dependencies:
+      - package: FluidAudio
+      - package: Nucleo
+    info:
+      path: Ditado/Info.plist
+      properties:
+        CFBundleIconFile: Dita
+        NSAudioCaptureUsageDescription: O Dita.se captura o áudio reproduzido pelo Mac durante uma reunião que você iniciar. Nenhuma imagem é gravada.
+        NSScreenCaptureUsageDescription: Permita a captura do áudio do Mac para transcrever reuniões. O Dita.se não grava a tela.
+    preBuildScripts:
+      - name: Interface web
+        basedOnDependencyAnalysis: false
+        script: |
+          # Copia o build da interface (ui/dist) para dentro do app. O build é feito por scripts/empacotar.sh.
+          set -e
+          DESTINO="${BUILT_PRODUCTS_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/ui"
+          if [ ! -f "${SRCROOT}/ui/dist/index.html" ]; then
+            echo "error: ui/dist não existe. Rode scripts/empacotar.sh"; exit 1
+          fi
+          mkdir -p "${DESTINO}"
+          rsync -a --delete "${SRCROOT}/ui/dist/" "${DESTINO}/"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: se.dita.app
+        PRODUCT_NAME: Dita.se
+        PRODUCT_MODULE_NAME: Ditado
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Dita.se
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.productivity
+        INFOPLIST_KEY_NSHumanReadableCopyright: "Copyright © 2026 Dita.se contributors"
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: O Dita.se usa o microfone no ditado e, se você escolher, durante a transcrição de reuniões. O áudio não sai deste Mac.
+        INFOPLIST_KEY_CFBundleDevelopmentRegion: pt-BR
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+        ENABLE_HARDENED_RUNTIME: NO
+        ENABLE_APP_SANDBOX: NO
+        MARKETING_VERSION: '0.1.0'
+        CURRENT_PROJECT_VERSION: '1'
+        DEVELOPMENT_LANGUAGE: pt-BR
+schemes:
+  Ditado:
+    build:
+      targets:
+        Ditado: all
