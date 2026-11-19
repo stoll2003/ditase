@@ -14,6 +14,7 @@ import { SearchField } from "@/components/ui/text-field";
 import { toast } from "@/components/ui/toast-stack";
 import { useDados } from "@/lib/dados";
 import { compacto, dia, duracao, espera, hora, numero, plural, segundos, tamanhoDeArquivo } from "@/lib/formato";
+import { plataforma } from "@/lib/plataforma";
 import { chamar, type Ditado, type Estado, type Estatisticas } from "@/lib/ponte";
 
 export function Inicio({ estado, irPara }: { estado?: Estado; irPara: (pagina: string) => void }) {
@@ -176,13 +177,14 @@ function Item({ ditado: d, indice, entrada, verBruto }: { ditado: Ditado; indice
     chamar("ditado.apagar", { id: d.id })
       .then(() => toast("Ditado apagado"))
       .catch(() => setSaindo(false));
+  const win = plataforma() === "windows";
   const detalhes = [
     hora(d.iniciadoEm),
     d.appNome || undefined,
     plural(d.palavras, "palavra", "palavras"),
     d.duracao > 0 ? segundos(d.duracao) : undefined,
     d.origem === "ditado" && d.latencia > 0 ? `pronto em ${espera(d.latencia)}` : undefined,
-    d.origem === "wispr" ? "importado do Wispr Flow" : undefined,
+    !win && d.origem === "wispr" ? "importado do Wispr Flow" : undefined,
     d.estado === "recuperado" ? "recuperado depois de o app fechar" : undefined,
     d.estado === "parcial" ? "parte do áudio não foi transcrita" : undefined,
   ].filter(Boolean);
@@ -262,6 +264,7 @@ function Item({ ditado: d, indice, entrada, verBruto }: { ditado: Ditado; indice
 
 /** O que falta para o ditado funcionar. Some quando está tudo certo. */
 function Pendencias({ estado, irPara }: { estado: Estado; irPara: (pagina: string) => void }) {
+  const win = plataforma() === "windows";
   type Acao = { rotulo: string; fazer: () => void };
   const itens: { id: string; icone: typeof Warning; titulo: string; texto: string; acao?: Acao; dispensar?: Acao; discreto?: boolean }[] = [];
   if (estado.permissoes.microfone !== "concedida") {
@@ -269,11 +272,11 @@ function Pendencias({ estado, irPara }: { estado: Estado; irPara: (pagina: strin
       id: "mic",
       icone: MicrophoneSlash,
       titulo: "Permita o microfone",
-      texto: "Sem ele o Dita.se não ouve nada. O áudio fica neste Mac.",
+      texto: win ? "Sem ele o Dita.se não ouve nada. O áudio fica neste computador." : "Sem ele o Dita.se não ouve nada. O áudio fica neste Mac.",
       acao: { rotulo: "Permitir", fazer: () => chamar("permissao.pedir", { qual: "microfone" }) },
     });
   }
-  if (estado.permissoes.acessibilidade !== "concedida") {
+  if (!win && estado.permissoes.acessibilidade !== "concedida") {
     itens.push({
       id: "ax",
       icone: Warning,
@@ -312,7 +315,7 @@ function Pendencias({ estado, irPara }: { estado: Estado; irPara: (pagina: strin
     itens.push({
       id: "ia",
       icone: Warning,
-      titulo: "A limpeza por IA está indisponível neste Mac",
+      titulo: win ? "A limpeza por IA está indisponível neste computador" : "A limpeza por IA está indisponível neste Mac",
       texto: "O ditado segue funcionando só com as regras e o dicionário.",
       acao: { rotulo: "Ver nos Ajustes", fazer: () => irPara("ajustes") },
       dispensar: dispensarAviso,
@@ -326,7 +329,7 @@ function Pendencias({ estado, irPara }: { estado: Estado; irPara: (pagina: strin
       acao: { rotulo: "Ver nos Ajustes", fazer: () => irPara("ajustes") },
     });
   }
-  if (estado.wisprAberto && estado.atalho.tecla === "fn") {
+  if (!win && estado.wisprAberto && estado.atalho.tecla === "fn") {
     itens.push({ id: "wispr", icone: Warning, titulo: "O Wispr Flow está aberto e usa a mesma tecla", texto: "Os dois vão gravar ao mesmo tempo. Feche o Wispr Flow ou troque o atalho nos Ajustes." });
   }
   if (itens.length === 0) return null;

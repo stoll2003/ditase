@@ -17,8 +17,12 @@ import { SearchField } from "@/components/ui/text-field";
 import { blocos, copiarTexto, tempo, textoDoDocumento, type FonteReuniao, type Lancamento, type Reuniao as DadosReuniao } from "@/lib/lancamento";
 import { cn } from "@/lib/utils";
 import { plural } from "@/lib/formato";
+import { plataforma } from "@/lib/plataforma";
 
-const fonteTexto = (fonte: FonteReuniao) => fonte === "mac" ? "Só o áudio do Mac" : "Áudio do Mac + microfone (Você)";
+const fonteTexto = (fonte: FonteReuniao, win: boolean) =>
+  fonte === "mac"
+    ? (win ? "Só o áudio do computador" : "Só o áudio do Mac")
+    : (win ? "Áudio do computador + microfone (Você)" : "Áudio do Mac + microfone (Você)");
 const dia = (segundos: number) => {
   const data = new Date(segundos * 1000);
   const hoje = new Date();
@@ -58,7 +62,7 @@ function AoVivo({ reuniao }: { reuniao: DadosReuniao }) {
       <span aria-hidden="true" className={cn("size-2.5 shrink-0 rounded-full", ponto)} />
       <EditarNome nome={reuniao.nome} rotulo="Dar nome à reunião" salvar={(nome) => mudarTitulo(reuniao, nome)} />
       <span className="font-mono tabular-nums text-muted-foreground">{tempo(reuniao.duracao ?? 0)}</span>
-    </span>} subtitle={fonteTexto(reuniao.fonte)}
+    </span>} subtitle={fonteTexto(reuniao.fonte, plataforma() === "windows")}
       aside={<><Button icon={pausada ? Play : Pause} onClick={() => void acaoLocal("pausar", { id: reuniao.id })}>{pausada ? "Retomar" : "Pausar"}</Button>
         <Button variant="danger" icon={Stop} onClick={() => void acaoLocal("encerrar", { id: reuniao.id })}>Encerrar</Button></>} />
     {reuniao.avisoCaptura && <p role="status" className="px-3 pb-2 text-sm text-warning">{reuniao.avisoCaptura}</p>}
@@ -131,17 +135,18 @@ function ReuniaoArquivada({ reuniao }: { reuniao: DadosReuniao }) {
 }
 
 export function Reuniao({ dados, ditando }: { dados?: Lancamento; ditando: boolean }) {
+  const win = plataforma() === "windows";
   const [fonte, mudarFonte] = useState<FonteReuniao>("macEMicrofone");
   const [selecionada, selecionar] = useState<string>();
   const [descarte, confirmarDescarte] = useState<DadosReuniao>();
   const atual = dados?.reuniao;
-  const audio = dados?.permissoes.audioSistema === "concedida";
+  const audio = win || dados?.permissoes.audioSistema === "concedida";
   const mic = dados?.permissoes.microfone === "concedida";
   const pronta = audio && (fonte === "mac" || mic);
   const anteriores = dados?.anteriores ?? [];
   const aberta = anteriores.find((r) => r.id === selecionada) ?? anteriores[0];
   return <>
-    <Cabecalho titulo="Reunião" apoio="Transcreve chamadas deste Mac junto com a sua voz e gera um resumo local ao terminar, sem entrar como participante na chamada."
+    <Cabecalho titulo="Reunião" apoio={win ? "Transcreve chamadas deste computador junto com a sua voz e gera um resumo local ao terminar, sem entrar como participante na chamada." : "Transcreve chamadas deste Mac junto com a sua voz e gera um resumo local ao terminar, sem entrar como participante na chamada."}
       lado={!atual && <Button variant="primary" icon={Microphone} disabled={!dados?.disponivel || !pronta || ditando} onClick={() => { selecionar(undefined); void acaoLocal("iniciar", { fonte }); }}>Começar reunião</Button>} />
     {atual ? atual.fase === "finalizando" ? <ReuniaoSalva reuniao={atual} finalizando /> : <AoVivo key={atual.id} reuniao={atual} />
       : !dados?.disponivel ? <p role="status" className="text-sm text-muted-foreground">A captura de reuniões está indisponível nesta versão do motor.</p>
@@ -154,11 +159,11 @@ export function Reuniao({ dados, ditando }: { dados?: Lancamento; ditando: boole
             <label className="grid gap-1 text-xs font-medium text-muted-foreground">Fontes de áudio
               <select value={fonte} onChange={(e) => mudarFonte(e.target.value as FonteReuniao)}
                 className="max-w-full rounded-lg bg-surface px-3 py-2 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring">
-                <option value="macEMicrofone">Áudio do Mac + meu microfone (recomendado)</option>
-                <option value="mac">Só o áudio do Mac</option>
+                <option value="macEMicrofone">{win ? "Áudio do computador + meu microfone (recomendado)" : "Áudio do Mac + meu microfone (recomendado)"}</option>
+                <option value="mac">{win ? "Só o áudio do computador" : "Só o áudio do Mac"}</option>
               </select>
             </label>
-            <StatusPill tone={pronta ? "positive" : "warning"}>{pronta ? "Pronto para capturar" : !audio ? "Falta permissão do áudio do Mac" : "Falta permissão do microfone"}</StatusPill>
+            <StatusPill tone={pronta ? "positive" : "warning"}>{pronta ? "Pronto para capturar" : !audio ? (win ? "Falta permissão do áudio do computador" : "Falta permissão do áudio do Mac") : "Falta permissão do microfone"}</StatusPill>
           </Panel></Shell>
         </>}
     {dados?.avisoMigracao && <p role="alert" className="my-3 text-sm text-warning">Alguns dados antigos precisam de nova tentativa de importação. {dados.avisoMigracao}</p>}
@@ -197,10 +202,11 @@ export function Reuniao({ dados, ditando }: { dados?: Lancamento; ditando: boole
 }
 
 function Permissao({ qual }: { qual: "audioSistema" | "microfone" }) {
+  const win = plataforma() === "windows";
   return <Inset className="flex items-center gap-3 p-4">
     <Warning className="size-4 shrink-0 text-warning" weight="fill" />
-    <div className="min-w-0 flex-1 text-[0.8125rem]"><p className="font-medium">{qual === "audioSistema" ? "Permita capturar o áudio do Mac" : "Permita o microfone"}</p>
-      <p className="text-muted-foreground">{qual === "audioSistema" ? "É o que deixa o Dita.se ouvir outras pessoas da chamada. Nenhuma imagem da tela é gravada e o áudio não sai deste Mac." : "Para incluir a sua voz na transcrição da reunião como Você."}</p></div>
+    <div className="min-w-0 flex-1 text-[0.8125rem]"><p className="font-medium">{qual === "audioSistema" ? (win ? "Permita capturar o áudio do computador" : "Permita capturar o áudio do Mac") : "Permita o microfone"}</p>
+      <p className="text-muted-foreground">{qual === "audioSistema" ? (win ? "É o que deixa o Dita.se ouvir outras pessoas da chamada. Nenhuma imagem da tela é gravada e o áudio não sai deste computador." : "É o que deixa o Dita.se ouvir outras pessoas da chamada. Nenhuma imagem da tela é gravada e o áudio não sai deste Mac.") : "Para incluir a sua voz na transcrição da reunião como Você."}</p></div>
     <Button size="sm" onClick={() => void acaoLocal("permissao", { qual })}>Permitir</Button>
   </Inset>;
 }

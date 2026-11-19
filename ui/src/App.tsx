@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type DragEvent } from "react";
 import { Toaster, toast } from "@/components/ui/toast-stack";
 import { useDados, useHash } from "@/lib/dados";
 import { indicador, pagina as entradaDaPagina } from "@/lib/motion-tokens";
+import { plataforma } from "@/lib/plataforma";
 import { chamar, dentroDoApp, type Estado } from "@/lib/ponte";
 import { aceite, aplicarLote, arquivoEmCurso, extensao, extensoes, mesclarLancamento, tempo, type Lancamento, type IntervalosReuniao, type LoteReuniao } from "@/lib/lancamento";
 import { executar } from "@/lib/acoes-lancamento";
@@ -219,7 +220,8 @@ export default function App() {
 
 /** Rodapé da lateral: o que o app está fazendo agora e se os motores estão prontos. */
 function Situacao({ estado, lance }: { estado: Estado; lance?: Lancamento }) {
-  const semPermissao = estado.permissoes.microfone !== "concedida" || estado.permissoes.acessibilidade !== "concedida";
+  const win = plataforma() === "windows";
+  const semPermissao = estado.permissoes.microfone !== "concedida" || (!win && estado.permissoes.acessibilidade !== "concedida");
   let cor = "bg-positive";
   let texto = "Pronto para ditar";
   const reuniao = lance?.reuniao;
@@ -229,7 +231,10 @@ function Situacao({ estado, lance }: { estado: Estado; lance?: Lancamento }) {
     const gravando = reuniao.fase === "gravando";
     cor = gravando ? "bg-negative" : reuniao.fase === "pausada" ? "bg-warning" : "bg-brand";
     texto = reuniao.fase === "finalizando" ? "Fechando a reunião" : `${gravando ? "Em reunião" : "Reunião pausada"} · ${tempo(reuniao.duracao ?? 0)}`;
-    apoio = gravando ? (reuniao.fonte === "mac" ? "Só áudio do Mac" : "Áudio do Mac e microfone")
+    apoio = gravando
+      ? (reuniao.fonte === "mac"
+          ? (win ? "Só áudio do computador" : "Só áudio do Mac")
+          : (win ? "Áudio do computador e microfone" : "Áudio do Mac e microfone"))
       : reuniao.fase === "pausada" ? "Clique em Reunião para retomar" : "Separando vozes e resumindo";
   } else if (estado.fase === "gravando") {
     cor = "bg-negative";

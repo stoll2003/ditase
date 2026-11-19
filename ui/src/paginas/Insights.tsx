@@ -12,6 +12,7 @@ import { StatGrid } from "@/components/ui/stat-grid";
 import { Panel, Shell, ShellHeader } from "@/components/ui/surface";
 import { useDados } from "@/lib/dados";
 import { compacto, diaCurto, duracao, espera, numero, plural } from "@/lib/formato";
+import { plataforma } from "@/lib/plataforma";
 import type { Estatisticas } from "@/lib/ponte";
 
 const periodos = [
@@ -48,11 +49,12 @@ export function Insights() {
   const maiorApp = Math.max(1, ...e.porApp.map((a) => a.palavras));
   const horaDePico = e.porHora.indexOf(Math.max(...e.porHora));
 
+  const win = plataforma() === "windows";
   return (
     <>
       <Cabecalho
         titulo="Insights"
-        apoio={`${plural(e.totalDitados, "ditado", "ditados")} em ${plural(e.diasAtivos, "dia", "dias")} de uso. Tudo calculado neste Mac.`}
+        apoio={`${plural(e.totalDitados, "ditado", "ditados")} em ${plural(e.diasAtivos, "dia", "dias")} de uso. Tudo calculado neste ${win ? "computador" : "Mac"}.`}
       />
 
       <StatGrid

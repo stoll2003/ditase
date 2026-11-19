@@ -14,17 +14,20 @@ import { SearchField } from "@/components/ui/text-field";
 import { arquivoEmCurso, blocos, documentoCompleto, extensao, tempo, textoDoDocumento, type Arquivo, type FaseArquivo } from "@/lib/lancamento";
 import { cn } from "@/lib/utils";
 import { plural } from "@/lib/formato";
+import { plataforma } from "@/lib/plataforma";
 
-const fases: Record<FaseArquivo, [string, string, StatusTone]> = {
-  naFila: ["Na fila", "Aguardando o arquivo anterior terminar", "neutral"],
-  decodificando: ["Lendo o áudio", "Convertendo o arquivo para 16 kHz mono", "brand"],
-  transcrevendo: ["Transcrevendo", "Reconhecendo a fala no Parakeet Ultra", "brand"],
-  diarizando: ["Separando vozes", "Identificando quem falou em cada trecho", "brand"],
-  pronto: ["Pronto", "", "positive"],
-  formatoNaoSuportado: ["Formato não suportado", "O macOS não conseguiu abrir este formato. Use mp3, m4a, wav, aac, flac, mp4 ou mov.", "warning"],
-  semFala: ["Sem fala detectada", "O áudio foi lido até o fim, mas o reconhecedor não encontrou voz audível.", "neutral"],
-  falhou: ["Falhou", "Não foi possível concluir a transcrição deste arquivo.", "negative"],
-};
+function fasesDaPlataforma(win: boolean): Record<FaseArquivo, [string, string, StatusTone]> {
+  return {
+    naFila: ["Na fila", "Aguardando o arquivo anterior terminar", "neutral"],
+    decodificando: ["Lendo o áudio", "Convertendo o arquivo para 16 kHz mono", "brand"],
+    transcrevendo: ["Transcrevendo", "Reconhecendo a fala no Parakeet Ultra", "brand"],
+    diarizando: ["Separando vozes", "Identificando quem falou em cada trecho", "brand"],
+    pronto: ["Pronto", "", "positive"],
+    formatoNaoSuportado: ["Formato não suportado", `O ${win ? "Windows" : "macOS"} não conseguiu abrir este formato. Use mp3, m4a, wav, aac, flac, mp4 ou mov.`, "warning"],
+    semFala: ["Sem fala detectada", "O áudio foi lido até o fim, mas o reconhecedor não encontrou voz audível.", "neutral"],
+    falhou: ["Falhou", "Não foi possível concluir a transcrição deste arquivo.", "negative"],
+  };
+}
 function ArquivoCard({ arquivo, aberto, alternar }: { arquivo: Arquivo; aberto: boolean; alternar: () => void }) {
   const [bruto, mostrarBruto] = useState(false);
   const props = { arquivo, aberto, alternar, bruto, mostrarBruto };
@@ -39,7 +42,7 @@ function ArquivoAberto(props: Cartao) {
 }
 
 function ConteudoArquivo({ arquivo, aberto, alternar, bruto, mostrarBruto }: Cartao) {
-  const [titulo, descricao, tom] = fases[arquivo.fase];
+  const [titulo, descricao, tom] = fasesDaPlataforma(plataforma() === "windows")[arquivo.fase];
   const pronto = arquivo.fase === "pronto";
   const trabalhando = arquivoEmCurso(arquivo);
   const fila = arquivo.fase === "naFila";
@@ -96,8 +99,9 @@ export function Arquivos({ arquivos, selecionar, arrastando, destaque, disponive
   const termo = busca.trim().toLocaleLowerCase("pt-BR");
   const { dados: encontrados } = useDados<string[]>("lancamento.buscarArquivos", { termo }, ["lancamento"]);
   const filtrados = arquivos.filter((a) => !termo || a.nome.toLocaleLowerCase("pt-BR").includes(termo) || encontrados?.includes(a.id));
+  const win = plataforma() === "windows";
   return <>
-    <Cabecalho titulo="Arquivos" apoio="Transcreva gravações de áudio ou vídeo e separe quem falou em cada trecho. Tudo roda neste Mac."
+    <Cabecalho titulo="Arquivos" apoio={win ? "Transcreva gravações de áudio ou vídeo e separe quem falou em cada trecho. Tudo roda neste computador." : "Transcreva gravações de áudio ou vídeo e separe quem falou em cada trecho. Tudo roda neste Mac."}
       lado={<Button icon={FolderOpen} variant="primary" onClick={selecionar} disabled={!disponivel}>Escolher arquivo</Button>} />
     {!disponivel && <p role="status" className="mb-4 text-sm text-muted-foreground">A transcrição de arquivos está indisponível nesta versão do motor.</p>}
     <button type="button" onClick={selecionar} disabled={!disponivel} className={cn(
