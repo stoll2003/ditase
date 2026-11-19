@@ -15,6 +15,7 @@ fn main() {
     let raiz = Path::new(env!("CARGO_MANIFEST_DIR"));
     let ui = raiz.join("../../ui/dist");
     let pilula = raiz.join("../pilula/pilula.html");
+    let pilula_js = raiz.join("../pilula/pilula.js");
     let saida = raiz.join("../app-dist");
     let _ = fs::remove_dir_all(&saida);
     if ui.join("index.html").exists() {
@@ -26,8 +27,10 @@ fn main() {
         println!("cargo:warning=ui/dist ausente: app-dist usa página provisória");
     }
     fs::copy(&pilula, saida.join("pilula.html")).expect("windows/pilula/pilula.html");
+    fs::copy(&pilula_js, saida.join("pilula.js")).expect("windows/pilula/pilula.js");
     println!("cargo:rerun-if-changed=../../ui/dist");
     println!("cargo:rerun-if-changed=../pilula/pilula.html");
+    println!("cargo:rerun-if-changed=../pilula/pilula.js");
 
     let chave = raiz.join("../updater.pub");
     println!("cargo:rerun-if-changed=../updater.pub");
