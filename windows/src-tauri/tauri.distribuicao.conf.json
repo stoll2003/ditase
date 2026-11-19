@@ -1,0 +1,19 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "../vendor/sherpa/sherpa-onnx-c-api.dll": "sherpa-onnx-c-api.dll",
+      "../vendor/sherpa/onnxruntime.dll": "onnxruntime.dll",
+      "../vendor/sherpa/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
+      "../vendor/vcruntime/MSVCP140.dll": "MSVCP140.dll",
+      "../vendor/vcruntime/VCRUNTIME140.dll": "VCRUNTIME140.dll",
+      "../vendor/vcruntime/VCRUNTIME140_1.dll": "VCRUNTIME140_1.dll",
+      "../vendor/llama/*": "llama/",
+      "../vendor/vcruntime/*": "llama/",
+      "../vendor/avisos/*": "avisos/",
+      "../AVISOS-WINDOWS.md": "avisos/AVISOS-WINDOWS.md",
+      "../../THIRD-PARTY-NOTICES.md": "avisos/THIRD-PARTY-NOTICES.md",
+      "../../LICENSE": "avisos/LICENSE"
+    }
+  }
+}

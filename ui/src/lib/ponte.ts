@@ -1,6 +1,6 @@
 /**
- * Conversa com o app nativo. Dentro do Ditado, cada chamada vai para o Swift por
- * `window.webkit.messageHandlers.ditado`. Fora dele (navegador, durante o desenvolvimento)
+ * Conversa com o app nativo. No Mac, cada chamada vai para o Swift por
+ * `window.webkit.messageHandlers.ditado`; no Windows, para o Rust pelo `invoke` do Tauri. Fora do app (navegador)
  * as respostas vêm de dados de EXEMPLO em `exemplo.ts`.
  */
 import { responderDeExemplo, responderLancamento } from "./exemplo";
@@ -93,11 +93,36 @@ export type Ajustes = {
 };
 
 type Nativo = { postMessage(mensagem: unknown): Promise<string> };
+type Invocar = (comando: string, argumentos: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Windows: o app é Tauri e a chamada vai pelo comando `ponte` (mesmo contrato, mesma resposta
+ * em texto JSON). Os avisos chegam pelo mesmo `CustomEvent` do Mac, então `ouvir` não muda.
+ */
+function tauri(): Nativo | undefined {
+  const w = window as unknown as {
+    __TAURI__?: { core?: { invoke?: Invocar } };
+    __TAURI_INTERNALS__?: { invoke?: Invocar };
+  };
+  const invoke = w.__TAURI__?.core?.invoke ?? w.__TAURI_INTERNALS__?.invoke;
+  if (!invoke) return undefined;
+  return {
+    postMessage: async (mensagem) => {
+      const { metodo, params } = mensagem as { metodo: string; params: Record<string, unknown> };
+      return String(await invoke("ponte", { metodo, params }));
+    },
+  };
+}
 
 function nativo(): Nativo | undefined {
   return (window as unknown as { webkit?: { messageHandlers?: { ditado?: Nativo } } }).webkit?.messageHandlers
-    ?.ditado;
+    ?.ditado ?? tauri();
 }
+
+/** Plataforma do app nativo, para textos e atalhos que mudam no Windows. */
+export const plataforma = (): "mac" | "windows" | "navegador" =>
+  (window as unknown as { webkit?: { messageHandlers?: { ditado?: unknown } } }).webkit?.messageHandlers?.ditado
+    ? "mac" : tauri() ? "windows" : "navegador";
 
 export const dentroDoApp = () => nativo() !== undefined;
 

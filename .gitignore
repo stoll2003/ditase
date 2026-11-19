@@ -53,3 +53,5 @@ bench/privado/
 *.log
 /docs/plano-windows.md
 /target/
+/windows/app-dist/
+/windows/src-tauri/gen/

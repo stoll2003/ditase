@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "padrao",
+  "description": "A interface e a pílula só falam com o app pelo comando ponte.",
+  "windows": ["principal", "pilula"],
+  "permissions": ["core:default", "allow-ponte", "allow-pilula-acao"]
+}

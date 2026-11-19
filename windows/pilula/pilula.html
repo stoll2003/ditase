@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<title>Dita.se</title>
+<!-- Pílula do Windows. Primeira versão funcional; o desenho fino fica com o Dev Designer e o Dev Motion. -->
+<style>
+  :root { color-scheme: light dark; --fundo: rgba(24, 24, 27, .92); --texto: #fafafa; --suave: #a1a1aa; --vermelho: #ef4444; --verde: #22c55e; }
+  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; font: 13px/1.2 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
+  body { display: flex; align-items: center; justify-content: center; }
+  .pilula { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 8px 0 14px; border-radius: 999px; background: var(--fundo); color: var(--texto);
+    box-shadow: 0 6px 20px rgba(0,0,0,.35); transition: width .18s ease, opacity .18s ease; min-width: 40px; }
+  .pilula[data-fase="ociosa"] { padding: 0 8px; opacity: .85; }
+  button { all: unset; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 999px; cursor: default; color: var(--texto); }
+  button:hover { background: rgba(255,255,255,.12); }
+  button:focus-visible { outline: 2px solid var(--verde); outline-offset: 1px; }
+  .barras { display: flex; align-items: center; gap: 2px; height: 22px; }
+  .barras i { width: 3px; border-radius: 2px; background: var(--texto); height: 3px; transition: height 80ms linear; }
+  .tempo { font-variant-numeric: tabular-nums; color: var(--suave); min-width: 34px; }
+  .texto { max-width: 190px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .giro { width: 14px; height: 14px; border: 2px solid var(--suave); border-top-color: transparent; border-radius: 50%; animation: giro .9s linear infinite; }
+  @keyframes giro { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) { .giro { animation-duration: 3s; } .barras i, .pilula { transition: none; } }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<div class="pilula" data-fase="ociosa" role="status" aria-live="polite">
+  <button id="microfone" aria-label="Começar ditado em mãos livres" title="">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+  </button>
+  <div class="barras" id="barras" aria-hidden="true" hidden></div>
+  <span class="tempo" id="tempo" hidden>0:00</span>
+  <span class="giro" id="giro" aria-hidden="true" hidden></span>
+  <span class="texto" id="texto" hidden></span>
+  <button id="cancelar" aria-label="Cancelar ditado" hidden>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+  </button>
+  <button id="parar" aria-label="Parar e colar" hidden>
+    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="var(--vermelho)"/></svg>
+  </button>
+</div>
+<script>
+  const $ = (id) => document.getElementById(id);
+  const pilula = document.querySelector(".pilula");
+  const barras = $("barras");
+  const N = 14;
+  for (let i = 0; i < N; i++) barras.appendChild(document.createElement("i"));
+  const niveis = Array(N).fill(0);
+  let atalho = "";
+  let avisoAte = 0;
+
+  const invocar = (acao) => {
+    const t = window.__TAURI__?.core ?? window.__TAURI_INTERNALS__;
+    t?.invoke("pilula_acao", { acao });
+  };
+  $("microfone").onclick = () => invocar("alternar");
+  $("cancelar").onclick = () => invocar("cancelar");
+  $("parar").onclick = () => invocar("parar");
+
+  function mostrar(fase, texto) {
+    pilula.dataset.fase = fase;
+    const gravando = fase === "gravando" || fase === "maosLivres";
+    $("microfone").hidden = fase !== "ociosa" || !!texto;
+    $("barras").hidden = !gravando;
+    $("tempo").hidden = !gravando;
+    $("giro").hidden = fase !== "processando";
+    $("texto").hidden = !texto && fase !== "processando";
+    $("texto").textContent = texto ?? (fase === "processando" ? "Transcrevendo…" : "");
+    $("cancelar").hidden = !gravando;
+    $("parar").hidden = fase !== "maosLivres";
+    $("microfone").title = atalho ? `Segure ${atalho} para ditar. Clique para mãos livres.` : "";
+  }
+
+  window.pilula = (m) => {
+    switch (m.tipo) {
+      case "fase":
+        if (m.fase !== "ociosa") avisoAte = 0;
+        if (Date.now() < avisoAte && m.fase === "ociosa") return;
+        if (m.fase === "gravando" || m.fase === "maosLivres") { niveis.fill(0); $("tempo").textContent = "0:00"; }
+        mostrar(m.fase);
+        break;
+      case "aviso":
+        avisoAte = Date.now() + m.segundos * 1000;
+        mostrar("ociosa", m.texto);
+        setTimeout(() => { if (Date.now() >= avisoAte) mostrar("ociosa"); }, m.segundos * 1000 + 20);
+        break;
+      case "nivel":
+        niveis.shift(); niveis.push(m.nivel);
+        barras.querySelectorAll("i").forEach((b, i) => { b.style.height = `${3 + niveis[i] * 19}px`; });
+        break;
+      case "segundos":
+        $("tempo").textContent = `${Math.floor(m.segundos / 60)}:${String(m.segundos % 60).padStart(2, "0")}`;
+        break;
+      case "atalho":
+        atalho = m.simbolo; mostrar(pilula.dataset.fase);
+        break;
+      case "progresso":
+        if (pilula.dataset.fase === "processando" && m.progresso?.etapa) $("texto").textContent = m.progresso.etapa;
+        break;
+    }
+  };
+  mostrar("ociosa");
+</script>
+</body>
+</html>

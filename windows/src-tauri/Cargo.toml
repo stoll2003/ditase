@@ -3,7 +3,45 @@ name = "ditase"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Dita.se para Windows: casca Tauri, camada nativa e ponte"
+
+[[bin]]
+name = "ditase"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 nucleo = { path = "../../nucleo-rs" }
 motores = { path = "../../motores" }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "system-proxy", "zip"] }
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+cpal = "0.15"
+symphonia = { version = "0.5", default-features = false, features = ["wav", "pcm", "flac", "mp3", "isomp4", "aac"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_System_LibraryLoader",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+  "Win32_System_Ole",
+  "Win32_System_Com",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_Shell",
+  "Win32_Media_MediaFoundation",
+  "Win32_Graphics_Gdi",
+] }
+
+[features]
+# Usado pelo `tauri build`/`tauri dev`; não mude o nome.
+custom-protocol = ["tauri/custom-protocol"]
