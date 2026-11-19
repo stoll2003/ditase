@@ -1,0 +1,112 @@
+# Canal de teste do Windows, parte do GitHub: só compila.
+# Cada push na branch windows gera o instalador NSIS por usuário (sem assinatura do
+# atualizador) e guarda como artefato "canal-teste-windows":
+#   Dita.se-windows-x64-setup.exe   instalador
+#   versao.txt                      <versão do workspace>-teste.<número da execução>
+#   commit.txt                      commit do build
+# A assinatura do atualizador, o latest.json e o pre-release windows-teste são feitos
+# no Mac por scripts/windows/publicar-teste.sh, com a chave que fica só lá.
+name: Canal de teste (Windows)
+
+on:
+  push:
+    branches: [windows]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canal-teste-windows
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  INSTALADOR: Dita.se-windows-x64-setup.exe
+
+jobs:
+  compilar:
+    name: Instalador NSIS
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Conferir pré-requisitos
+        id: modo
+        shell: bash
+        run: |
+          if [ ! -f windows/src-tauri/tauri.conf.json ]; then
+            echo "tauri=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Sem windows/src-tauri/tauri.conf.json: nada para compilar ainda."
+            exit 0
+          fi
+          echo "tauri=true" >> "$GITHUB_OUTPUT"
+          base=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | head -n1)
+          if [ -z "$base" ]; then echo "::error::versão do workspace não encontrada em Cargo.toml"; exit 1; fi
+          versao="${base%%-*}-teste.${GITHUB_RUN_NUMBER}"
+          echo "versao=$versao" >> "$GITHUB_OUTPUT"
+          echo "Versão do canal: $versao"
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        if: steps.modo.outputs.tauri == 'true'
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.modo.outputs.tauri == 'true'
+        with:
+          shared-key: windows-x64
+          save-if: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.modo.outputs.tauri == 'true'
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Build da UI
+        if: steps.modo.outputs.tauri == 'true'
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: cargo test (workspace)
+        if: steps.modo.outputs.tauri == 'true'
+        run: cargo test --workspace --all-targets
+
+      - name: Build Tauri (NSIS por usuário, sem assinatura do atualizador)
+        if: steps.modo.outputs.tauri == 'true'
+        working-directory: windows
+        shell: bash
+        env:
+          VERSAO: ${{ steps.modo.outputs.versao }}
+        run: |
+          config=$(printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' "$VERSAO")
+          npx --yes @tauri-apps/cli@2 build --bundles nsis --ci --config "$config"
+
+      - name: Montar artefato
+        if: steps.modo.outputs.tauri == 'true'
+        shell: bash
+        env:
+          VERSAO: ${{ steps.modo.outputs.versao }}
+        run: |
+          set -euo pipefail
+          mkdir -p saida
+          exe=$(ls target/release/bundle/nsis/*-setup.exe | head -n1)
+          cp "$exe" "saida/$INSTALADOR"
+          printf '%s\n' "$VERSAO" > saida/versao.txt
+          printf '%s\n' "$GITHUB_SHA" > saida/commit.txt
+          (cd saida && sha256sum "$INSTALADOR")
+
+      - name: Guardar artefato
+        if: steps.modo.outputs.tauri == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canal-teste-windows
+          path: saida/
+          if-no-files-found: error
+          retention-days: 14
