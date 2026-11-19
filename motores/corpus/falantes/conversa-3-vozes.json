@@ -1,0 +1,38 @@
+[
+ {
+  "voz": "voz-a",
+  "inicio": 0.0,
+  "fim": 4.689,
+  "texto": "olá, tudo bem? vamos começar a reunião sobre o caso da empresa."
+ },
+ {
+  "voz": "voz-b",
+  "inicio": 5.189,
+  "fim": 11.032,
+  "texto": "tudo certo. eu li os documentos e acho que temos bons argumentos."
+ },
+ {
+  "voz": "voz-a",
+  "inicio": 11.532,
+  "fim": 15.061,
+  "texto": "ótimo. qual é o ponto mais forte da nossa defesa?"
+ },
+ {
+  "voz": "voz-b",
+  "inicio": 15.561,
+  "fim": 20.774,
+  "texto": "a falta de provas do dano. a outra parte não juntou nenhum laudo."
+ },
+ {
+  "voz": "voz-c",
+  "inicio": 21.274,
+  "fim": 27.429,
+  "texto": "concordo, mas precisamos responder à questão da prescrição também."
+ },
+ {
+  "voz": "voz-a",
+  "inicio": 27.929,
+  "fim": 32.414,
+  "texto": "bem lembrado. então fechamos assim e cada um prepara a sua parte."
+ }
+]

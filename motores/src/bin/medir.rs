@@ -1,0 +1,339 @@
+//! Medição dos motores sobre um corpus de WAVs com transcrição de referência.
+//!
+//! Uso:
+//!   medir --corpus motores/corpus [--modelos DIR] [--baixar] [--threads N]
+//!         [--falantes] [--llama BIN --gguf ARQ] [--json SAIDA.json]
+//!
+//! Corpus: `<nome>.wav` (qualquer taxa, mono ou estéreo) com `<nome>.txt` ao lado (referência).
+//! Falantes: `falantes/<nome>.wav` com `falantes/<nome>.json` = [{"voz","inicio","fim"}, ...].
+//! Mede: tempo de carga, RTF (tempo de processamento / duração do áudio), RAM de pico do
+//! processo e WER (minúsculas, sem pontuação, acentos contam). Com `--falantes`, número de
+//! vozes e erro de atribuição por quadro de 10 ms. Com `--llama`, latência da limpeza.
+use motores::catalogo::{self, FALANTES, PARAKEET};
+use motores::fala::Parakeet;
+use motores::falantes::{Diarizador, LIMIAR_PADRAO};
+use motores::llama::{Ajustes, ServidorLlama, PROMPT_LIMPEZA};
+use motores::medicao::{erros_de_palavras, ram_de_pico};
+use motores::{
+    audio, FaixaDeVoz, IdentificadorDeFalantes, Limpador, PedidoLimpeza, Transcritor, TAXA,
+};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+fn mb(b: u64) -> f64 {
+    b as f64 / (1024.0 * 1024.0)
+}
+
+struct Args {
+    corpus: PathBuf,
+    modelos: PathBuf,
+    baixar: bool,
+    threads: usize,
+    falantes: bool,
+    llama: Option<PathBuf>,
+    gguf: Option<PathBuf>,
+    json: Option<PathBuf>,
+}
+
+fn args() -> Args {
+    let mut a = Args {
+        corpus: PathBuf::from("motores/corpus"),
+        modelos: motores::pasta_de_teste(),
+        baixar: false,
+        threads: 0,
+        falantes: false,
+        llama: None,
+        gguf: None,
+        json: None,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(x) = it.next() {
+        let mut v = || it.next().unwrap_or_else(|| panic!("{x} pede um valor"));
+        match x.as_str() {
+            "--corpus" => a.corpus = v().into(),
+            "--modelos" => a.modelos = v().into(),
+            "--threads" => a.threads = v().parse().expect("--threads N"),
+            "--llama" => a.llama = Some(v().into()),
+            "--gguf" => a.gguf = Some(v().into()),
+            "--json" => a.json = Some(v().into()),
+            "--baixar" => a.baixar = true,
+            "--falantes" => a.falantes = true,
+            outro => panic!("opção desconhecida: {outro}"),
+        }
+    }
+    a
+}
+
+fn pares(pasta: &Path, extensao: &str) -> Vec<(PathBuf, PathBuf)> {
+    let mut v: Vec<_> = std::fs::read_dir(pasta)
+        .map(|d| {
+            d.filter_map(Result::ok)
+                .map(|e| e.path())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p.extension().is_some_and(|e| e == "wav"))
+        .filter_map(|w| {
+            let r = w.with_extension(extensao);
+            r.is_file().then_some((w, r))
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Erro de atribuição por quadro de 10 ms, com o melhor casamento entre vozes (força bruta,
+/// poucas vozes). Fala perdida, fala inventada e voz trocada contam como erro.
+fn erro_de_diarizacao(refe: &[FaixaDeVoz], hip: &[FaixaDeVoz], duracao: f64) -> f64 {
+    let quadros = (duracao * 100.0).ceil() as usize;
+    let rotulos = |fs: &[FaixaDeVoz]| {
+        let mut nomes: Vec<String> = fs.iter().map(|f| f.voz.clone()).collect();
+        nomes.sort();
+        nomes.dedup();
+        let mut q = vec![None; quadros];
+        for f in fs {
+            let k = nomes.iter().position(|n| *n == f.voz).unwrap();
+            let de = ((f.inicio * 100.0) as usize).min(quadros);
+            let ate = ((f.fim * 100.0) as usize).min(quadros);
+            q[de..ate.max(de)].fill(Some(k));
+        }
+        (q, nomes.len())
+    };
+    let (qr, nr) = rotulos(refe);
+    let (qh, nh) = rotulos(hip);
+    let fala = qr.iter().filter(|x| x.is_some()).count().max(1);
+    let mut melhor = usize::MAX;
+    let mut perm: Vec<usize> = (0..nh.max(nr)).collect();
+    permutar(&mut perm, 0, &mut |p| {
+        let erros = qr.iter().zip(&qh).filter(|(r, h)| match (r, h) {
+            (None, None) => false,
+            (Some(r), Some(h)) => p[*h] != *r,
+            _ => true,
+        });
+        melhor = melhor.min(erros.count());
+    });
+    melhor as f64 / fala as f64
+}
+
+fn permutar(v: &mut Vec<usize>, k: usize, f: &mut dyn FnMut(&[usize])) {
+    if k >= v.len() {
+        return f(v);
+    }
+    for i in k..v.len() {
+        v.swap(k, i);
+        permutar(v, k + 1, f);
+        v.swap(k, i);
+    }
+}
+
+fn main() {
+    let a = args();
+    let mut rel = serde_json::Map::new();
+    rel.insert(
+        "plataforma".into(),
+        format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH).into(),
+    );
+    rel.insert(
+        "threads_cpu".into(),
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0)
+            .into(),
+    );
+
+    if a.baixar {
+        for c in [&PARAKEET, &FALANTES] {
+            catalogo::baixar_conjunto(c, &a.modelos, &mut |arq, f, t| {
+                if f == t {
+                    eprintln!("ok {arq}");
+                }
+            })
+            .expect("download");
+        }
+    }
+
+    // --- Fala
+    let ram_inicial = ram_de_pico();
+    let t0 = Instant::now();
+    let parakeet =
+        Parakeet::carregar(&PARAKEET.caminho(&a.modelos), a.threads).expect("carregar Parakeet");
+    let carga = t0.elapsed().as_secs_f64();
+    let corpus = pares(&a.corpus, "txt");
+    assert!(
+        !corpus.is_empty(),
+        "nenhum par .wav/.txt em {}",
+        a.corpus.display()
+    );
+    println!("Parakeet TDT 0.6B v3 INT8 (sherpa-onnx, CPU): carga {carga:.2} s");
+    println!(
+        "{:<28} {:>7} {:>7} {:>6} {:>6}  transcrição",
+        "arquivo", "áudio s", "proc s", "RTF", "WER"
+    );
+    let (mut erros, mut total, mut audio_s, mut proc_s) = (0, 0, 0.0, 0.0);
+    let mut itens = Vec::new();
+    let mut frases = Vec::new();
+    for (wav, txt) in &corpus {
+        let amostras = audio::ler_wav(wav).expect("ler wav");
+        let referencia = std::fs::read_to_string(txt).unwrap();
+        let dur = amostras.len() as f64 / TAXA as f64;
+        let t = Instant::now();
+        let texto = parakeet.transcrever(&amostras).expect("transcrever");
+        let p = t.elapsed().as_secs_f64();
+        let (e, n) = erros_de_palavras(&referencia, &texto);
+        let nome = wav.file_stem().unwrap().to_string_lossy().to_string();
+        println!(
+            "{:<28} {:>7.2} {:>7.2} {:>6.3} {:>5.1}%  {}",
+            nome,
+            dur,
+            p,
+            p / dur,
+            100.0 * e as f64 / n as f64,
+            texto
+        );
+        erros += e;
+        total += n;
+        audio_s += dur;
+        proc_s += p;
+        frases.push((texto.clone(), referencia.clone()));
+        itens.push(serde_json::json!({"arquivo": nome, "audio_s": dur, "proc_s": p, "erros": e, "palavras": n, "texto": texto, "referencia": referencia.trim()}));
+    }
+    let ram_fala = ram_de_pico();
+    let wer = 100.0 * erros as f64 / total.max(1) as f64;
+    println!(
+        "TOTAL: {} arquivos, {audio_s:.1} s de áudio, RTF {:.3}, WER {wer:.2}% ({erros}/{total}), RAM de pico {:.0} MB (antes da carga {:.0} MB)",
+        corpus.len(),
+        proc_s / audio_s,
+        mb(ram_fala),
+        mb(ram_inicial)
+    );
+    rel.insert(
+        "fala".into(),
+        serde_json::json!({"modelo": "parakeet-tdt-0.6b-v3-int8", "carga_s": carga, "audio_s": audio_s, "proc_s": proc_s,
+            "rtf": proc_s / audio_s, "wer_pct": wer, "erros": erros, "palavras": total, "ram_pico_mb": mb(ram_fala), "itens": itens}),
+    );
+
+    // --- Falantes
+    if a.falantes {
+        let t0 = Instant::now();
+        let diar = Diarizador::carregar(
+            &FALANTES.caminho(&a.modelos),
+            None,
+            LIMIAR_PADRAO,
+            a.threads,
+        )
+        .expect("carregar diarização");
+        let carga = t0.elapsed().as_secs_f64();
+        println!("\nDiarização (pyannote 3.0 + CAM++, sherpa-onnx): carga {carga:.2} s, limiar {LIMIAR_PADRAO}");
+        let mut itens = Vec::new();
+        for (wav, js) in pares(&a.corpus.join("falantes"), "json") {
+            let refe: Vec<FaixaDeVoz> = serde_json::from_str::<Vec<serde_json::Value>>(
+                &std::fs::read_to_string(&js).unwrap(),
+            )
+            .unwrap()
+            .iter()
+            .map(|v| FaixaDeVoz {
+                voz: v["voz"].as_str().unwrap().into(),
+                inicio: v["inicio"].as_f64().unwrap(),
+                fim: v["fim"].as_f64().unwrap(),
+            })
+            .collect();
+            let dur = audio::ler_wav(&wav).unwrap().len() as f64 / TAXA as f64;
+            let t = Instant::now();
+            let hip = diar.faixas(&wav).expect("diarizar");
+            let p = t.elapsed().as_secs_f64();
+            let mut vr: Vec<_> = refe.iter().map(|f| &f.voz).collect();
+            vr.sort();
+            vr.dedup();
+            let mut vh: Vec<_> = hip.iter().map(|f| &f.voz).collect();
+            vh.sort();
+            vh.dedup();
+            let der = erro_de_diarizacao(&refe, &hip, dur);
+            let nome = wav.file_stem().unwrap().to_string_lossy().to_string();
+            println!(
+                "{nome:<28} áudio {dur:.1} s, proc {p:.2} s (RTF {:.3}), vozes {} de {}, erro por quadro {:.1}%",
+                p / dur,
+                vh.len(),
+                vr.len(),
+                der * 100.0
+            );
+            itens.push(serde_json::json!({"arquivo": nome, "audio_s": dur, "proc_s": p, "vozes_ref": vr.len(), "vozes_obtidas": vh.len(), "erro_quadro": der}));
+        }
+        rel.insert(
+            "falantes".into(),
+            serde_json::json!({"carga_s": carga, "ram_pico_mb": mb(ram_de_pico()), "itens": itens}),
+        );
+        println!("RAM de pico com diarização: {:.0} MB", mb(ram_de_pico()));
+    }
+
+    // --- Limpeza
+    if let (Some(bin), Some(gguf)) = (&a.llama, &a.gguf) {
+        let servidor = ServidorLlama::novo(bin, PROMPT_LIMPEZA, Ajustes::default());
+        let t0 = Instant::now();
+        servidor.garantir(gguf).expect("subir llama-server");
+        let subida = t0.elapsed().as_secs_f64();
+        let limpador = servidor.limpador(gguf);
+        println!(
+            "\nLimpeza ({}, llama-server): subida + aquecimento {subida:.2} s",
+            limpador.nome()
+        );
+        let mut tempos = Vec::new();
+        let mut itens = Vec::new();
+        let (mut erros_l, mut total_l) = (0, 0);
+        for (f, referencia) in &frases {
+            let t = Instant::now();
+            let r = limpador.limpar(&PedidoLimpeza {
+                transcricao: f.clone(),
+                ..Default::default()
+            });
+            let p = t.elapsed().as_secs_f64();
+            tempos.push(p);
+            let saida = r.unwrap_or_else(|e| format!("ERRO: {e}"));
+            let (e, n) = erros_de_palavras(referencia, &saida);
+            erros_l += e;
+            total_l += n;
+            println!("{p:>6.2} s  {saida}");
+            itens.push(serde_json::json!({"entrada": f, "saida": saida, "s": p}));
+        }
+        servidor.parar();
+        tempos.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let mediana = tempos.get(tempos.len() / 2).copied().unwrap_or(0.0);
+        let ram_filho = ram_de_pico_filhos();
+        println!(
+            "Limpeza: mediana {mediana:.2} s, máximo {:.2} s, WER depois da limpeza {:.2}%, RAM de pico do llama-server {}",
+            tempos.last().copied().unwrap_or(0.0),
+            100.0 * erros_l as f64 / total_l.max(1) as f64,
+            ram_filho.map(|b| format!("{:.0} MB", mb(b))).unwrap_or_else(|| "n/d".into())
+        );
+        rel.insert(
+            "limpeza".into(),
+            serde_json::json!({"subida_s": subida, "mediana_s": mediana, "wer_pct": 100.0 * erros_l as f64 / total_l.max(1) as f64, "ram_pico_servidor_mb": ram_filho.map(mb), "itens": itens}),
+        );
+    }
+
+    if let Some(j) = &a.json {
+        std::fs::write(
+            j,
+            serde_json::to_string_pretty(&serde_json::Value::Object(rel)).unwrap(),
+        )
+        .expect("gravar json");
+        println!("\nrelatório: {}", j.display());
+    }
+}
+
+/// RAM de pico dos processos filhos já encerrados (llama-server). Só Unix.
+fn ram_de_pico_filhos() -> Option<u64> {
+    #[cfg(unix)]
+    unsafe {
+        let mut u: libc::rusage = std::mem::zeroed();
+        libc::getrusage(libc::RUSAGE_CHILDREN, &mut u);
+        let b = if cfg!(target_os = "macos") {
+            u.ru_maxrss as u64
+        } else {
+            u.ru_maxrss as u64 * 1024
+        };
+        return (b > 0).then_some(b);
+    }
+    #[allow(unreachable_code)]
+    None
+}
