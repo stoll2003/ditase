@@ -51,3 +51,5 @@ bench/privado/
 *.keychain*
 *.senha
 *.log
+/docs/plano-windows.md
+/target/

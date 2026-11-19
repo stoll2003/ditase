@@ -1,0 +1,8 @@
+[package]
+name = "motores"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nucleo = { path = "../nucleo-rs" }

@@ -1,0 +1,9 @@
+[package]
+name = "ditase"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nucleo = { path = "../../nucleo-rs" }
+motores = { path = "../../motores" }

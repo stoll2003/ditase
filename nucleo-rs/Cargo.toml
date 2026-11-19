@@ -1,0 +1,7 @@
+[package]
+name = "nucleo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
