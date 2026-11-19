@@ -14,7 +14,7 @@ Se aparecer a tela azul "O Windows protegeu o computador", clique em **Mais info
 
 ## Depois disso
 
-Você não precisa copiar nem baixar mais nada. Cada vez que uma versão de teste nova fica pronta, ela é publicada sozinha, e o Dita.se avisa e se atualiza **quando você abrir o app**. O número da versão termina em `-teste.N`; quanto maior o N, mais nova.
+Você não precisa copiar nem baixar mais nada. Cada vez que o Dev Founder publica uma versão de teste nova (o GitHub compila e o Mac assina e publica), o Dita.se avisa e se atualiza **quando você abrir o app**. O número da versão termina em `-teste.N`; quanto maior o N, mais nova.
 
 Se algo der errado com a atualização, basta rodar a mesma linha de novo: ela reinstala por cima e mantém seus dados.
 

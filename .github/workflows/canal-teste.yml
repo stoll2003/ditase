@@ -1,12 +1,11 @@
-# Canal de teste do Windows.
-# Cada push na branch windows gera o instalador NSIS assinado para o atualizador
-# do Tauri (chave gratuita, não é certificado de código) e publica no pre-release
-# fixo de tag windows-teste, substituindo os assets:
-#   Dita.se-windows-x64-setup.exe      instalador (nome fixo, usado pelo install.ps1)
-#   Dita.se-windows-x64-setup.exe.sig  assinatura do atualizador
-#   latest.json                        manifesto lido pelo app ao abrir
-#   SHA256SUMS.txt                     hashes conferidos pelo install.ps1
-# Versão: <versão do workspace>-teste.<número da execução>, ex.: 0.2.0-teste.17.
+# Canal de teste do Windows, parte do GitHub: só compila.
+# Cada push na branch windows gera o instalador NSIS por usuário (sem assinatura do
+# atualizador) e guarda como artefato "canal-teste-windows":
+#   Dita.se-windows-x64-setup.exe   instalador
+#   versao.txt                      <versão do workspace>-teste.<número da execução>
+#   commit.txt                      commit do build
+# A assinatura do atualizador, o latest.json e o pre-release windows-teste são feitos
+# no Mac por scripts/windows/publicar-teste.sh, com a chave que fica só lá.
 name: Canal de teste (Windows)
 
 on:
@@ -24,18 +23,13 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  TAG: windows-teste
   INSTALADOR: Dita.se-windows-x64-setup.exe
 
 jobs:
-  publicar:
-    name: Build e publicação
-    # Só publica a partir da branch windows, mesmo se disparado à mão de outra.
-    if: github.ref == 'refs/heads/windows'
+  compilar:
+    name: Instalador NSIS
     runs-on: windows-2025
     timeout-minutes: 60
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -45,7 +39,7 @@ jobs:
         run: |
           if [ ! -f windows/src-tauri/tauri.conf.json ]; then
             echo "tauri=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Sem windows/src-tauri/tauri.conf.json: nada para publicar ainda."
+            echo "::warning::Sem windows/src-tauri/tauri.conf.json: nada para compilar ainda."
             exit 0
           fi
           echo "tauri=true" >> "$GITHUB_OUTPUT"
@@ -54,21 +48,6 @@ jobs:
           versao="${base%%-*}-teste.${GITHUB_RUN_NUMBER}"
           echo "versao=$versao" >> "$GITHUB_OUTPUT"
           echo "Versão do canal: $versao"
-
-      - name: Conferir chave do atualizador
-        if: steps.modo.outputs.tauri == 'true'
-        shell: bash
-        env:
-          TEM_CHAVE: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
-        run: |
-          if [ "$TEM_CHAVE" != "true" ]; then
-            echo "::error::Secret TAURI_SIGNING_PRIVATE_KEY ausente. Rode scripts/windows/gerar-chaves-atualizador.sh no Mac."
-            exit 1
-          fi
-          if [ ! -s windows/updater.pub ]; then
-            echo "::error::windows/updater.pub ausente."
-            exit 1
-          fi
 
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         if: steps.modo.outputs.tauri == 'true'
@@ -99,19 +78,17 @@ jobs:
         if: steps.modo.outputs.tauri == 'true'
         run: cargo test --workspace --all-targets
 
-      - name: Build Tauri (NSIS por usuário, com atualizador)
+      - name: Build Tauri (NSIS por usuário, sem assinatura do atualizador)
         if: steps.modo.outputs.tauri == 'true'
         working-directory: windows
         shell: bash
         env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           VERSAO: ${{ steps.modo.outputs.versao }}
         run: |
-          config=$(printf '{"version":"%s","bundle":{"createUpdaterArtifacts":true,"windows":{"nsis":{"installMode":"currentUser"}}}}' "$VERSAO")
+          config=$(printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' "$VERSAO")
           npx --yes @tauri-apps/cli@2 build --bundles nsis --ci --config "$config"
 
-      - name: Montar assets
+      - name: Montar artefato
         if: steps.modo.outputs.tauri == 'true'
         shell: bash
         env:
@@ -120,55 +97,16 @@ jobs:
           set -euo pipefail
           mkdir -p saida
           exe=$(ls target/release/bundle/nsis/*-setup.exe | head -n1)
-          sig="$exe.sig"
-          if [ ! -f "$exe" ] || [ ! -f "$sig" ]; then
-            echo "::error::instalador ou assinatura não encontrados em target/release/bundle/nsis"
-            ls -la target/release/bundle/nsis || true
-            exit 1
-          fi
           cp "$exe" "saida/$INSTALADOR"
-          cp "$sig" "saida/$INSTALADOR.sig"
-          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${INSTALADOR}"
-          VERSAO="$VERSAO" URL="$url" SIG_FILE="saida/$INSTALADOR.sig" SHA="$GITHUB_SHA" node -e '
-            const fs = require("fs");
-            const manifesto = {
-              version: process.env.VERSAO,
-              notes: "Versão de teste " + process.env.VERSAO + " (commit " + process.env.SHA.slice(0, 7) + ")",
-              pub_date: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-              platforms: {
-                "windows-x86_64": {
-                  signature: fs.readFileSync(process.env.SIG_FILE, "utf8").trim(),
-                  url: process.env.URL
-                }
-              }
-            };
-            fs.writeFileSync("saida/latest.json", JSON.stringify(manifesto, null, 2) + "\n");
-          '
-          (cd saida && sha256sum "$INSTALADOR" latest.json > SHA256SUMS.txt)
-          cat saida/latest.json
-          cat saida/SHA256SUMS.txt
+          printf '%s\n' "$VERSAO" > saida/versao.txt
+          printf '%s\n' "$GITHUB_SHA" > saida/commit.txt
+          (cd saida && sha256sum "$INSTALADOR")
 
-      - name: Publicar no pre-release windows-teste
+      - name: Guardar artefato
         if: steps.modo.outputs.tauri == 'true'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSAO: ${{ steps.modo.outputs.versao }}
-        run: |
-          set -euo pipefail
-          notas="Canal de teste do Dita.se para Windows. Não é versão estável.
-          Versão ${VERSAO}, commit ${GITHUB_SHA}.
-          Primeira instalação (PowerShell): irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/windows/scripts/install.ps1 | iex"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            # Move a tag para o commit deste build.
-            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" -f sha="$GITHUB_SHA" -F force=true >/dev/null
-            gh release edit "$TAG" --prerelease --latest=false --title "Windows teste ${VERSAO}" --notes "$notas"
-          else
-            gh release create "$TAG" --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Windows teste ${VERSAO}" --notes "$notas"
-          fi
-          # latest.json por último: o app só vê a versão nova quando o instalador já está lá.
-          gh release upload "$TAG" --clobber \
-            "saida/$INSTALADOR" "saida/$INSTALADOR.sig" saida/SHA256SUMS.txt
-          gh release upload "$TAG" --clobber saida/latest.json
-          echo "Publicado: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}"
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: canal-teste-windows
+          path: saida/
+          if-no-files-found: error
+          retention-days: 14
