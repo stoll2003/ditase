@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "allow-ponte"
+description = "Chamadas do contrato da ponte (docs/contrato-ponte-lancamento.md)."
+commands.allow = ["ponte"]
+
+[[permission]]
+identifier = "allow-pilula-acao"
+description = "Botões da pílula: parar, cancelar, alternar, pausar e encerrar reunião."
+commands.allow = ["pilula_acao"]
