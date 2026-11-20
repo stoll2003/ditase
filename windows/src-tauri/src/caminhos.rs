@@ -130,7 +130,10 @@ pub fn migrar(velha: &Path, nova: &Path) -> io::Result<usize> {
         for n in &presentes {
             fs::copy(velha.join(n), temporario(n))?;
             // No Windows, FlushFileBuffers exige o arquivo aberto para escrita.
-            fs::OpenOptions::new().write(true).open(temporario(n))?.sync_all()?;
+            fs::OpenOptions::new()
+                .write(true)
+                .open(temporario(n))?
+                .sync_all()?;
         }
         for n in &presentes {
             fs::rename(temporario(n), nova.join(n))?;
