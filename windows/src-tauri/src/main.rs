@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use tauri::{
     menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, DragDropEvent, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+    AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
@@ -68,6 +68,19 @@ pub fn iniciar_com_windows(app: &AppHandle, ligar: bool) {
     let auto = app.autolaunch();
     let r = if ligar { auto.enable() } else { auto.disable() };
     if let Err(e) = r { caminhos::nota(format!("iniciar com o Windows: {e}")); }
+}
+
+/// Saída do app (bandeja, reinício do atualizador ou fim pelo Windows), uma vez só: o ditado em
+/// curso grava o que falta, o coletor da reunião grava o que estava em memória, e o servidor de IA
+/// para. O que não terminou volta pela recuperação na próxima abertura. Teto total de cerca de 2 s.
+pub fn desligar_tudo(casca: &Casca) {
+    static FEITO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if FEITO.swap(true, std::sync::atomic::Ordering::AcqRel) { return; }
+    let inicio = std::time::Instant::now();
+    casca.controlador.desligar(Duration::from_millis(1200));
+    casca.lancamento.desligar(Duration::from_millis(2000).saturating_sub(inicio.elapsed()).max(Duration::from_millis(500)));
+    casca.integracao.motores.desligar();
+    caminhos::nota(format!("saída: desligado em {:.2} s", inicio.elapsed().as_secs_f64()));
 }
 
 fn mostrar_principal(app: &AppHandle) {
@@ -142,7 +155,7 @@ fn bandeja(app: &AppHandle, iniciar: bool) -> tauri::Result<()> {
                     casca.pilula.avisar(aviso, 3.0);
                 }
                 "atualizar" => { let a = app.clone(); tauri::async_runtime::spawn(async move { procurar_atualizacao(a, true).await }); }
-                "sair" => { casca.controlador.desligar(); casca.lancamento.desligar(Duration::from_secs(2)); app.exit(0); }
+                "sair" => { desligar_tudo(&casca); app.exit(0); }
                 _ => {}
             }
         })
@@ -171,7 +184,11 @@ async fn procurar_atualizacao(app: AppHandle, manual: bool) {
         Ok(Some(true))
     }.await;
     match resultado {
-        Ok(Some(true)) => { caminhos::nota("atualização: instalada; reiniciando"); app.restart(); }
+        Ok(Some(true)) => {
+            caminhos::nota("atualização: instalada; reiniciando");
+            if let Some(c) = app.try_state::<Arc<Casca>>() { desligar_tudo(&c); }
+            app.restart();
+        }
         Ok(Some(false)) => caminhos::nota("atualização: adiada"),
         Ok(None) => {
             caminhos::nota("atualização: já é a mais recente");
@@ -232,8 +249,14 @@ fn main() {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("Dita.se não abriu");
+        .build(tauri::generate_context!())
+        .expect("Dita.se não abriu")
+        .run(|app, evento| {
+            // Fim pelo Windows (desligar o PC, sair da sessão) ou qualquer saída que não passou pela bandeja.
+            if let RunEvent::Exit = evento {
+                if let Some(c) = app.try_state::<Arc<Casca>>() { desligar_tudo(&c); }
+            }
+        });
 }
 
 async fn tokio_espera(d: Duration) { let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(d)).await; }

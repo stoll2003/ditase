@@ -91,7 +91,7 @@ impl Vivo {
     }
 }
 
-struct Ativa { doc: String, vivo: Arc<Vivo>, capturas: Vec<Box<dyn Send>>, envio: mpsc::Sender<Captado> }
+struct Ativa { doc: String, vivo: Arc<Vivo>, capturas: Vec<Box<dyn Send>>, envio: mpsc::Sender<Captado>, coletor_fim: Arc<AtomicBool> }
 
 pub struct Lancamento {
     banco: PathBuf,
@@ -111,6 +111,8 @@ pub struct Lancamento {
     resumo_cancelado: Arc<AtomicBool>,
     /// App saindo: a reunião em curso fecha sem resumo e nada novo começa.
     desligando: AtomicBool,
+    /// O resumo está sendo gerado agora (a interface mostra "Cancelar resumo" com `etapa: resumindo`).
+    resumindo: AtomicBool,
 }
 
 fn uuid() -> String {
@@ -127,6 +129,32 @@ fn uuid() -> String {
     };
     let (a, b) = (parte(1), parte(2));
     format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}", a >> 32, (a >> 16) & 0xffff, a & 0xfff, 0x8000 | (b >> 48 & 0x3fff), b & 0xffff_ffff_ffff)
+}
+
+/// Marca de "app fechando" no processamento da reunião.
+#[derive(Debug)]
+struct Desligando;
+impl std::fmt::Display for Desligando { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("app fechando") } }
+impl std::error::Error for Desligando {}
+
+/// Alterna pausa e gravação. A ordem importa: na pausa, a captura para de enviar antes do
+/// `Pausar`; na retomada, o `Retomar` entra no canal antes de a captura voltar a enviar. Assim
+/// nenhum bloco de depois da retomada chega ao coletor com a linha do tempo ainda pausada.
+fn alternar_pausa(vivo: &Vivo, enviar: impl FnOnce(Captado)) -> bool {
+    let t = vivo.relogio.elapsed().as_secs_f64();
+    let pausar = !vivo.pausada.load(Ordering::Acquire);
+    {
+        let mut pausas = vivo.pausas.lock().unwrap();
+        if pausar { pausas.1 = Some(t); } else if let Some(d) = pausas.1.take() { pausas.0 += t - d; }
+    }
+    if pausar {
+        vivo.pausada.store(true, Ordering::Release);
+        enviar(Captado::Pausar(t));
+    } else {
+        enviar(Captado::Retomar(t));
+        vivo.pausada.store(false, Ordering::Release);
+    }
+    pausar
 }
 
 fn trecho_json(t: &TrechoNovo) -> Value {
@@ -149,7 +177,7 @@ impl Lancamento {
             banco: banco.to_path_buf(), disco, trabalho, motores, capturador, preparar, avisar,
             leitor: Mutex::new(leitor), fila: Arc::new(Mutex::new(Vec::new())), caminhos: Mutex::new(HashMap::new()),
             envio: Mutex::new(tx), reuniao: Mutex::new(None), finalizando: Arc::new(Mutex::new(None)),
-            resumo_cancelado: Arc::new(AtomicBool::new(false)), desligando: AtomicBool::new(false),
+            resumo_cancelado: Arc::new(AtomicBool::new(false)), desligando: AtomicBool::new(false), resumindo: AtomicBool::new(false),
         });
         let fraco = Arc::downgrade(&servico);
         thread::Builder::new().name("ditase.arquivos".into()).spawn(move || {
@@ -193,11 +221,20 @@ impl Lancamento {
         let reuniao = match &atual { Some(id) => leitor.documento(id)?, None => None };
         let mut reuniao = reuniao.map(serde_json::to_value).transpose()?;
         if let (Some(r), Some(f)) = (reuniao.as_mut(), self.finalizando.lock().unwrap().as_ref()) {
-            if r["id"] == json!(f) { r["fase"] = json!("finalizando"); }
+            if r["id"] == json!(f) {
+                r["fase"] = json!("finalizando");
+                r["etapa"] = json!(if self.resumindo.load(Ordering::Acquire) { "resumindo" } else { "passadaFinal" });
+            }
         }
         let anteriores: Vec<TranscricaoLonga> = leitor.lista("reuniao")?.into_iter()
             .filter(|d| d.oculto != Some(true) && Some(&d.id) != atual.as_ref() && d.fase == "pronta").collect();
-        let recuperaveis = leitor.recuperaveis(atual.as_deref())?;
+        // O núcleo não tem campo próprio para o erro do processamento: a casca guarda em `aviso`.
+        let recuperaveis: Vec<Value> = leitor.recuperaveis(atual.as_deref())?.into_iter().map(|d| {
+            let aviso = d.aviso.clone();
+            let mut v = serde_json::to_value(d).unwrap_or_default();
+            if v.get("erroProcessamento").is_none() { if let Some(a) = aviso { v["erroProcessamento"] = json!(a); } }
+            v
+        }).collect();
         let mut v = json!({
             "arquivos": arquivos, "anteriores": anteriores, "recuperaveis": recuperaveis,
             "permissoes": {"audioSistema": "concedida", "microfone": if microfone { "concedida" } else { "negada" }},
@@ -314,10 +351,16 @@ impl Lancamento {
                 return Err("Não consegui ler o áudio deste arquivo.".into());
             }
         };
-        let wav = falantes.as_ref().map(|_| self.trabalho.join(format!("falantes-{}.wav", versao.id)));
-        if let Some(w) = &wav {
-            if let Err(e) = motores::audio::gravar_wav(w, &pcm) { nota(format!("arquivo {}: wav de falantes ({e})", t.doc)); }
+        // Sem o WAV (disco cheio), o arquivo ainda é transcrito: só os falantes ficam de fora.
+        let mut wav = falantes.as_ref().map(|_| self.trabalho.join(format!("falantes-{}.wav", versao.id)));
+        if let Some(w) = wav.clone() {
+            if let Err(e) = motores::audio::gravar_wav(&w, &pcm) {
+                nota(format!("arquivo {}: wav de falantes não gravado ({e}); segue sem falantes", t.doc));
+                let _ = std::fs::remove_file(&w);
+                wav = None;
+            }
         }
+        let falantes = if wav.is_some() { falantes } else { None };
         let preparar = self.preparar.clone();
         let cancelado = t.cancelado.clone();
         let caminho = t.caminho.clone();
@@ -475,6 +518,8 @@ impl Lancamento {
         // Coletor: grava cada bloco em disco antes de qualquer reconhecimento.
         let servico = Arc::downgrade(self);
         let doc_c = doc.clone();
+        let coletor_fim = Arc::new(AtomicBool::new(false));
+        let fim_coletor = coletor_fim.clone();
         thread::Builder::new().name("ditase.coletor".into()).spawn(move || {
             let mut falha = None;
             for m in recebe {
@@ -491,6 +536,8 @@ impl Lancamento {
                 let _ = coletor.armazem.definir(&doc_c, CampoDocumento::ErroCaptura(Some("A gravação em disco falhou. O áudio já gravado pode ser recuperado.".into())));
                 if let Some(s) = servico.upgrade() { s.parar_capturas(&doc_c); }
             }
+            drop(coletor);
+            fim_coletor.store(true, Ordering::Release);
             let _ = fim_tx.send(());
         })?;
 
@@ -499,18 +546,27 @@ impl Lancamento {
         let (doc_p, vivo_p) = (doc.clone(), vivo.clone());
         thread::Builder::new().name("ditase.reuniao".into()).spawn(move || servico.processar_reuniao(&doc_p, fala, Some((vivo_p, fim_rx))))?;
 
-        *atual = Some(Ativa { doc: doc.clone(), vivo, capturas, envio });
+        self.resumo_cancelado.store(false, Ordering::Release);
+        *atual = Some(Ativa { doc: doc.clone(), vivo, capturas, envio, coletor_fim });
         drop(atual);
         nota(format!("reunião {doc} iniciada ({})", if com_microfone { "sistema e microfone" } else { "sistema" }));
         self.mudou();
         Ok(doc)
     }
 
+    /// Tira a reunião em curso e a marca como finalizando sob as duas travas (mesma ordem de
+    /// `iniciar_reuniao`): não há instante em que ela não esteja em nenhuma das duas.
+    fn tirar_ativa(&self, doc: Option<&str>) -> Option<Ativa> {
+        let mut r = self.reuniao.lock().unwrap();
+        if doc.is_some_and(|d| r.as_ref().is_none_or(|a| a.doc != d)) { return None; }
+        let a = r.take()?;
+        *self.finalizando.lock().unwrap() = Some(a.doc.clone());
+        Some(a)
+    }
+
     /// Fecha as fontes (falha de disco no coletor): a reunião segue para o fim com o que foi gravado.
     fn parar_capturas(&self, doc: &str) {
-        let ativa = { let mut r = self.reuniao.lock().unwrap(); if r.as_ref().is_some_and(|a| a.doc == doc) { r.take() } else { None } };
-        if let Some(a) = ativa {
-            *self.finalizando.lock().unwrap() = Some(a.doc.clone());
+        if let Some(a) = self.tirar_ativa(Some(doc)) {
             drop(a.capturas);
             let _ = self.leitor().mudar_estado(doc, "processando", &["gravando", "pausada"]);
             self.mudou();
@@ -541,6 +597,8 @@ impl Lancamento {
                     }
                     self.progresso_ao_vivo(doc, vivo);
                 }
+                // App fechando: o coletor já gravou tudo; o reconhecimento fica para a recuperação.
+                if self.desligando.load(Ordering::Acquire) { return Err(Box::new(Desligando)); }
                 let novos = p.fechar()?;
                 self.emitir_trechos(doc, &novos, &leitura, Some(vivo));
             } else {
@@ -552,11 +610,38 @@ impl Lancamento {
             let identificados = p.passada_final(falantes.as_deref())?;
             Ok(identificados)
         })();
+        if let Err(e) = &resultado {
+            if e.is::<Desligando>() {
+                nota(format!("reunião {doc}: app fechando; áudio guardado para recuperar"));
+                *self.finalizando.lock().unwrap() = None;
+                return;
+            }
+        }
+        const FALHOU: &str = "O processamento não terminou. O áudio continua guardado para nova tentativa.";
         let motivo = match &resultado {
-            Ok(id) => { nota(format!("reunião {doc}: finalizada, falantes {}", if *id { "identificados" } else { "indisponíveis" })); None }
-            Err(e) => { nota(format!("reunião {doc}: processamento incompleto ({e}); áudio mantido para recuperar")); Some("O processamento não terminou. O áudio continua guardado para nova tentativa.".to_string()) }
+            Ok(id) => {
+                nota(format!("reunião {doc}: finalizada, falantes {}", if *id { "identificados" } else { "indisponíveis" }));
+                if let Ok(a) = ArmazemLancamento::new(&self.banco) { let _ = a.definir(doc, CampoDocumento::Aviso(None)); }
+                None
+            }
+            Err(e) => {
+                nota(format!("reunião {doc}: processamento incompleto ({e}); áudio mantido para recuperar"));
+                // Persistido: some do "finalizando" e aparece em "Reuniões interrompidas" com o motivo, também depois de reabrir.
+                if let Ok(a) = ArmazemLancamento::new(&self.banco) {
+                    let _ = a.mudar_estado(doc, "interrompida", &["processando", "gravando", "pausada"]);
+                    let _ = a.definir(doc, CampoDocumento::Aviso(Some(FALHOU.into())));
+                }
+                Some(FALHOU.to_string())
+            }
         };
-        if resultado.is_ok() && self.motores.resumo_disponivel() && !self.desligando.load(Ordering::Acquire) { self.gerar_resumo(doc); }
+        if resultado.is_ok() && self.motores.resumo_disponivel() && !self.desligando.load(Ordering::Acquire) {
+            // Cancelado durante a passada final: dispensa o resumo em vez de gerar.
+            if self.resumo_cancelado.load(Ordering::Acquire) {
+                if let Ok(a) = ArmazemLancamento::new(&self.banco) { let _ = a.definir(doc, CampoDocumento::ResumoCancelado); }
+            } else {
+                self.gerar_resumo(doc);
+            }
+        }
         *self.finalizando.lock().unwrap() = None;
         (self.avisar)("ditado:resultado", Some(json!({"id": doc, "resultado": if motivo.is_some() { "erro" } else { "concluido" }, "motivo": motivo})));
         self.mudou();
@@ -582,15 +667,7 @@ impl Lancamento {
 
     /// Alterna pausa e gravação. O tempo pausado fica fora da transcrição.
     pub fn pausar(&self, id: &str) -> Res<()> {
-        let pausou = self.com_ativa(id, |a| {
-            let t = a.vivo.relogio.elapsed().as_secs_f64();
-            let pausada = !a.vivo.pausada.load(Ordering::Acquire);
-            let mut pausas = a.vivo.pausas.lock().unwrap();
-            if pausada { pausas.1 = Some(t); } else if let Some(d) = pausas.1.take() { pausas.0 += t - d; }
-            a.vivo.pausada.store(pausada, Ordering::Release);
-            let _ = a.envio.send(if pausada { Captado::Pausar(t) } else { Captado::Retomar(t) });
-            pausada
-        })?;
+        let pausou = self.com_ativa(id, |a| alternar_pausa(&a.vivo, |m| { let _ = a.envio.send(m); }))?;
         let leitor = self.leitor();
         if pausou { leitor.mudar_estado(id, "pausada", &["gravando"])?; } else { leitor.mudar_estado(id, "gravando", &["pausada"])?; }
         drop(leitor);
@@ -600,9 +677,7 @@ impl Lancamento {
 
     /// Encerra a captura; a passada final e o resumo seguem em segundo plano.
     pub fn encerrar(&self, id: &str) -> Res<()> {
-        let ativa = { let mut r = self.reuniao.lock().unwrap(); match r.as_ref() { Some(a) if a.doc == id => r.take(), _ => None } };
-        let a = ativa.ok_or("Essa reunião não está em andamento.")?;
-        *self.finalizando.lock().unwrap() = Some(a.doc.clone());
+        let a = self.tirar_ativa(Some(id)).ok_or("Essa reunião não está em andamento.")?;
         let t = a.vivo.relogio.elapsed().as_secs_f64();
         drop(a.capturas);
         let _ = a.envio.send(Captado::Encerrar(t));
@@ -618,18 +693,25 @@ impl Lancamento {
 
     /// Reprocessa a gravação preservada de uma reunião interrompida.
     pub fn recuperar_reuniao(self: &Arc<Self>, id: &str) -> Res<()> {
-        if self.reuniao_atual().as_deref() == Some(id) { return Err("Essa reunião já está em processamento.".into()); }
-        {
-            let mut f = self.finalizando.lock().unwrap();
-            if f.is_some() { return Err("Espere a reunião anterior terminar de processar.".into()); }
-            *f = Some(id.to_string());
-        }
+        self.reservar(id)?;
+        self.resumo_cancelado.store(false, Ordering::Release);
         let fala = match self.motores.fala(false) { Ok(f) => f, Err(e) => { *self.finalizando.lock().unwrap() = None; return Err(e.into()); } };
         let _ = self.leitor().mudar_estado(id, "processando", &["gravando", "pausada", "interrompida"]);
         let s = self.clone();
         let doc = id.to_string();
         thread::Builder::new().name("ditase.recuperar".into()).spawn(move || s.processar_reuniao(&doc, fala, None))?;
         self.mudou();
+        Ok(())
+    }
+
+    /// Reserva a vaga única de processamento para `id`, sob as mesmas travas de `tirar_ativa`.
+    fn reservar(&self, id: &str) -> Res<()> {
+        let r = self.reuniao.lock().unwrap();
+        if self.desligando.load(Ordering::Acquire) { return Err("O Dita.se está fechando.".into()); }
+        if r.is_some() { return Err("Encerre a reunião em andamento antes.".into()); }
+        let mut f = self.finalizando.lock().unwrap();
+        if f.is_some() { return Err("Espere o processamento atual terminar.".into()); }
+        *f = Some(id.to_string());
         Ok(())
     }
 
@@ -646,13 +728,20 @@ impl Lancamento {
 
     // MARK: Resumo
 
+    /// Não zera o cancelamento: quem reserva (encerrar, recuperar, resumir) zera antes.
     fn gerar_resumo(&self, doc: &str) {
-        self.resumo_cancelado.store(false, Ordering::Release);
+        self.resumindo.store(true, Ordering::Release);
+        self.mudou();
+        self.gerar_resumo_dentro(doc);
+        self.resumindo.store(false, Ordering::Release);
+    }
+
+    fn gerar_resumo_dentro(&self, doc: &str) {
         let Ok(Some(d)) = ArmazemLancamento::new(&self.banco).and_then(|a| a.documento(doc)) else { return };
         if d.trechos.is_empty() { return; }
         let nomes: HashMap<&str, &str> = d.vozes.iter().map(|v| (v.id.as_str(), v.nome.as_str())).collect();
         let linhas: Vec<String> = d.trechos.iter().map(|t| format!("{}: {}", nomes.get(t.voz.as_str()).copied().unwrap_or(&t.voz), t.texto)).collect();
-        (self.avisar)("ditado:progresso", Some(json!({"id": doc, "fase": "processando", "etapa": {"id": "resumo", "rotulo": "Gerando resumo"}, "estimativa": false, "longo": false, "reuniaoAtiva": false})));
+        (self.avisar)("ditado:progresso", Some(json!({"id": doc, "fase": "processando", "etapa": {"id": "resumindo", "rotulo": "Gerando resumo"}, "estimativa": false, "longo": false, "reuniaoAtiva": false})));
         let cancelado = self.resumo_cancelado.clone();
         let r = self.motores.resumir(&linhas, &|| cancelado.load(Ordering::Acquire));
         let Ok(armazem) = ArmazemLancamento::new(&self.banco) else { return };
@@ -668,11 +757,8 @@ impl Lancamento {
     /// Gera de novo; a reunião aparece como "finalizando" e o resumo anterior fica até sair o novo.
     pub fn resumir(self: &Arc<Self>, id: &str) -> Res<()> {
         if !self.motores.resumo_disponivel() { return Err("Ligue a IA local nos Ajustes e baixe o modelo para gerar o resumo.".into()); }
-        {
-            let mut f = self.finalizando.lock().unwrap();
-            if f.is_some() { return Err("Espere o processamento atual terminar.".into()); }
-            *f = Some(id.to_string());
-        }
+        self.reservar(id)?;
+        self.resumo_cancelado.store(false, Ordering::Release);
         let s = self.clone();
         let doc = id.to_string();
         thread::Builder::new().name("ditase.resumo".into()).spawn(move || {
@@ -688,27 +774,33 @@ impl Lancamento {
         if self.finalizando.lock().unwrap().as_deref() == Some(id) { self.resumo_cancelado.store(true, Ordering::Release); }
     }
 
-    /// Fecha as fontes e espera, até `prazo`, a reunião em curso e a fila terminarem.
+    /// Fecha as fontes e espera, até `prazo`, o coletor gravar em disco o que ainda estava em
+    /// memória. Não espera reconhecimento, passada final nem resumo: isso fica para a recuperação
+    /// na próxima abertura (a reunião aparece em `recuperaveis`).
     ///
-    /// A reunião em andamento guarda o canal do coletor dentro do serviço, e a thread de
-    /// processamento guarda o serviço: sem isto, soltar o serviço deixava coletor e processador
-    /// vivos para sempre, com as conexões SQLite e a pasta de áudio abertas. O que não terminar no
-    /// prazo continua em disco e volta em `recuperaveis` na próxima abertura.
+    /// Também desfaz o ciclo entre o serviço e as threads da reunião (o canal do coletor fica na
+    /// reunião em curso e a thread de processamento segura o serviço).
     pub fn desligar(&self, prazo: Duration) {
         self.desligando.store(true, Ordering::Release);
         self.resumo_cancelado.store(true, Ordering::Release);
-        let ativa = self.reuniao.lock().unwrap().take();
-        if let Some(a) = ativa {
-            *self.finalizando.lock().unwrap() = Some(a.doc.clone());
+        let limite = Instant::now() + prazo;
+        if let Some(a) = self.tirar_ativa(None) {
             let t = a.vivo.relogio.elapsed().as_secs_f64();
             drop(a.capturas);
             let _ = a.envio.send(Captado::Encerrar(t));
+            while !a.coletor_fim.load(Ordering::Acquire) && Instant::now() < limite { thread::sleep(Duration::from_millis(10)); }
+            if !a.coletor_fim.load(Ordering::Acquire) { nota(format!("reunião {}: o coletor não terminou no prazo de saída", a.doc)); }
         }
         self.cancelar_fila().ok();
+    }
+
+    /// Para os testes: espera as threads de processamento soltarem o serviço.
+    #[cfg(test)]
+    pub fn esperar_ocioso(&self, prazo: Duration) -> bool {
         let limite = Instant::now() + prazo;
-        while (self.finalizando.lock().unwrap().is_some() || !self.fila.lock().unwrap().is_empty()) && Instant::now() < limite {
-            thread::sleep(Duration::from_millis(20));
-        }
+        let ocioso = || self.finalizando.lock().unwrap().is_none() && self.fila.lock().unwrap().is_empty();
+        while !ocioso() && Instant::now() < limite { thread::sleep(Duration::from_millis(10)); }
+        ocioso()
     }
 }
 
@@ -747,13 +839,15 @@ mod testes {
 
     struct Registro(Mutex<Vec<(String, Option<Value>)>>);
 
-    fn servico(segundos: f64) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) {
+    fn servico(segundos: f64) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) { servico_com(segundos, MotoresDuble::novo()) }
+
+    fn servico_com(segundos: f64, motores: Arc<MotoresDuble>) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) {
         let tmp = tempfile::tempdir().unwrap();
         let reg = Arc::new(Registro(Mutex::new(Vec::new())));
         let r = reg.clone();
         let avisar: Avisar = Arc::new(move |a, v| r.0.lock().unwrap().push((a.to_string(), v)));
         let preparar: Preparar = Arc::new(|t: &str| nucleo::RegrasFala::filtrar(t));
-        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(CapturaDuble { segundos }), preparar, avisar).unwrap();
+        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), motores, Arc::new(CapturaDuble { segundos }), preparar, avisar).unwrap();
         (tmp, s, reg)
     }
 
@@ -770,6 +864,139 @@ mod testes {
         let mut w = crate::audio::EscritorWav::criar(&p).unwrap();
         w.gravar(pcm).unwrap();
         p
+    }
+
+    /// I2: na retomada o `Retomar` entra no canal enquanto a captura ainda está pausada (nenhum
+    /// bloco de depois chega antes dele); na pausa, a captura já parou quando o `Pausar` entra.
+    #[test]
+    fn pausa_e_retomada_mandam_a_mensagem_na_ordem_certa() {
+        let vivo = Vivo { pausada: AtomicBool::new(false), nivel: Mutex::new(0.0), ultimo_audio: Mutex::new(Instant::now()), pausas: Mutex::new((0.0, None)), relogio: Instant::now() };
+        assert!(alternar_pausa(&vivo, |m| {
+            assert!(matches!(m, Captado::Pausar(_)));
+            assert!(vivo.pausada.load(Ordering::Acquire), "a captura ainda enviava quando o Pausar entrou");
+        }));
+        assert!(!alternar_pausa(&vivo, |m| {
+            assert!(matches!(m, Captado::Retomar(_)));
+            assert!(vivo.pausada.load(Ordering::Acquire), "a captura voltou a enviar antes do Retomar");
+        }));
+        assert!(!vivo.pausada.load(Ordering::Acquire));
+    }
+
+    /// I2 de ponta a ponta: retomadas seguidas com áudio chegando não geram lacuna.
+    #[test]
+    fn pausas_seguidas_nao_geram_lacuna() {
+        let (_tmp, s, _) = servico(6.0);
+        let id = s.iniciar_reuniao("mac").unwrap();
+        for _ in 0..20 { s.pausar(&id).unwrap(); s.pausar(&id).unwrap(); }
+        s.encerrar(&id).unwrap();
+        esperar(|| s.documento(&id).unwrap()["fase"] == "pronta", "fim");
+        let doc = s.documento(&id).unwrap();
+        assert!(doc.get("lacunas").is_none_or(|l| l.as_array().is_none_or(|l| l.is_empty())), "{doc}");
+    }
+
+    /// I3: cancelar durante a passada final dispensa o resumo (antes, gerar_resumo zerava o pedido).
+    #[test]
+    fn cancelar_resumo_na_passada_final_dispensa_o_resumo() {
+        let (_tmp, s, _) = servico_com(3.0, MotoresDuble::com(|m| m.com_limpeza = true));
+        let id = s.iniciar_reuniao("mac").unwrap();
+        thread::sleep(Duration::from_millis(300));
+        s.encerrar(&id).unwrap();
+        s.cancelar_resumo(&id);
+        esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim do processamento");
+        let doc = s.documento(&id).unwrap();
+        assert_eq!(doc["resumoCancelado"], true, "{doc}");
+        assert!(doc.get("resumo").is_none_or(Value::is_null), "{doc}");
+    }
+
+    /// I3: durante o resumo a reunião mostra `etapa: resumindo` (a interface só mostra "Cancelar
+    /// resumo" assim) e cancelar ali grava `resumoCancelado`.
+    #[test]
+    fn resumo_em_andamento_aparece_como_resumindo_e_cancela() {
+        let (_tmp, s, reg) = servico_com(3.0, MotoresDuble::com(|m| { m.com_limpeza = true; m.resumo_lento = true; }));
+        let id = s.iniciar_reuniao("mac").unwrap();
+        thread::sleep(Duration::from_millis(300));
+        s.encerrar(&id).unwrap();
+        esperar(|| s.estado(true).unwrap()["reuniao"]["etapa"] == "resumindo", "etapa resumindo");
+        assert!(reg.0.lock().unwrap().iter().any(|(a, v)| a == "ditado:progresso" && v.as_ref().unwrap()["etapa"]["id"] == "resumindo"));
+        s.cancelar_resumo(&id);
+        esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim do resumo");
+        assert_eq!(s.documento(&id).unwrap()["resumoCancelado"], true);
+    }
+
+    /// I6: enquanto a reunião sai de "em curso" para "finalizando", ela nunca fica fora das duas:
+    /// descartar e recuperar pela ponte, ao mesmo tempo, não a pegam no meio.
+    #[test]
+    fn transicao_para_finalizando_nao_abre_brecha() {
+        for _ in 0..10 {
+            let (_tmp, s, _) = servico(2.0);
+            let id = s.iniciar_reuniao("mac").unwrap();
+            let fim = Arc::new(AtomicBool::new(false));
+            let (s2, id2, f2) = (s.clone(), id.clone(), fim.clone());
+            let intruso = thread::spawn(move || {
+                let mut entrou = 0;
+                while !f2.load(Ordering::Acquire) {
+                    if s2.descartar_reuniao(&id2).is_ok() { entrou += 1; }
+                    if s2.recuperar_reuniao(&id2).is_ok() { entrou += 1; }
+                }
+                entrou
+            });
+            thread::sleep(Duration::from_millis(20));
+            s.encerrar(&id).unwrap();
+            thread::sleep(Duration::from_millis(20));
+            fim.store(true, Ordering::Release);
+            assert_eq!(intruso.join().unwrap(), 0, "descartar ou recuperar entrou na reunião em transição");
+            esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim");
+        }
+    }
+
+    /// M4: falha depois de encerrar fica persistida: estado interrompida e motivo em erroProcessamento.
+    #[test]
+    fn falha_no_processamento_persiste_interrompida_com_motivo() {
+        let (_tmp, s, _) = servico_com(3.0, MotoresDuble::com(|m| m.fala_quebrada = true));
+        let id = s.iniciar_reuniao("mac").unwrap();
+        thread::sleep(Duration::from_millis(300));
+        s.encerrar(&id).unwrap();
+        esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim");
+        let estado = s.estado(true).unwrap();
+        let r = estado["recuperaveis"].as_array().unwrap().iter().find(|r| r["id"] == json!(id)).cloned().unwrap_or_else(|| panic!("não está em recuperáveis: {estado}"));
+        assert_eq!(r["fase"], "interrompida");
+        assert!(r["erroProcessamento"].as_str().unwrap().contains("não terminou"));
+        assert!(estado.get("reuniao").is_none());
+    }
+
+    /// I1: sair com a reunião gravando volta em poucos milissegundos (sem esperar a passada final),
+    /// e a reunião fica inteira em disco para a recuperação na próxima abertura.
+    #[test]
+    fn desligar_espera_so_o_coletor_e_deixa_a_reuniao_recuperavel() {
+        let (tmp, s, _) = servico(3.0);
+        let id = s.iniciar_reuniao("mac").unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let inicio = Instant::now();
+        s.desligar(Duration::from_secs(2));
+        assert!(inicio.elapsed() < Duration::from_millis(1500), "desligar esperou {:?}", inicio.elapsed());
+        assert!(s.iniciar_reuniao("mac").is_err(), "nada novo começa depois de desligar");
+        assert!(s.esperar_ocioso(Duration::from_secs(5)));
+        drop(s);
+        let avisar: Avisar = Arc::new(|_, _| {});
+        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(CapturaDuble { segundos: 1.0 }), Arc::new(|t: &str| t.to_string()), avisar).unwrap();
+        assert!(s.estado(true).unwrap()["recuperaveis"].as_array().unwrap().iter().any(|r| r["id"] == json!(id)));
+        s.recuperar_reuniao(&id).unwrap();
+        esperar(|| s.documento(&id).unwrap()["fase"] == "pronta", "recuperação");
+        let palavras: usize = s.documento(&id).unwrap()["trechos"].as_array().unwrap().iter().map(|t| t["texto"].as_str().unwrap().split_whitespace().count()).sum();
+        assert_eq!(palavras, 6, "3 s de voz = 6 palavras");
+    }
+
+    /// M2: sem conseguir gravar o WAV dos falantes, o arquivo ainda é transcrito (sem falantes).
+    #[test]
+    fn falha_no_wav_dos_falantes_nao_descarta_a_transcricao() {
+        let (tmp, s, _) = servico(3.0);
+        std::fs::remove_dir_all(tmp.path().join("Audio").join("Trabalho")).unwrap();
+        let arq = wav(tmp.path(), "aula.wav", &voz(2.0, 0.5));
+        let id = s.adicionar(&[arq]).unwrap().unwrap();
+        esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim");
+        let doc = s.documento(&id).unwrap();
+        assert_eq!(doc["fase"], "pronto", "{doc}");
+        assert!(!doc["trechos"].as_array().unwrap().is_empty());
     }
 
     #[test]

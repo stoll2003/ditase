@@ -23,8 +23,53 @@ pub fn montar(casca: &Casca) -> String {
     for linha in caminhos::ultimas_linhas(60) {
         // Defesa extra: nada entre aspas sai no relatório.
         let limpa = if linha.contains('"') { format!("{} [trecho entre aspas omitido]", linha.split('"').next().unwrap_or("")) } else { linha };
+        let limpa = anonimizar(&limpa);
         r.push_str(&limpa);
         r.push('\n');
     }
     r
+}
+
+/// Tira o nome da conta dos caminhos (no Windows ele costuma ser o nome da pessoa): as pastas do
+/// perfil viram `%USERPROFILE%` e afins, e qualquer `\Users\<conta>\` restante vira `<conta>`.
+pub fn anonimizar(linha: &str) -> String {
+    let mut s = linha.to_string();
+    for var in ["LOCALAPPDATA", "APPDATA", "TEMP", "TMP", "USERPROFILE", "HOME"] {
+        if let Some(v) = std::env::var_os(var) {
+            let v = v.to_string_lossy().trim_end_matches(['\\', '/']).to_string();
+            if v.len() > 3 { s = s.replace(&v, &format!("%{var}%")); }
+        }
+    }
+    let mut saida = String::with_capacity(s.len());
+    let mut resto = s.as_str();
+    loop {
+        // Minúsculas só ASCII: os índices continuam valendo no texto original.
+        let minusculo = resto.to_ascii_lowercase();
+        let achado = ["\\users\\", "/users/", "/home/"].iter().filter_map(|m| minusculo.find(m).map(|i| (i, m.len()))).min();
+        let Some((i, n)) = achado else { saida.push_str(resto); break };
+        saida.push_str(&resto[..i + n]);
+        let depois = &resto[i + n..];
+        // A conta pode ter espaço ("João Silva"): só um separador de caminho encerra o nome.
+        let fim = depois.find(['\\', '/', ';']).unwrap_or(depois.len());
+        if fim > 0 { saida.push_str("<conta>"); }
+        resto = &depois[fim..];
+    }
+    saida
+}
+
+#[cfg(test)]
+mod testes {
+    use super::anonimizar;
+
+    #[test]
+    fn caminhos_do_perfil_perdem_o_nome_da_conta() {
+        assert_eq!(anonimizar(r"modelo: falta C:\Users\João Silva\AppData\Local\Dita.se\Models\x.onnx"), r"modelo: falta C:\Users\<conta>\AppData\Local\Dita.se\Models\x.onnx");
+        assert_eq!(anonimizar("wav: /Users/maria/Library/x.wav e /home/ana/y"), "wav: /Users/<conta>/Library/x.wav e /home/<conta>/y");
+        assert_eq!(anonimizar(r"D:\USERS\pedro\a"), r"D:\USERS\<conta>\a");
+        assert_eq!(anonimizar("reconhecedor carregado em 3.1 s"), "reconhecedor carregado em 3.1 s");
+        if let Some(casa) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+            let linha = format!("falha em {}{}x", casa.to_string_lossy(), std::path::MAIN_SEPARATOR);
+            assert!(!anonimizar(&linha).contains(&*casa.to_string_lossy()), "{}", anonimizar(&linha));
+        }
+    }
 }

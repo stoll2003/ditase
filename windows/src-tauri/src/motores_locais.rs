@@ -58,6 +58,8 @@ pub struct MotoresLocais {
     cancelar: Arc<AtomicBool>,
     ao_mudar: AoMudar,
     eu: Weak<Self>,
+    /// Saindo: uma falha do servidor agora não desliga a limpeza nos ajustes.
+    saindo: Arc<AtomicBool>,
 }
 
 fn remoto(a: &ArquivoRemoto) -> ModeloRemoto {
@@ -73,8 +75,6 @@ fn instalado(pasta: &Path, conjunto: &ConjuntoDeModelo) -> bool {
     conjunto.arquivos.iter().all(|a| baixador(pasta, conjunto, a).map(|b| b.instalado()).unwrap_or(false))
 }
 
-/// Os arquivos estão lá com o tamanho certo (conferência pendente conta: o download confere antes de usar).
-fn presente(pasta: &Path, conjunto: &ConjuntoDeModelo) -> bool { instalado(pasta, conjunto) || conjunto.presente(pasta) }
 
 /// HTTP com Range para o baixador do núcleo.
 struct TransporteHttp(ureq::Agent);
@@ -122,14 +122,16 @@ impl MotoresLocais {
     pub fn novo(pasta: PathBuf, prefs: Arc<Preferencias>, ao_mudar: AoMudar) -> Arc<Self> {
         let ajustes = llama::Ajustes { prazo_de_subida: PRAZO_DO_SERVIDOR, ..Default::default() };
         let servidor = ServidorLlama::novo(caminhos::llama_server(), llama::PROMPT_LIMPEZA, ajustes);
+        let saindo = Arc::new(AtomicBool::new(false));
+        let saindo_obs = saindo.clone();
         let m = Arc::new_cyclic(|eu| Self {
             pasta, prefs: prefs.clone(), fala: Mutex::new(EstadoFala::Ausente), mudou_fala: Condvar::new(), falantes: Mutex::new(None),
             servidor: servidor.clone(), modelo: Arc::new(Mutex::new(EstadoModelo::Parado)), cancelar: Arc::new(AtomicBool::new(false)),
-            ao_mudar: ao_mudar.clone(), eu: eu.clone(),
+            ao_mudar: ao_mudar.clone(), eu: eu.clone(), saindo: saindo.clone(),
         });
         // Chamado com o servidor travado: só mexe nos ajustes e avisa a interface.
         servidor.observar(move |estado| {
-            if let EstadoLlama::Falhou(motivo) = estado {
+            if let (EstadoLlama::Falhou(motivo), false) = (estado, saindo_obs.load(Ordering::Acquire)) {
                 nota(format!("limpeza por IA: servidor não subiu ({motivo}); limpeza desligada"));
                 prefs.definir("limpezaIA", "0");
             }
@@ -154,22 +156,17 @@ impl MotoresLocais {
         let m = self.clone();
         let _ = thread::Builder::new().name("ditase.modelos".into()).spawn(move || {
             let nunca = || false;
-            let mut ultimo = Instant::now() - Duration::from_secs(1);
-            for conjunto in [&PARAKEET, &FALANTES] {
-                if instalado(&m.pasta, conjunto) { continue; }
-                nota(format!("modelos: baixando {}", conjunto.pasta));
-                let r = baixar_conjunto(&m.pasta, conjunto, &nunca, &mut |_, feito, total| {
-                    if conjunto.pasta == PARAKEET.pasta && ultimo.elapsed() > Duration::from_millis(500) {
-                        ultimo = Instant::now();
-                        m.definir_fala(EstadoFala::Baixando(feito, total));
-                    }
+            // 1. Fala primeiro: o ditado só precisa dela.
+            if !instalado(&m.pasta, &PARAKEET) {
+                nota("modelos: baixando parakeet");
+                let mut ultimo = Instant::now() - Duration::from_secs(1);
+                let r = baixar_conjunto(&m.pasta, &PARAKEET, &nunca, &mut |_, feito, total| {
+                    if ultimo.elapsed() > Duration::from_millis(500) { ultimo = Instant::now(); m.definir_fala(EstadoFala::Baixando(feito, total)); }
                 });
                 if let Err(e) = r {
-                    nota(format!("modelos: {} não baixou ({e})", conjunto.pasta));
-                    if conjunto.pasta == PARAKEET.pasta {
-                        m.definir_fala(EstadoFala::Falhou(format!("Não consegui baixar o modelo de fala: {e}. Tente de novo pelo Início.")));
-                        return;
-                    }
+                    nota(format!("modelos: parakeet não baixou ({e})"));
+                    m.definir_fala(EstadoFala::Falhou(format!("Não consegui baixar o modelo de fala: {e}. Tente de novo pelo Início.")));
+                    return;
                 }
             }
             m.definir_fala(EstadoFala::Carregando);
@@ -177,6 +174,14 @@ impl MotoresLocais {
             match Parakeet::carregar(&PARAKEET.caminho(&m.pasta), 0) {
                 Ok(p) => { nota(format!("reconhecedor carregado em {:.1} s", inicio.elapsed().as_secs_f64())); m.definir_fala(EstadoFala::Pronto(Arc::new(p))); }
                 Err(e) => { nota(format!("reconhecedor falhou: {e}")); m.definir_fala(EstadoFala::Falhou(format!("O modelo de fala não carregou: {e}"))); }
+            }
+            // 2. Falantes depois, com o ditado já liberado. Sem eles, arquivos e reuniões saem sem separar pessoas.
+            if !instalado(&m.pasta, &FALANTES) {
+                nota("modelos: baixando falantes");
+                match baixar_conjunto(&m.pasta, &FALANTES, &nunca, &mut |_, _, _| {}) {
+                    Ok(()) => { nota("modelos: falantes instalados"); (m.ao_mudar)(); }
+                    Err(e) => nota(format!("modelos: falantes não baixaram ({e}); nova tentativa na próxima abertura")),
+                }
             }
         });
     }
@@ -188,19 +193,27 @@ impl MotoresLocais {
 
     fn qwen_instalado(&self) -> bool { instalado(&self.pasta, &QWEN) || self.pasta.join(self.prefs.modelo()).is_file() && self.prefs.modelo() != QWEN.arquivos[0].arquivo }
 
-    fn gerar(&self, porta: u16, dados: &str) -> Result<String, String> {
-        let corpo = json!({
-            "messages": [{"role": "system", "content": SISTEMA_DO_RESUMO}, {"role": "user", "content": dados}],
-            "temperature": 0, "max_tokens": 192, "stream": false
-        });
-        let resposta: Value = ureq::post(&format!("http://127.0.0.1:{porta}/v1/chat/completions"))
-            .timeout(Duration::from_secs(60)).send_json(corpo).map_err(|e| e.to_string())?
-            .into_json().map_err(|e| e.to_string())?;
-        let escolha = &resposta["choices"][0];
-        if escolha["finish_reason"] == "length" { return Err("A IA local não devolveu um resumo completo.".into()); }
-        let texto = escolha["message"]["content"].as_str().ok_or("A IA local não devolveu um resumo.")?;
-        Ok(LimpadorLlama::extrair_resposta(texto))
-    }
+}
+
+/// Cliente HTTP só para o llama-server em 127.0.0.1. Nunca segue `HTTP_PROXY`/`ALL_PROXY` do
+/// ambiente: com proxy corporativo, o texto da reunião iria em claro para fora do computador.
+pub fn agente_local() -> ureq::Agent {
+    ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(60)).build()
+}
+
+/// Uma chamada de resumo ao servidor local.
+pub fn gerar_local(agente: &ureq::Agent, porta: u16, dados: &str) -> Result<String, String> {
+    let corpo = json!({
+        "messages": [{"role": "system", "content": SISTEMA_DO_RESUMO}, {"role": "user", "content": dados}],
+        "temperature": 0, "max_tokens": 192, "stream": false
+    });
+    let resposta: Value = agente.post(&format!("http://127.0.0.1:{porta}/v1/chat/completions"))
+        .send_json(corpo).map_err(|e| e.to_string())?
+        .into_json().map_err(|e| e.to_string())?;
+    let escolha = &resposta["choices"][0];
+    if escolha["finish_reason"] == "length" { return Err("A IA local não devolveu um resumo completo.".into()); }
+    let texto = escolha["message"]["content"].as_str().ok_or("A IA local não devolveu um resumo.")?;
+    Ok(LimpadorLlama::extrair_resposta(texto))
 }
 
 /// Resumo em até quatro tópicos. Notas longas são condensadas em blocos de até 4.000 caracteres
@@ -258,11 +271,12 @@ impl Motores for MotoresLocais {
         }
     }
 
-    fn fala_disponivel(&self) -> bool { presente(&self.pasta, &PARAKEET) }
+    /// Só com o SHA-256 conferido (marcador do `BaixadorDeModelo`): arquivo com o tamanho certo não basta.
+    fn fala_disponivel(&self) -> bool { instalado(&self.pasta, &PARAKEET) }
 
     fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>> {
         let mut d = self.falantes.lock().unwrap();
-        if d.is_none() && presente(&self.pasta, &FALANTES) {
+        if d.is_none() && instalado(&self.pasta, &FALANTES) {
             match Diarizador::carregar(&FALANTES.caminho(&self.pasta), None, LIMIAR_PADRAO, 0) {
                 Ok(x) => *d = Some(Arc::new(x)),
                 Err(e) => nota(format!("falantes: modelo não carregou ({e})")),
@@ -287,7 +301,8 @@ impl Motores for MotoresLocais {
     fn resumir(&self, linhas: &[String], cancelado: &dyn Fn() -> bool) -> Result<Vec<String>, String> {
         if !self.resumo_disponivel() { return Err("IA local indisponível".into()); }
         let porta = self.servidor.garantir(&self.modelo_ia_caminho()).map_err(|e| e.to_string())?;
-        resumir_com(linhas, cancelado, &|dados| self.gerar(porta, dados))
+        let agente = agente_local();
+        resumir_com(linhas, cancelado, &|dados| gerar_local(&agente, porta, dados))
     }
 
     fn estado_reconhecedor(&self) -> (String, String) {
@@ -375,11 +390,74 @@ impl Motores for MotoresLocais {
     fn cancelar_modelo(&self) { self.cancelar.store(true, Ordering::Release); }
 
     fn llama_instalado(&self) -> bool { caminhos::llama_server().is_file() }
+
+    fn desligar(&self) {
+        self.saindo.store(true, Ordering::Release);
+        self.cancelar.store(true, Ordering::Release);
+        self.servidor.parar();
+    }
 }
 
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// B1: com `HTTP_PROXY` apontando para um proxy falso, o resumo vai direto ao servidor local e o
+    /// proxy não recebe nada. Na mesma condição, o cliente global do ureq (o usado antes da
+    /// correção) entrega a chamada ao proxy: é o que este teste pegaria.
+    /// Precisa abrir porta local; onde isso é proibido (sandbox), o teste avisa e não roda.
+    #[test]
+    fn resumo_local_ignora_proxy_do_ambiente() {
+        use std::{io::{BufRead, BufReader, Read, Write}, net::TcpListener, sync::atomic::AtomicUsize};
+        let (Ok(servidor), Ok(proxy)) = (TcpListener::bind("127.0.0.1:0"), TcpListener::bind("127.0.0.1:0")) else {
+            eprintln!("resumo_local_ignora_proxy_do_ambiente: sem permissão para abrir porta local; não rodou");
+            return;
+        };
+        let porta = servidor.local_addr().unwrap().port();
+        let porta_proxy = proxy.local_addr().unwrap().port();
+        // Proxy falso: só conta conexões, nunca responde.
+        let no_proxy = Arc::new(AtomicUsize::new(0));
+        let (contagem, fim) = (no_proxy.clone(), Arc::new(AtomicBool::new(false)));
+        let parar = fim.clone();
+        proxy.set_nonblocking(true).unwrap();
+        let vigia = thread::spawn(move || {
+            let mut abertas = Vec::new();
+            while !parar.load(Ordering::Acquire) {
+                if let Ok((c, _)) = proxy.accept() { contagem.fetch_add(1, Ordering::Relaxed); abertas.push(c); }
+                thread::sleep(Duration::from_millis(5));
+            }
+        });
+        // Servidor llama falso: uma resposta de chat.
+        let atende = thread::spawn(move || {
+            let (mut c, _) = servidor.accept().unwrap();
+            let mut leitor = BufReader::new(c.try_clone().unwrap());
+            let mut tamanho = 0;
+            loop {
+                let mut linha = String::new();
+                leitor.read_line(&mut linha).unwrap();
+                if let Some(v) = linha.to_ascii_lowercase().strip_prefix("content-length:") { tamanho = v.trim().parse().unwrap(); }
+                if linha == "\r\n" { break; }
+            }
+            let mut corpo = vec![0; tamanho];
+            leitor.read_exact(&mut corpo).unwrap();
+            let r = r#"{"choices":[{"finish_reason":"stop","message":{"content":"- pauta revisada"}}]}"#;
+            write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{r}", r.len()).unwrap();
+        });
+        let antes = std::env::var_os("HTTP_PROXY");
+        std::env::set_var("HTTP_PROXY", format!("http://127.0.0.1:{porta_proxy}"));
+        let r = gerar_local(&agente_local(), porta, "Ana: revisar a pauta");
+        atende.join().unwrap();
+        let direto = no_proxy.load(Ordering::Relaxed);
+        // O cliente global lê o proxy do ambiente: a chamada vai para o proxy (que não responde).
+        let global = ureq::agent().post(&format!("http://127.0.0.1:{porta}/v1/chat/completions")).timeout(Duration::from_millis(500)).send_string("{}");
+        match antes { Some(v) => std::env::set_var("HTTP_PROXY", v), None => std::env::remove_var("HTTP_PROXY") }
+        thread::sleep(Duration::from_millis(50));
+        fim.store(true, Ordering::Release);
+        vigia.join().unwrap();
+        assert_eq!(r.unwrap(), "pauta revisada");
+        assert_eq!(direto, 0, "o proxy recebeu a chamada do resumo");
+        assert!(global.is_err() && no_proxy.load(Ordering::Relaxed) >= 1, "o cenário não reproduz o vazamento do cliente global");
+    }
 
     #[test]
     fn resumo_curto_vai_inteiro_e_corta_em_quatro_topicos() {
@@ -401,6 +479,23 @@ mod testes {
         assert!(p.iter().all(|n| *n <= LIMITE_DO_RESUMO + 1), "{p:?}");
         assert!(resumir_com(&linhas, &|| true, &gerar).is_err(), "cancelado");
         assert!(resumir_com(&[], &|| false, &gerar).unwrap().is_empty());
+    }
+
+    /// I4: arquivos de falantes e de fala com o tamanho certo, mas sem SHA-256 conferido, não são
+    /// carregados nem contam como disponíveis.
+    #[test]
+    fn modelo_com_tamanho_certo_sem_conferencia_nao_e_usado() {
+        let tmp = tempfile::tempdir().unwrap();
+        for c in [&PARAKEET, &FALANTES] {
+            let pasta = c.caminho(tmp.path());
+            std::fs::create_dir_all(&pasta).unwrap();
+            for a in c.arquivos { std::fs::File::create(pasta.join(a.arquivo)).unwrap().set_len(a.tamanho).unwrap(); }
+            assert!(c.presente(tmp.path()), "o cenário precisa de arquivos com o tamanho certo");
+        }
+        let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
+        let m = MotoresLocais::novo(tmp.path().to_path_buf(), prefs, Arc::new(|| {}));
+        assert!(!m.fala_disponivel(), "fala sem conferência contou como disponível");
+        assert!(m.falantes().is_none(), "falantes sem conferência foram carregados");
     }
 
     #[test]

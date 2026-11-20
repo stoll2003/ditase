@@ -341,7 +341,7 @@ mod testes {
         struct Ponte { banco: Integracao, lance: Arc<Lancamento>, eventos: Arc<Mutex<Vec<String>>>, _tmp: Arc<tempfile::TempDir> }
 
         impl Drop for Ponte {
-            fn drop(&mut self) { self.lance.desligar(Duration::from_secs(20)); }
+            fn drop(&mut self) { self.lance.desligar(Duration::from_secs(20)); self.lance.esperar_ocioso(Duration::from_secs(20)); }
         }
 
         impl Ponte {

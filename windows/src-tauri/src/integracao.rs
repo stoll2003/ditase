@@ -48,6 +48,8 @@ pub trait Motores: Send + Sync {
     fn baixar_modelo(&self) -> Result<(), String>;
     fn cancelar_modelo(&self);
     fn llama_instalado(&self) -> bool;
+    /// Saída do app: para o servidor de IA (sem mexer nos ajustes).
+    fn desligar(&self) {}
 }
 
 /// Resultado de um ditado, espelho de `nucleo::ResultadoDitado`.
@@ -335,6 +337,13 @@ pub mod dubles {
         fn palavras(&self, amostras: &[f32], inicio: f64, _fim: Option<f64>) -> Result<Vec<PalavraReconhecida>, Erro> {
             let fim = inicio + amostras.len() as f64 / TAXA as f64;
             let (primeira, ultima) = ((inicio * 2.0 - 1e-6).ceil() as i64, (fim * 2.0 + 1e-6).floor() as i64);
+            if primeira >= ultima {
+                // Janela curta (bloco selado numa pausa), sem célula inteira: um reconhecedor real
+                // ainda devolveria a fala que houver nela.
+                return Ok(if amostras.iter().any(|x| x.abs() > 0.05) {
+                    vec![PalavraReconhecida { texto: format!("trecho{}", (inicio * 100.0).round() as i64), inicio, fim }]
+                } else { vec![] });
+            }
             Ok((primeira..ultima).filter_map(|k| {
                 let a = ((k as f64 * 0.5 - inicio) * TAXA as f64).round().max(0.0) as usize;
                 let b = (a + TAXA / 2).min(amostras.len());
@@ -358,19 +367,44 @@ pub mod dubles {
         fn limpar(&self, p: &PedidoLimpeza) -> Result<String, Erro> { Ok(p.transcricao.clone()) }
     }
 
-    pub struct MotoresDuble { pub fala: Arc<FalaDuble>, pub com_falantes: bool, pub com_limpeza: bool }
+    /// Reconhecedor que sempre falha (para os caminhos de erro do processamento).
+    pub struct FalaQuebrada;
+    impl Transcritor for FalaQuebrada {
+        fn nome(&self) -> &str { "quebrada" }
+        fn transcrever(&self, _a: &[f32]) -> Result<String, Erro> { Err("reconhecedor quebrado".into()) }
+    }
+    impl ReconhecedorDeFala for FalaQuebrada {
+        fn palavras(&self, _a: &[f32], _i: f64, _f: Option<f64>) -> Result<Vec<PalavraReconhecida>, Erro> { Err("reconhecedor quebrado".into()) }
+    }
+
+    pub struct MotoresDuble {
+        pub fala: Arc<FalaDuble>,
+        pub com_falantes: bool,
+        pub com_limpeza: bool,
+        /// O resumo espera até ser cancelado (no máximo 5 s).
+        pub resumo_lento: bool,
+        pub fala_quebrada: bool,
+    }
 
     impl MotoresDuble {
-        pub fn novo() -> Arc<Self> { Arc::new(Self { fala: Arc::new(FalaDuble { chamadas: AtomicUsize::new(0) }), com_falantes: true, com_limpeza: false }) }
+        pub fn novo() -> Arc<Self> { Self::com(|_| {}) }
+        pub fn com(ajustar: impl FnOnce(&mut Self)) -> Arc<Self> {
+            let mut m = Self { fala: Arc::new(FalaDuble { chamadas: AtomicUsize::new(0) }), com_falantes: true, com_limpeza: false, resumo_lento: false, fala_quebrada: false };
+            ajustar(&mut m);
+            Arc::new(m)
+        }
     }
 
     impl Motores for MotoresDuble {
-        fn fala(&self, _esperar: bool) -> Result<Arc<dyn Fala>, String> { Ok(self.fala.clone()) }
+        fn fala(&self, _esperar: bool) -> Result<Arc<dyn Fala>, String> { Ok(if self.fala_quebrada { Arc::new(FalaQuebrada) } else { self.fala.clone() }) }
         fn fala_disponivel(&self) -> bool { true }
         fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>> { self.com_falantes.then(|| Arc::new(FalantesDuble) as Arc<dyn IdentificadorDeFalantes>) }
         fn limpador(&self) -> Option<Arc<dyn Limpador>> { self.com_limpeza.then(|| Arc::new(LimpadorDuble) as Arc<dyn Limpador>) }
         fn resumo_disponivel(&self) -> bool { self.com_limpeza }
-        fn resumir(&self, linhas: &[String], _cancelado: &dyn Fn() -> bool) -> Result<Vec<String>, String> {
+        fn resumir(&self, linhas: &[String], cancelado: &dyn Fn() -> bool) -> Result<Vec<String>, String> {
+            let inicio = std::time::Instant::now();
+            while self.resumo_lento && !cancelado() && inicio.elapsed() < std::time::Duration::from_secs(5) { std::thread::sleep(std::time::Duration::from_millis(10)); }
+            if cancelado() { return Err("cancelado".into()); }
             Ok(vec![format!("{} falas", linhas.len())])
         }
         fn estado_reconhecedor(&self) -> (String, String) { ("pronto".into(), String::new()) }

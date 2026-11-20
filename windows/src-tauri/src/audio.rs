@@ -24,11 +24,11 @@ pub fn microfones() -> Vec<(String, String)> {
     no_fio_de_audio(|| {
         let host = cpal::default_host();
         host.input_devices().map(|lista| lista.filter_map(|d| d.name().ok()).map(|n| (n.clone(), n)).collect()).unwrap_or_default()
-    })
+    }).unwrap_or_default()
 }
 
 /// Há microfone utilizável? Sem dispositivo ou com acesso negado em Privacidade, não.
-pub fn microfone_disponivel() -> bool { no_fio_de_audio(|| cpal::default_host().default_input_device().is_some()) }
+pub fn microfone_disponivel() -> bool { no_fio_de_audio(|| cpal::default_host().default_input_device().is_some()).unwrap_or(false) }
 
 type TarefaDeAudio = Box<dyn FnOnce() + Send>;
 
@@ -39,21 +39,42 @@ type TarefaDeAudio = Box<dyn FnOnce() + Send>;
 /// Se a thread que criou o enumerador termina e era a última com COM, o COM do processo é
 /// descarregado e o ponteiro global fica pendurado: a consulta seguinte, em outra thread, cai com
 /// STATUS_ACCESS_VIOLATION. Aqui o enumerador nasce nesta thread e o COM dela nunca é desfeito.
-fn no_fio_de_audio<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
-    static FIO: OnceLock<Mutex<mpsc::Sender<TarefaDeAudio>>> = OnceLock::new();
-    let envio = FIO.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<TarefaDeAudio>();
-        thread::Builder::new().name("ditase.com-audio".into()).spawn(move || {
-            // Primeira consulta do processo: COM e enumerador ficam presos a esta thread.
-            let _ = cpal::default_host().default_input_device();
-            for tarefa in rx { tarefa(); }
-        }).expect("thread de áudio");
-        Mutex::new(tx)
-    });
+///
+/// Pânico dentro de um pedido (por exemplo, do cpal com o dispositivo desconectado) não mata a
+/// thread: o pedido devolve erro e os seguintes continuam. Nada aqui dá pânico no chamador.
+fn no_fio_de_audio<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T, String> {
+    static FIO: OnceLock<Mutex<Option<mpsc::Sender<TarefaDeAudio>>>> = OnceLock::new();
     let (tx, rx) = mpsc::channel();
     let tarefa: TarefaDeAudio = Box::new(move || { let _ = tx.send(f()); });
-    envio.lock().unwrap_or_else(|e| e.into_inner()).send(tarefa).expect("thread de áudio encerrada");
-    rx.recv().expect("thread de áudio não respondeu")
+    let mut envio = FIO.get_or_init(|| Mutex::new(None)).lock().unwrap_or_else(|e| e.into_inner());
+    let mut tarefa = Some(tarefa);
+    // Uma segunda tentativa recria a thread se ela tiver sumido por outro motivo.
+    for _ in 0..2 {
+        if envio.is_none() { *envio = criar_fio_de_audio(); }
+        let Some(canal) = envio.as_ref() else { return Err("a thread de áudio não abriu".into()) };
+        match canal.send(tarefa.take().expect("tarefa")) {
+            Ok(()) => break,
+            Err(mpsc::SendError(devolvida)) => { tarefa = Some(devolvida); *envio = None; }
+        }
+    }
+    drop(envio);
+    if tarefa.is_some() { return Err("a thread de áudio não responde".into()); }
+    // Pânico na tarefa solta `tx` sem enviar: o recv vira erro.
+    rx.recv().map_err(|_| "o pedido de áudio falhou".to_string())
+}
+
+fn criar_fio_de_audio() -> Option<mpsc::Sender<TarefaDeAudio>> {
+    let (tx, rx) = mpsc::channel::<TarefaDeAudio>();
+    let fio = thread::Builder::new().name("ditase.com-audio".into()).spawn(move || {
+        // Primeira consulta do processo: COM e enumerador ficam presos a esta thread.
+        let _ = std::panic::catch_unwind(|| { let _ = cpal::default_host().default_input_device(); });
+        for tarefa in rx {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(tarefa)).is_err() {
+                crate::caminhos::nota("áudio: um pedido entrou em pânico; a thread de áudio segue");
+            }
+        }
+    });
+    fio.ok().map(|_| tx)
 }
 
 thread_local! {
@@ -125,18 +146,23 @@ impl Captura {
         static PROXIMO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let id = PROXIMO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nome = microfone.to_string();
-        no_fio_de_audio(move || abrir(fonte, &nome, ao_bloco).map(|fluxo| FLUXOS.with(|f| { f.borrow_mut().insert(id, fluxo); })).map_err(|e| e.to_string()))?;
+        no_fio_de_audio(move || abrir(fonte, &nome, ao_bloco).map(|fluxo| FLUXOS.with(|f| { f.borrow_mut().insert(id, fluxo); })).map_err(|e| e.to_string()))??;
         Ok(Self { id: Some(id) })
     }
 
+    /// Fecha a fonte e entrega o resto ainda acumulado (até 100 ms). Nunca dá pânico.
     pub fn parar(&mut self) {
-        if let Some(id) = self.id.take() { no_fio_de_audio(move || FLUXOS.with(|f| { f.borrow_mut().remove(&id); })); }
+        if let Some(id) = self.id.take() {
+            // O fluxo sai do mapa antes de ser solto: o `RefMut` não fica emprestado durante `Stream::drop`.
+            let r = no_fio_de_audio(move || { let fluxo = FLUXOS.with(|f| f.borrow_mut().remove(&id)); drop(fluxo); });
+            if let Err(e) = r { crate::caminhos::nota(format!("áudio: fechar a captura falhou ({e})")); }
+        }
     }
 }
 
 impl Drop for Captura { fn drop(&mut self) { self.parar(); } }
 
-fn abrir(fonte: Fonte, microfone: &str, mut ao_bloco: impl FnMut(Vec<f32>, f32) + Send + 'static) -> Result<cpal::Stream, Erro> {
+fn abrir(fonte: Fonte, microfone: &str, ao_bloco: impl FnMut(Vec<f32>, f32) + Send + 'static) -> Result<cpal::Stream, Erro> {
     let host = cpal::default_host();
     let (dispositivo, config) = match fonte {
         Fonte::Microfone => {
@@ -155,14 +181,10 @@ fn abrir(fonte: Fonte, microfone: &str, mut ao_bloco: impl FnMut(Vec<f32>, f32) 
     };
     let canais = config.channels() as usize;
     let mut reamostrar = Reamostrador::new(config.sample_rate().0);
-    let mut acumulado: Vec<f32> = Vec::with_capacity(TAXA as usize / 5);
+    let mut entrega = Entrega { acumulado: Vec::with_capacity(TAXA as usize / 5), ao_bloco: Box::new(ao_bloco) };
     let mut entregar = move |mono: Vec<f32>| {
-        acumulado.extend(reamostrar.processar(&mono));
-        if acumulado.len() >= TAXA as usize / 10 {
-            let bloco = std::mem::take(&mut acumulado);
-            let n = nivel(&bloco);
-            ao_bloco(bloco, n);
-        }
+        entrega.acumulado.extend(reamostrar.processar(&mono));
+        if entrega.acumulado.len() >= TAXA as usize / 10 { entrega.soltar(); }
     };
     let erro = |e: cpal::StreamError| crate::caminhos::nota(format!("áudio: {e}"));
     let fluxo = match config.sample_format() {
@@ -175,6 +197,20 @@ fn abrir(fonte: Fonte, microfone: &str, mut ao_bloco: impl FnMut(Vec<f32>, f32) 
     fluxo.play()?;
     Ok(fluxo)
 }
+
+/// Acumula até 100 ms e entrega; ao ser solta (o fluxo fechou), entrega o que sobrou.
+struct Entrega { acumulado: Vec<f32>, ao_bloco: Box<dyn FnMut(Vec<f32>, f32) + Send> }
+
+impl Entrega {
+    fn soltar(&mut self) {
+        if self.acumulado.is_empty() { return; }
+        let bloco = std::mem::take(&mut self.acumulado);
+        let n = nivel(&bloco);
+        (self.ao_bloco)(bloco, n);
+    }
+}
+
+impl Drop for Entrega { fn drop(&mut self) { self.soltar(); } }
 
 fn misturar<T: Copy>(dados: &[T], canais: usize, para_f32: impl Fn(T) -> f32) -> Vec<f32> {
     if canais <= 1 { return dados.iter().map(|&x| para_f32(x)).collect(); }
@@ -219,6 +255,31 @@ mod testes {
     /// Sequência do crash no CI Windows (STATUS_ACCESS_VIOLATION): a primeira consulta de áudio
     /// numa thread que termina, e a seguinte em outra thread. No Windows, antes da thread de áudio
     /// própria, a segunda consulta usava o enumerador COM pendurado.
+    /// B2: pânico num pedido não mata a thread de áudio; o pedido seguinte funciona e o
+    /// fechamento de captura nunca dá pânico.
+    #[test]
+    fn panico_num_pedido_de_audio_nao_derruba_os_seguintes() {
+        let antes = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        assert!(no_fio_de_audio(|| -> u8 { panic!("cpal quebrou") }).is_err());
+        std::panic::set_hook(antes);
+        assert_eq!(no_fio_de_audio(|| 7).unwrap(), 7);
+        let _ = microfone_disponivel();
+        let mut fantasma = Captura { id: Some(u64::MAX) };
+        fantasma.parar();
+        drop(Captura { id: Some(u64::MAX - 1) });
+    }
+
+    #[test]
+    fn entrega_solta_o_resto_ao_fechar() {
+        let recebido = std::sync::Arc::new(Mutex::new(0usize));
+        let r = recebido.clone();
+        let mut e = Entrega { acumulado: Vec::new(), ao_bloco: Box::new(move |b, _| *r.lock().unwrap() += b.len()) };
+        e.acumulado.extend([0.1; 700]);
+        drop(e);
+        assert_eq!(*recebido.lock().unwrap(), 700);
+    }
+
     #[test]
     fn consultas_de_audio_em_threads_que_terminam() {
         for _ in 0..3 {

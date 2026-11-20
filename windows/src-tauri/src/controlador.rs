@@ -138,6 +138,9 @@ impl Controlador {
             Err(e) => {
                 nota(format!("microfone: {e}"));
                 let _ = self.integracao.descartar_ditado(d.id);
+                // O WAV de 44 bytes criado acima não fica órfão em Audio/.
+                drop(escritor);
+                if let Some(c) = &caminho { let _ = std::fs::remove_file(c); }
                 drop(i);
                 self.pilula.avisar("Microfone indisponível", 3.0);
                 return false;
@@ -335,9 +338,27 @@ impl Controlador {
         Ok(())
     }
 
-    pub fn desligar(&self) {
-        let g = { let mut i = self.interno.lock().unwrap(); i.fase = Fase::Parado; i.gravacao.take() };
-        if let Some(mut g) = g { g.captura.parar(); }
+    /// Saída do app. Fecha o microfone, espera a gravação escrever no WAV e na sessão tudo o que
+    /// já chegou (inclusive os últimos 100 ms) e, se um ditado estiver sendo processado, espera ele
+    /// terminar, tudo dentro de `prazo`. Um ditado não concluído fica "gravando" no banco com a
+    /// reserva de trechos e o WAV, e volta ao histórico pela recuperação na próxima abertura.
+    pub fn desligar(&self, prazo: Duration) {
+        let limite = Instant::now() + prazo;
+        let g = self.interno.lock().unwrap().gravacao.take();
+        if let Some(mut g) = g {
+            g.captura.parar();
+            let (tx, rx) = mpsc::channel();
+            let bomba = g.bomba;
+            thread::spawn(move || { let _ = tx.send(bomba.join().map(|(_, n)| n)); });
+            match rx.recv_timeout(limite.saturating_duration_since(Instant::now())) {
+                Ok(Ok(n)) => nota(format!("ditado {}: saída com {:.1} s gravados; volta pela recuperação", g.ditado.id, n as f64 / crate::audio::TAXA as f64)),
+                _ => nota(format!("ditado {}: a gravação não terminou no prazo de saída", g.ditado.id)),
+            }
+            let mut i = self.interno.lock().unwrap();
+            i.fase = Fase::Parado;
+            i.maos_livres = false;
+        }
+        while self.fase() == Fase::Processando && Instant::now() < limite { thread::sleep(Duration::from_millis(10)); }
     }
 
     fn limpar_audios_antigos(&self) {
