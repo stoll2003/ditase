@@ -7,17 +7,20 @@ license.workspace = true
 [dependencies]
 nucleo = { path = "../nucleo-rs" }
 serde_json = "1"
+# Identidade efêmera do servidor local; a chave nunca vai para a linha de comando.
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+getrandom = "0.3"
 sha2 = "0.10"
 # HTTP só para 127.0.0.1 (llama-server) e para o download dos modelos (HTTPS).
 # TLS: rustls no Mac/Linux; no Windows, SChannel do sistema (native-tls), que usa o repositório
 # de certificados do Windows (proxy corporativo com certificado próprio funciona).
-ureq = { version = "2", default-features = false, features = ["json"] }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 
 # sherpa-onnx oficial (k2-fsa), versão fixada. No Mac e no Linux: estático (nada a distribuir).
 # No Windows: DLLs (sherpa-onnx-c-api.dll, onnxruntime.dll), porque as libs estáticas oficiais são
 # /MT e o binário Rust/Tauri usa /MD; misturar dá conflito de CRT no link.
 [target.'cfg(not(windows))'.dependencies]
-ureq = { version = "2", default-features = false, features = ["json", "tls"] }
 sherpa-onnx = { version = "=2.0.1", default-features = false, features = ["static"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -28,6 +31,9 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [[bin]]
 name = "medir"

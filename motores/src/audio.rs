@@ -28,7 +28,10 @@ fn decodificar_wav(d: &[u8]) -> Result<(u32, Vec<f32>), Erro> {
         let id = &d[i..i + 4];
         let tam = u32le(i + 4) as usize;
         let corpo = i + 8;
-        let fim = (corpo + tam).min(d.len());
+        let fim = corpo
+            .checked_add(tam)
+            .filter(|&f| f <= d.len())
+            .ok_or_else(|| erro("bloco WAV truncado"))?;
         if id == b"fmt " && tam >= 16 {
             let mut formato = u16le(corpo);
             if formato == 0xFFFE && tam >= 26 {
@@ -43,7 +46,10 @@ fn decodificar_wav(d: &[u8]) -> Result<(u32, Vec<f32>), Erro> {
         } else if id == b"data" {
             let (formato, canais, taxa, bits) =
                 fmt.ok_or_else(|| erro("WAV sem bloco fmt antes de data"))?;
-            let canais = canais.max(1) as usize;
+            if canais == 0 || taxa == 0 || taxa > i32::MAX as u32 {
+                return Err(erro("taxa ou canais inválidos no WAV"));
+            }
+            let canais = canais as usize;
             let bytes = (bits / 8) as usize;
             let bruto = &d[corpo..fim];
             let amostra = |b: &[u8]| -> Option<f32> {
@@ -79,7 +85,11 @@ fn decodificar_wav(d: &[u8]) -> Result<(u32, Vec<f32>), Erro> {
 
 /// Grava PCM 16 kHz mono num WAV de 16 bits.
 pub fn gravar_wav(caminho: &Path, amostras: &[f32]) -> Result<(), Erro> {
-    let n = amostras.len() as u32 * 2;
+    let n = u32::try_from(amostras.len())
+        .ok()
+        .and_then(|n| n.checked_mul(2))
+        .filter(|n| *n <= u32::MAX - 36)
+        .ok_or_else(|| erro("áudio excede o tamanho do WAV"))?;
     let mut v = Vec::with_capacity(44 + n as usize);
     v.extend_from_slice(b"RIFF");
     v.extend_from_slice(&(36 + n).to_le_bytes());
@@ -135,6 +145,26 @@ pub fn caminho_c(caminho: &Path) -> Result<String, Erro> {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    #[test]
+    fn rejeita_bloco_fmt_incompleto() {
+        assert!(decodificar_wav(b"RIFF\x14\0\0\0WAVEfmt \x10\0\0\0\x01").is_err());
+    }
+
+    #[test]
+    fn grava_e_le_wav_com_acento() {
+        let pasta = std::env::temp_dir()
+            .join(format!("motores-ação-{}", std::process::id()))
+            .join("áudio");
+        std::fs::create_dir_all(&pasta).unwrap();
+        let arq = pasta.join("petição.wav");
+        let sinal: Vec<f32> = (0..800).map(|i| (i as f32 / 12.0).sin() * 0.4).collect();
+        gravar_wav(&arq, &sinal).unwrap();
+        assert!(caminho_c(&arq).is_ok());
+        let lido = ler_wav(&arq).unwrap();
+        assert_eq!(lido.len(), sinal.len());
+        let _ = std::fs::remove_dir_all(pasta.parent().unwrap());
+    }
 
     #[test]
     fn grava_e_le_wav() {

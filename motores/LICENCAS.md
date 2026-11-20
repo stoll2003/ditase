@@ -53,6 +53,9 @@ sherpa-onnx (Apache-2.0), ONNX Runtime (MIT + ThirdPartyNotices), LLVM OpenMP, e
 | `rustls` (Mac/Linux) ou `native-tls` (Windows, SChannel) | via ureq | MIT/Apache-2.0 | HTTPS do download |
 | `sha2`, `serde_json` | 0.10, 1 | MIT/Apache-2.0 | hash e JSON |
 | `windows-sys` (Windows) | 0.59 | MIT/Apache-2.0 | Job Object, nome curto de caminho, memória |
+| `rcgen` 0.13, `yasna` | 0.13 / 0.5 | MIT ou Apache-2.0 | Certificado TLS efêmero da instância local |
+| `pem` | 3 | MIT | Codificação do certificado e da chave usados pelo llama-server |
+| `rustls`, `getrandom`, `tempfile` | 0.23 / 0.3 / 3 | Apache-2.0/ISC/MIT (`rustls`), MIT/Apache-2.0 (`getrandom`, `tempfile`) | TLS local, segredo aleatório e arquivos temporários por partida |
 | `libc` (Unix) | 0.2 | MIT/Apache-2.0 | sinal e memória |
 
 ## 4. Notas para a casca Windows (`windows/`)
