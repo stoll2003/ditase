@@ -166,6 +166,34 @@ fn uuid() -> String {
     format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}", a >> 32, (a >> 16) & 0xffff, a & 0xfff, 0x8000 | (b >> 48 & 0x3fff), b & 0xffff_ffff_ffff)
 }
 
+/// Deixa passar no máximo uma vez por `intervalo`, salvo quando forçado.
+pub struct Limitador { intervalo: Duration, ultimo: Option<Instant> }
+
+impl Limitador {
+    pub fn new(intervalo: Duration) -> Self { Self { intervalo, ultimo: None } }
+    pub fn deixar(&mut self, agora: Instant, forcar: bool) -> bool {
+        let passa = forcar || self.ultimo.is_none_or(|u| agora.duration_since(u) >= self.intervalo);
+        if passa { self.ultimo = Some(agora); }
+        passa
+    }
+}
+
+/// Fase do arquivo na interface e rótulo da etapa na pílula.
+fn rotulo_de_etapa(etapa: &str) -> (&'static str, &'static str) {
+    match etapa {
+        "transcrevendo" => ("transcrevendo", "Transcrevendo"),
+        "diarizando" => ("diarizando", "Separando falantes"),
+        _ => ("diarizando", "Preparando o texto"),
+    }
+}
+
+/// Corpo do evento `ditado:progresso` (contrato da ponte). Sem `progresso` quando a fração é desconhecida.
+fn progresso_json(id: &str, fase: &str, etapa: &str, rotulo: &str, fracao: Option<f64>, longo: bool, reuniao_ativa: bool) -> Value {
+    let mut v = json!({"id": id, "fase": fase, "etapa": {"id": etapa, "rotulo": rotulo}, "estimativa": fracao.is_some(), "longo": longo, "reuniaoAtiva": reuniao_ativa});
+    if let Some(f) = fracao { v["progresso"] = json!(f); }
+    v
+}
+
 /// Marca de "app fechando" no processamento da reunião.
 #[derive(Debug)]
 struct Desligando;
@@ -224,6 +252,8 @@ impl Lancamento {
         Ok(servico)
     }
 
+    /// Conexão própria ao banco (processador, coletor e gravações de fim têm cada um a sua).
+    fn armazem(&self) -> Result<ArmazemLancamento, nucleo::motores::Erro> { ArmazemLancamento::new(&self.banco) }
     fn leitor(&self) -> MutexGuard<'_, ArmazemLancamento> { self.leitor.lock().unwrap_or_else(|e| e.into_inner()) }
     fn mudou(&self) { (self.avisar)("lancamento", None) }
 
@@ -373,7 +403,7 @@ impl Lancamento {
     fn transcrever_arquivo(&self, t: &Tarefa) -> Res<Desfecho> {
         let fala = self.motores.fala(true)?;
         let falantes = self.motores.falantes();
-        let mut armazem = ArmazemLancamento::new(&self.banco)?;
+        let mut armazem = self.armazem()?;
         let versao = armazem.criar_versao(&t.doc, &t.nome, "arquivo")?;
         let encerrar = |armazem: &ArmazemLancamento, estado: &str, erro: Option<&str>| { let _ = armazem.encerrar_versao(&versao.id, estado, erro); };
         let assinatura = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
@@ -404,21 +434,23 @@ impl Lancamento {
             if assinatura(&caminho) != original { return Err("O arquivo mudou durante a transcrição. Tente de novo.".into()); }
             Ok(())
         };
-        let mut ultimo = Instant::now() - Duration::from_secs(1);
+        // Evento de progresso (pílula) a cada 250 ms; o estado completo da interface, que relê a
+        // lista inteira do SQLite, no máximo uma vez por segundo, além das trocas de etapa e do fim.
+        let mut evento = Limitador::new(Duration::from_millis(250));
+        let mut estado = Limitador::new(Duration::from_secs(1));
+        let mut etapa_anterior = String::new();
+        let longo = pcm.len() > 16_000 * 600;
         let progresso = |etapa: &str, fracao: Option<f64>| {
-            let (fase, rotulo) = match etapa {
-                "transcrevendo" => ("transcrevendo", "Transcrevendo"),
-                "diarizando" => ("diarizando", "Separando falantes"),
-                _ => ("diarizando", "Preparando o texto"),
-            };
+            let (fase, rotulo) = rotulo_de_etapa(etapa);
             self.atualizar_item(&t.doc, fase, fracao);
-            if ultimo.elapsed() >= Duration::from_millis(250) || fracao == Some(1.0) {
-                ultimo = Instant::now();
-                let mut v = json!({"id": versao.id, "fase": "processando", "etapa": {"id": etapa, "rotulo": rotulo}, "estimativa": fracao.is_some(), "longo": pcm.len() > 16_000 * 600, "reuniaoAtiva": false});
-                if let Some(f) = fracao { v["progresso"] = json!(f); }
-                (self.avisar)("ditado:progresso", Some(v));
-                self.mudou();
+            let fim = fracao == Some(1.0);
+            let trocou = etapa != etapa_anterior;
+            if trocou { etapa_anterior = etapa.to_string(); }
+            let agora = Instant::now();
+            if evento.deixar(agora, fim || trocou) {
+                (self.avisar)("ditado:progresso", Some(progresso_json(&versao.id, "processando", etapa, rotulo, fracao, longo, false)));
             }
+            if estado.deixar(agora, fim || trocou) { self.mudou(); }
         };
         let reconhecedor: &dyn ReconhecedorDeFala = &*fala;
         let resultado = ProcessadorDeArquivo { armazem: &mut armazem, reconhecedor, identificador: falantes.as_deref() }
@@ -520,7 +552,7 @@ impl Lancamento {
 
         let mut fontes = vec![(Fonte::Sistema, FonteDeAudio::Mac)];
         if com_microfone { fontes.push((Fonte::Microfone, FonteDeAudio::Mic)); }
-        let mut coletor = ColetorDeReuniao::new(doc.clone(), ArmazemLancamento::new(&self.banco)?, self.disco.clone(), 0.0);
+        let mut coletor = ColetorDeReuniao::new(doc.clone(), self.armazem()?, self.disco.clone(), 0.0);
         for (_, f) in &fontes { coletor.abrir(*f, 0.0)?; }
 
         let (envio, recebe) = mpsc::channel::<Captado>();
@@ -626,8 +658,8 @@ impl Lancamento {
     fn processar_reuniao(&self, doc: &str, fala: Arc<dyn crate::integracao::Fala>, ao_vivo: Option<(Arc<Vivo>, mpsc::Receiver<()>)>) {
         let falantes = self.motores.falantes();
         let resultado = (|| -> Res<bool> {
-            let mut armazem = ArmazemLancamento::new(&self.banco)?;
-            let leitura = ArmazemLancamento::new(&self.banco)?;
+            let mut armazem = self.armazem()?;
+            let leitura = self.armazem()?;
             let preparar = self.preparar.clone();
             let preparar = move |t: &str| preparar(t);
             let reconhecedor: &dyn ReconhecedorDeFala = &*fala;
@@ -649,7 +681,7 @@ impl Lancamento {
                 self.emitir_trechos(doc, &novos, &leitura, None);
             }
             p.encerrar_costuras()?;
-            (self.avisar)("ditado:progresso", Some(json!({"id": doc, "fase": "processando", "etapa": {"id": "passadaFinal", "rotulo": "Passada final"}, "estimativa": false, "longo": false, "reuniaoAtiva": false})));
+            (self.avisar)("ditado:progresso", Some(progresso_json(doc, "processando", "passadaFinal", "Passada final", None, false, false)));
             let identificados = p.passada_final(falantes.as_deref())?;
             Ok(identificados)
         })();
@@ -664,13 +696,13 @@ impl Lancamento {
         let motivo = match &resultado {
             Ok(id) => {
                 nota(format!("reunião {doc}: finalizada, falantes {}", if *id { "identificados" } else { "indisponíveis" }));
-                if let Ok(a) = ArmazemLancamento::new(&self.banco) { let _ = a.definir(doc, CampoDocumento::Aviso(None)); }
+                if let Ok(a) = self.armazem() { let _ = a.definir(doc, CampoDocumento::Aviso(None)); }
                 None
             }
             Err(e) => {
                 nota(format!("reunião {doc}: processamento incompleto ({e}); áudio mantido para recuperar"));
                 // Persistido: some do "finalizando" e aparece em "Reuniões interrompidas" com o motivo, também depois de reabrir.
-                if let Ok(a) = ArmazemLancamento::new(&self.banco) {
+                if let Ok(a) = self.armazem() {
                     let _ = a.mudar_estado(doc, "interrompida", &["processando", "gravando", "pausada"]);
                     let _ = a.definir(doc, CampoDocumento::Aviso(Some(FALHOU.into())));
                 }
@@ -680,7 +712,7 @@ impl Lancamento {
         if resultado.is_ok() && self.motores.resumo_disponivel() && !self.desligando.load(Ordering::Acquire) {
             // Cancelado durante a passada final: dispensa o resumo em vez de gerar.
             if self.resumo_cancelado.load(Ordering::Acquire) {
-                if let Ok(a) = ArmazemLancamento::new(&self.banco) { let _ = a.definir(doc, CampoDocumento::ResumoCancelado); }
+                if let Ok(a) = self.armazem() { let _ = a.definir(doc, CampoDocumento::ResumoCancelado); }
             } else {
                 self.gerar_resumo(doc);
             }
@@ -780,14 +812,14 @@ impl Lancamento {
     }
 
     fn gerar_resumo_dentro(&self, doc: &str) {
-        let Ok(Some(d)) = ArmazemLancamento::new(&self.banco).and_then(|a| a.documento(doc)) else { return };
+        let Ok(Some(d)) = self.armazem().and_then(|a| a.documento(doc)) else { return };
         if d.trechos.is_empty() { return; }
         let nomes: HashMap<&str, &str> = d.vozes.iter().map(|v| (v.id.as_str(), v.nome.as_str())).collect();
         let linhas: Vec<String> = d.trechos.iter().map(|t| format!("{}: {}", nomes.get(t.voz.as_str()).copied().unwrap_or(&t.voz), t.texto)).collect();
-        (self.avisar)("ditado:progresso", Some(json!({"id": doc, "fase": "processando", "etapa": {"id": "resumindo", "rotulo": "Gerando resumo"}, "estimativa": false, "longo": false, "reuniaoAtiva": false})));
+        (self.avisar)("ditado:progresso", Some(progresso_json(doc, "processando", "resumindo", "Gerando resumo", None, false, false)));
         let cancelado = self.resumo_cancelado.clone();
         let r = self.motores.resumir(&linhas, &|| cancelado.load(Ordering::Acquire));
-        let Ok(armazem) = ArmazemLancamento::new(&self.banco) else { return };
+        let Ok(armazem) = self.armazem() else { return };
         let campo = match r {
             _ if self.resumo_cancelado.load(Ordering::Acquire) => CampoDocumento::ResumoCancelado,
             Ok(topicos) if !topicos.is_empty() => CampoDocumento::Resumo(topicos),
@@ -928,6 +960,25 @@ mod testes {
         let mut w = crate::audio::EscritorWav::criar(&p).unwrap();
         w.gravar(pcm).unwrap();
         p
+    }
+
+    /// Invalidações do estado completo durante um arquivo: de uma a cada 250 ms para uma por
+    /// segundo (240 para 60 por minuto de processamento), sem perder troca de etapa nem o fim.
+    #[test]
+    fn limitador_de_invalidacoes() {
+        let t0 = Instant::now();
+        let mut estado = Limitador::new(Duration::from_secs(1));
+        let mut antes = 0;
+        let mut depois = 0;
+        for i in 0..240u64 {
+            antes += 1;
+            if estado.deixar(t0 + Duration::from_millis(250 * i), i == 239) { depois += 1; }
+        }
+        assert_eq!(antes, 240);
+        assert_eq!(depois, 61, "60 por segundo de processamento mais o fim");
+        assert!(estado.deixar(t0 + Duration::from_millis(59_800), true), "forçado sempre passa");
+        assert_eq!(rotulo_de_etapa("limpando"), ("diarizando", "Preparando o texto"));
+        assert!(progresso_json("v", "processando", "diarizando", "x", None, false, false).get("progresso").is_none());
     }
 
     #[test]
@@ -1246,5 +1297,39 @@ mod testes_derivacao {
             s2.desligar(Duration::from_secs(2));
             id };
         assert!(!id2.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod medicoes {
+    use super::*;
+    use crate::integracao::dubles::{voz, MotoresDuble};
+
+    /// Medição (não roda no CI): custo de abrir o serviço com uma reunião de `min` minutos em disco
+    /// e de ler o estado para a interface. `cargo test -p ditase medir_abertura -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn medir_abertura() {
+        for min in [10usize, 60] {
+            let tmp = crate::caminhos::pasta_de_teste();
+            let banco = tmp.path().join("t.sqlite");
+            let audio = tmp.path().join("Audio");
+            {
+                let a = ArmazemLancamento::new(&banco).unwrap();
+                let id = uuid();
+                a.criar_documento(&id, "reuniao", "Reunião", Some("mac"), "gravando").unwrap();
+                let mut c = ColetorDeReuniao::new(id, ArmazemLancamento::new(&banco).unwrap(), DiscoDeBlocos::new(audio.clone()), 0.0);
+                c.abrir(FonteDeAudio::Mac, 0.0).unwrap();
+                let bloco = voz(1.0, 0.0);
+                for i in 0..min * 60 { c.receber(FonteDeAudio::Mac, i as f64, &bloco).unwrap(); }
+                c.selar_tudo().unwrap();
+            }
+            let inicio = Instant::now();
+            let s = Lancamento::new(&banco, &audio, MotoresDuble::novo(), Arc::new(dubles::CapturaDuble { segundos: 1.0 }), Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
+            let abrir = inicio.elapsed();
+            let inicio = Instant::now();
+            for _ in 0..20 { s.estado(true).unwrap(); }
+            println!("reunião de {min} min em disco: abrir {:.1} ms; lancamento.estado {:.2} ms cada", abrir.as_secs_f64() * 1e3, inicio.elapsed().as_secs_f64() * 1e3 / 20.0);
+        }
     }
 }

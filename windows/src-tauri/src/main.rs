@@ -227,6 +227,7 @@ fn main() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![ponte, pilula_acao])
         .setup(|app| {
+            let inicio = std::time::Instant::now();
             let handle = app.handle().clone();
             let prefs = Arc::new(Preferencias::abrir(caminhos::preferencias()));
             let estado = handle.clone();
@@ -255,7 +256,9 @@ fn main() {
             let casca = Arc::new(Casca { app: handle.clone(), prefs: prefs.clone(), integracao, lancamento, pilula, controlador: controlador.clone() });
             motores.preparar_fala();
             app.manage(casca);
+            caminhos::nota(format!("abertura: serviços prontos em {} ms", inicio.elapsed().as_millis()));
             abrir_principal(&handle)?;
+            caminhos::nota(format!("abertura: janela criada em {} ms", inicio.elapsed().as_millis()));
             // Aberto pelo "iniciar com o Windows": fica só na bandeja e na pílula.
             if std::env::args().any(|a| a == "--bandeja") { if let Some(j) = handle.get_webview_window("principal") { let _ = j.hide(); } }
             bandeja(&handle, prefs.iniciar_com_windows())?;

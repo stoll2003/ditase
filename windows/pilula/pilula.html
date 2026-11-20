@@ -25,14 +25,15 @@
 </style>
 </head>
 <body>
-<div class="pilula" data-fase="ociosa" role="status" aria-live="polite">
+<!-- Só o texto é região viva: com o contêiner inteiro, o leitor de tela anunciava o relógio a cada segundo. -->
+<div class="pilula" data-fase="ociosa">
   <button id="microfone" aria-label="Começar ditado em mãos livres" title="">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
   </button>
   <div class="barras" id="barras" aria-hidden="true" hidden></div>
   <span class="tempo" id="tempo" hidden>0:00</span>
   <span class="giro" id="giro" aria-hidden="true" hidden></span>
-  <span class="texto" id="texto" hidden></span>
+  <span class="texto" id="texto" role="status" aria-live="polite" hidden></span>
   <button id="cancelar" aria-label="Cancelar ditado" hidden>
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
   </button>

@@ -34,7 +34,7 @@ pub fn montar(casca: &Casca) -> String {
 pub const LINHAS_APROVADAS: &[&str] = &[
     "abrindo", "saída", "atalho", "áudio", "ditado ", "ditado recusado", "reunião ", "arquivo ", "abertura das reuniões",
     "modelos", "modelo de IA", "reconhecedor", "falantes", "limpeza por IA", "colagem", "atualização", "recuperação",
-    "preferências", "teste", "dados migrados", "migração", "pílula", "iniciar com o Windows", "microfone", "arraste",
+    "preferências", "teste", "abertura", "dados migrados", "migração", "pílula", "iniciar com o Windows", "microfone", "arraste",
 ];
 
 pub fn linha_aprovada(linha: &str) -> String {

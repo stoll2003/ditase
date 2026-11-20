@@ -22,11 +22,34 @@ pub type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 pub trait Fala: Transcritor + ReconhecedorDeFala {}
 impl<T: Transcritor + ReconhecedorDeFala + ?Sized> Fala for T {}
 
+/// Por que o reconhecedor não está disponível. O texto (`Display`) é o que a pílula mostra.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FalaIndisponivel {
+    Ausente,
+    Baixando { feito: u64, total: u64 },
+    Carregando,
+    Demorou,
+    Falhou(String),
+}
+
+impl std::fmt::Display for FalaIndisponivel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Ausente => f.write_str("O modelo de fala ainda não foi baixado."),
+            Self::Baixando { feito, total } => write!(f, "Baixando o modelo de fala: {}%", (feito * 100).checked_div(*total).unwrap_or(0)),
+            Self::Carregando => f.write_str("O modelo de fala está carregando. Tente em alguns segundos."),
+            Self::Demorou => f.write_str("O modelo de fala demorou demais para carregar."),
+            Self::Falhou(m) => f.write_str(m),
+        }
+    }
+}
+impl std::error::Error for FalaIndisponivel {}
+
 /// O que a casca precisa dos motores. Nada aqui baixa ou carrega modelo nos testes.
 pub trait Motores: Send + Sync {
     /// Reconhecedor carregado. `esperar`: bloqueia enquanto o modelo ainda carrega (arquivos em fila).
     /// O erro é um texto para mostrar à pessoa ("Baixando o modelo de fala: 40%").
-    fn fala(&self, esperar: bool) -> Result<Arc<dyn Fala>, String>;
+    fn fala(&self, esperar: bool) -> Result<Arc<dyn Fala>, FalaIndisponivel>;
     /// Os arquivos do modelo de fala estão no disco (mesmo que ainda carregando).
     fn fala_disponivel(&self) -> bool;
     /// Separação de falantes, quando o modelo existe.
@@ -255,7 +278,7 @@ impl Integracao {
     pub fn descartar_ditado(&self, id: i64) -> Res<()> { Ok(self.b().apagar_ditado(id)?) }
 
     fn sessao(&self, id: Option<i64>, limpeza: bool, esperar: bool) -> Result<SessaoDitado, String> {
-        let fala = self.motores.fala(esperar)?;
+        let fala = self.motores.fala(esperar).map_err(|e| e.to_string())?;
         let transcritor: Arc<dyn Transcritor> = fala;
         let limpador = if limpeza { self.motores.limpador() } else { None };
         let termos = self.b().termos().map_err(|e| e.to_string())?;
@@ -405,7 +428,7 @@ pub mod dubles {
     }
 
     impl Motores for MotoresDuble {
-        fn fala(&self, _esperar: bool) -> Result<Arc<dyn Fala>, String> { Ok(if self.fala_quebrada { Arc::new(FalaQuebrada) } else { self.fala.clone() }) }
+        fn fala(&self, _esperar: bool) -> Result<Arc<dyn Fala>, super::FalaIndisponivel> { Ok(if self.fala_quebrada { Arc::new(FalaQuebrada) } else { self.fala.clone() }) }
         fn fala_disponivel(&self) -> bool { true }
         fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>> { self.com_falantes.then(|| Arc::new(FalantesDuble) as Arc<dyn IdentificadorDeFalantes>) }
         fn limpador(&self) -> Option<Arc<dyn Limpador>> { self.com_limpeza.then(|| Arc::new(LimpadorDuble) as Arc<dyn Limpador>) }
@@ -506,6 +529,13 @@ mod testes {
         let h = i.historico(10, "").unwrap();
         assert_eq!(h.as_array().unwrap().len(), 1);
         assert_eq!(h[0]["estado"], "falhou");
+    }
+
+    #[test]
+    fn motivo_da_fala_indisponivel_e_o_texto_da_pilula() {
+        assert_eq!(FalaIndisponivel::Baixando { feito: 40, total: 100 }.to_string(), "Baixando o modelo de fala: 40%");
+        assert_eq!(FalaIndisponivel::Baixando { feito: 1, total: 0 }.to_string(), "Baixando o modelo de fala: 0%");
+        assert_eq!(FalaIndisponivel::Falhou("x".into()).to_string(), "x");
     }
 
     #[test]

@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 
 use crate::{
     caminhos::{self, nota},
-    integracao::{Fala, Motores},
+    integracao::{Fala, FalaIndisponivel, Motores},
     preferencias::Preferencias,
 };
 
@@ -116,7 +116,6 @@ fn baixar_conjunto(pasta: &Path, conjunto: &ConjuntoDeModelo, cancelado: &dyn Fn
     Ok(())
 }
 
-fn porcento(feito: u64, total: u64) -> u64 { (feito * 100).checked_div(total).unwrap_or(0) }
 
 impl MotoresLocais {
     pub fn novo(pasta: PathBuf, prefs: Arc<Preferencias>, ao_mudar: AoMudar) -> Arc<Self> {
@@ -262,20 +261,20 @@ pub fn resumir_com(linhas: &[String], cancelado: &dyn Fn() -> bool, gerar: &dyn 
 }
 
 impl Motores for MotoresLocais {
-    fn fala(&self, esperar: bool) -> Result<Arc<dyn Fala>, String> {
+    fn fala(&self, esperar: bool) -> Result<Arc<dyn Fala>, FalaIndisponivel> {
         let mut f = self.fala.lock().unwrap();
         let limite = Instant::now() + Duration::from_secs(600);
         loop {
             match &*f {
                 EstadoFala::Pronto(p) => return Ok(p.clone()),
-                EstadoFala::Falhou(m) => return Err(m.clone()),
-                EstadoFala::Ausente => return Err("O modelo de fala ainda não foi baixado.".into()),
-                EstadoFala::Baixando(feito, total) if !esperar => return Err(format!("Baixando o modelo de fala: {}%", porcento(*feito, *total))),
-                EstadoFala::Carregando if !esperar => return Err("O modelo de fala está carregando. Tente em alguns segundos.".into()),
+                EstadoFala::Falhou(m) => return Err(FalaIndisponivel::Falhou(m.clone())),
+                EstadoFala::Ausente => return Err(FalaIndisponivel::Ausente),
+                EstadoFala::Baixando(feito, total) if !esperar => return Err(FalaIndisponivel::Baixando { feito: *feito, total: *total }),
+                EstadoFala::Carregando if !esperar => return Err(FalaIndisponivel::Carregando),
                 _ => {}
             }
             let agora = Instant::now();
-            if agora >= limite { return Err("O modelo de fala demorou demais para carregar.".into()); }
+            if agora >= limite { return Err(FalaIndisponivel::Demorou); }
             f = self.mudou_fala.wait_timeout(f, limite - agora).unwrap().0;
         }
     }
@@ -320,7 +319,7 @@ impl Motores for MotoresLocais {
     fn estado_reconhecedor(&self) -> (String, String) {
         match &*self.fala.lock().unwrap() {
             EstadoFala::Ausente => ("parado".into(), String::new()),
-            EstadoFala::Baixando(f, t) => ("carregando".into(), format!("Baixando o modelo de fala: {}%", porcento(*f, *t))),
+            EstadoFala::Baixando(f, t) => ("carregando".into(), FalaIndisponivel::Baixando { feito: *f, total: *t }.to_string()),
             EstadoFala::Carregando => ("carregando".into(), String::new()),
             EstadoFala::Pronto(_) => ("pronto".into(), String::new()),
             EstadoFala::Falhou(m) => ("falhou".into(), m.clone()),

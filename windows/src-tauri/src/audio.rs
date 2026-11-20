@@ -330,3 +330,21 @@ mod testes {
         let _ = std::fs::remove_file(p);
     }
 }
+
+#[cfg(test)]
+mod medicoes {
+    use super::*;
+
+    /// Medição (não roda no CI): reamostrar 60 s de microfone a 48 kHz em blocos de 10 ms.
+    /// `cargo test -p ditase --release medir_reamostrador -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn medir_reamostrador() {
+        let bloco: Vec<f32> = (0..480).map(|i| (i as f32 * 0.01).sin() * 0.3).collect();
+        let mut r = Reamostrador::new(48_000);
+        let inicio = std::time::Instant::now();
+        let mut total = 0;
+        for _ in 0..6000 { total += r.processar(&bloco).len(); }
+        println!("reamostrar 60 s (48 kHz -> 16 kHz, blocos de 10 ms): {:.2} ms, {total} amostras", inicio.elapsed().as_secs_f64() * 1e3);
+    }
+}
