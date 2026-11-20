@@ -75,6 +75,12 @@ jobs:
         with:
           shared-key: windows-x64
 
+      # O rust-cache restaura o build do sherpa-onnx-sys sem as bibliotecas que o build.rs dele
+      # baixa para OUT_DIR (LNK1181 sherpa-onnx-c-api.lib). Refaz só esse crate.
+      - name: Refazer sherpa-onnx-sys (cache sem as bibliotecas baixadas)
+        shell: bash
+        run: cargo clean -p sherpa-onnx-sys && cargo clean -p sherpa-onnx-sys --release
+
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
