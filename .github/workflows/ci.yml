@@ -109,8 +109,17 @@ jobs:
           npm ci
           npm run build
 
-      - name: cargo test (workspace)
-        run: cargo test --locked --workspace --all-targets
+      # Use o mesmo perfil e feature do NSIS para reaproveitar dependências compiladas.
+      - name: Testes Rust em Release (workspace e WER)
+        shell: bash
+        env:
+          TEM_TAURI: ${{ steps.modo.outputs.tauri }}
+        run: |
+          set -euo pipefail
+          args=(--locked --workspace --all-targets --release)
+          if [ "$TEM_TAURI" = true ]; then args+=(--features ditase/custom-protocol); fi
+          cargo test "${args[@]}" | tee "$RUNNER_TEMP/ditase-testes.log"
+          grep -F 'test medicao::testes::wer_basico ... ok' "$RUNNER_TEMP/ditase-testes.log"
 
       - name: install.ps1 no Windows PowerShell 5.1 (sintaxe e recusa de hash errado)
         shell: powershell
@@ -157,13 +166,6 @@ jobs:
           path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
-
-      - name: Regressão da taxa de erro por palavra (WER)
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo test --locked -p motores --lib medicao::testes::wer_basico -- --exact | tee wer.log
-          grep -F 'test medicao::testes::wer_basico ... ok' wer.log
 
       - name: Formatação Rust
         if: success() || failure()
