@@ -48,12 +48,20 @@ final class CosturaETempoTests: XCTestCase {
         XCTAssertEqual(try amb.palavras(doc), ["combinado", "até", "quinta"])
     }
 
-    func testDecisaoSoConfirmaComFronteiraResolvida() {
-        let palavras = [PalavraReconhecida(texto: "a", inicio: 0.5, fim: 0.9), PalavraReconhecida(texto: "b", inicio: 2.6, fim: 3.1)]
-        let r = Costura.decidir(palavras: palavras, confirmadoAte: 0, limite: 3 * taxaLancamento, fechamento: false) { _ in true }
-        XCTAssertEqual(r.confirmadas.map(\.texto), ["a"], "palavra que encosta no limite fica na cauda")
-        XCTAssertLessThanOrEqual(r.novoConfirmado, Int(2.5 * Double(taxaLancamento)), "o corte fica antes da folga da palavra seguinte")
-        XCTAssertGreaterThan(r.novoConfirmado, Int(0.9 * Double(taxaLancamento)))
+    func testDecisaoSoConfirmaComFronteiraResolvida() throws {
+        struct Palavra: Decodable { let texto: String; let inicio, fim: Double }
+        struct Caso: Decodable {
+            let palavras: [Palavra]
+            let confirmado, limite, acima, ate: Int
+            let fechamento, atividade: Bool
+            let textos: [String]
+        }
+        let c = try casosCompartilhados("costura", como: Caso.self)
+        let palavras = c.palavras.map { PalavraReconhecida(texto: $0.texto, inicio: $0.inicio, fim: $0.fim) }
+        let r = Costura.decidir(palavras: palavras, confirmadoAte: c.confirmado, limite: c.limite, fechamento: c.fechamento) { _ in c.atividade }
+        XCTAssertEqual(r.confirmadas.map(\.texto), c.textos)
+        XCTAssertLessThanOrEqual(r.novoConfirmado, c.ate)
+        XCTAssertGreaterThan(r.novoConfirmado, c.acima)
     }
 
     // MARK: Zero trechos

@@ -28,48 +28,48 @@ func alimentarEmBlocos(_ s: inout Segmentador, _ amostras: [Float], bloco: Int =
 }
 
 final class SegmentadorTests: XCTestCase {
-    func testSilencioNaoGeraTrecho() {
+    func testSilencioNaoGeraTrecho() throws {
         var s = Segmentador()
-        XCTAssertTrue(alimentarEmBlocos(&s, audio([(false, 5)])).isEmpty)
+        XCTAssertTrue(alimentarEmBlocos(&s, try audioDoContrato("testSilencioNaoGeraTrecho")).isEmpty)
     }
 
-    func testCliqueCurtoEhDescartado() {
+    func testCliqueCurtoEhDescartado() throws {
         var s = Segmentador()
-        XCTAssertTrue(alimentarEmBlocos(&s, audio([(false, 1), (true, 0.06), (false, 2)])).isEmpty)
+        XCTAssertTrue(alimentarEmBlocos(&s, try audioDoContrato("testCliqueCurtoEhDescartado")).isEmpty)
     }
 
-    func testFalaCurtaViraUmTrechoComMargem() {
+    func testFalaCurtaViraUmTrechoComMargem() throws {
         var s = Segmentador()
-        let trechos = alimentarEmBlocos(&s, audio([(false, 1), (true, 2), (false, 0.3)]))
+        let trechos = alimentarEmBlocos(&s, try audioDoContrato("testFalaCurtaViraUmTrechoComMargem"))
         XCTAssertEqual(trechos.count, 1)
         XCTAssertEqual(trechos[0].duracao, 2.4, accuracy: 0.25)
         XCTAssertEqual(trechos[0].pausaAntes, 1.0, accuracy: 0.1)
         XCTAssertFalse(trechos[0].cortadoNoMeio)
     }
 
-    func testPausaCurtaNaoCortaTrechoPequeno() {
+    func testPausaCurtaNaoCortaTrechoPequeno() throws {
         var s = Segmentador()
-        let trechos = alimentarEmBlocos(&s, audio([(true, 2), (false, 0.7), (true, 2)]))
+        let trechos = alimentarEmBlocos(&s, try audioDoContrato("testPausaCurtaNaoCortaTrechoPequeno"))
         XCTAssertEqual(trechos.count, 1)
     }
 
-    func testPausaCortaDepoisDoMinimo() {
+    func testPausaCortaDepoisDoMinimo() throws {
         var s = Segmentador()
-        let trechos = alimentarEmBlocos(&s, audio([(true, 6), (false, 0.7), (true, 3)]))
+        let trechos = alimentarEmBlocos(&s, try audioDoContrato("testPausaCortaDepoisDoMinimo"))
         XCTAssertEqual(trechos.count, 2)
         XCTAssertEqual(trechos[0].duracao, 6.2, accuracy: 0.3)
     }
 
-    func testPausaLongaCortaSempreEInformaAPausa() {
+    func testPausaLongaCortaSempreEInformaAPausa() throws {
         var s = Segmentador()
-        let trechos = alimentarEmBlocos(&s, audio([(true, 2), (false, 3), (true, 2)]))
+        let trechos = alimentarEmBlocos(&s, try audioDoContrato("testPausaLongaCortaSempreEInformaAPausa"))
         XCTAssertEqual(trechos.count, 2)
         XCTAssertEqual(trechos[1].pausaAntes, 3.0, accuracy: 0.15)
     }
 
-    func testFalaSemPausaCortaNoLimiteSemPerderAmostra() {
+    func testFalaSemPausaCortaNoLimiteSemPerderAmostra() throws {
         var s = Segmentador()
-        let entrada = audio([(true, 40)])
+        let entrada = try audioDoContrato("testFalaSemPausaCortaNoLimiteSemPerderAmostra")
         let trechos = alimentarEmBlocos(&s, entrada)
         XCTAssertGreaterThanOrEqual(trechos.count, 3)
         XCTAssertTrue(trechos.allSatisfy { $0.duracao <= 13.6 })
@@ -79,18 +79,18 @@ final class SegmentadorTests: XCTestCase {
         for (a, b) in zip(trechos, trechos.dropFirst()) { XCTAssertEqual(a.inicio + a.amostras.count, b.inicio) }
     }
 
-    func testCorteForcadoProcuraOPontoQuieto() {
+    func testCorteForcadoProcuraOPontoQuieto() throws {
         var s = Segmentador()
         // Pausa de 0,3 s aos 11 s: curta demais para fechar, mas é onde o corte forçado deve cair.
-        let trechos = alimentarEmBlocos(&s, audio([(true, 11), (false, 0.3), (true, 6)]))
+        let trechos = alimentarEmBlocos(&s, try audioDoContrato("testCorteForcadoProcuraOPontoQuieto"))
         XCTAssertEqual(trechos.count, 2)
         XCTAssertEqual(trechos[0].duracao, 11.15, accuracy: 0.3)
     }
 
-    func testUmaHoraDeFalaNaoAcumulaMemoriaNemPerdeTrecho() {
+    func testUmaHoraDeFalaNaoAcumulaMemoriaNemPerdeTrecho() throws {
         var s = Segmentador()
         var total = 0
-        let ciclo = audio([(true, 8), (false, 0.8)])
+        let ciclo = try audioDoContrato("testUmaHoraDeFalaNaoAcumulaMemoriaNemPerdeTrecho")
         for _ in 0..<410 { // cerca de uma hora
             total += s.alimentar(ciclo).count
         }
@@ -99,9 +99,9 @@ final class SegmentadorTests: XCTestCase {
         XCTAssertEqual(s.falaTotal, 410 * 8, accuracy: 60)
     }
 
-    func testVozBaixaAindaEhFala() {
+    func testVozBaixaAindaEhFala() throws {
         var s = Segmentador()
-        let baixo = audio([(false, 0.5), (true, 3), (false, 0.5)]).map { $0 * 0.05 }
+        let baixo = try audioDoContrato("testVozBaixaAindaEhFala").map { $0 * 0.05 }
         XCTAssertEqual(alimentarEmBlocos(&s, baixo).count, 1)
     }
 }

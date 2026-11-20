@@ -1,0 +1,5 @@
+{
+  "palavras": [{"texto":"a","inicio":0.5,"fim":0.9},{"texto":"b","inicio":2.6,"fim":3.1}],
+  "confirmado":0,"limite":48000,"fechamento":false,"atividade":true,
+  "textos":["a"],"acima":14400,"ate":40000
+}
