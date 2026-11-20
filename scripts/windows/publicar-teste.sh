@@ -69,6 +69,7 @@ COMMIT_ART="$(tr -d '\r\n' < "$TMP/art/commit.txt")"
   || { echo "SHA-256 do instalador não confere; nada publicado." >&2; exit 1; }
 gh api "repos/$REPO/contents/windows/src-tauri/tauri.conf.json?ref=$SHA" --jq .content \
   | base64 -D > "$TMP/tauri.conf.json"
+node "$SCRIPTS/montar-canal-teste.mjs" "$TMP/art" "$SHA" "$REPO" "$TMP/tauri.conf.json" --validar-config
 
 INSTALADOR="Dita.se-windows-x64-$VERSAO-setup.exe"
 SAIDA="$TMP/art"

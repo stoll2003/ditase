@@ -1,10 +1,21 @@
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-const [pasta, commit, repositorio, caminhoTauri] = process.argv.slice(2)
+const [pasta, commit, repositorio, caminhoTauri, modo] = process.argv.slice(2)
 if (!pasta || !/^[\da-f]{40}$/.test(commit ?? '') || !repositorio || !caminhoTauri) {
-  throw new Error('Uso: node montar-canal-teste.mjs <artefato> <commit> <dono/repo> <tauri.conf.json>')
+  throw new Error('Uso: node montar-canal-teste.mjs <artefato> <commit> <dono/repo> <tauri.conf.json> [--validar-config]')
 }
+
+const base = `https://github.com/${repositorio}/releases/download/windows-teste`
+const config = JSON.parse(await readFile(caminhoTauri, 'utf8'))
+if (!config.plugins?.updater?.endpoints?.includes(`${base}/latest.json`)) {
+  throw new Error('O Tauri não consulta o manifesto do repositório informado.')
+}
+
+if (config.plugins?.updater?.requireSignedVersion !== true) {
+  throw new Error('O atualizador precisa exigir a versão assinada (requireSignedVersion).')
+}
+if (modo === '--validar-config') process.exit(0)
 
 const ler = async (nome) => (await readFile(join(pasta, nome), 'utf8')).trim()
 const versao = await ler('versao.txt')
@@ -13,12 +24,6 @@ if (!/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)-teste\.[1-9]\d*$/.test(ver
 }
 if (await ler('commit.txt') !== commit) {
   throw new Error('O commit do artefato difere do commit solicitado.')
-}
-
-const base = `https://github.com/${repositorio}/releases/download/windows-teste`
-const config = JSON.parse(await readFile(caminhoTauri, 'utf8'))
-if (!config.plugins?.updater?.endpoints?.includes(`${base}/latest.json`)) {
-  throw new Error('O Tauri não consulta o manifesto do repositório informado.')
 }
 
 const instalador = `Dita.se-windows-x64-${versao}-setup.exe`
