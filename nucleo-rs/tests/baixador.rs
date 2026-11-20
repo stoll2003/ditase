@@ -182,7 +182,8 @@ fn existente_invalido() {
 fn arquivo_trocado_invalida_marcador() {
     let (_dir, b, t) = ambiente();
     baixar(&b, &t).unwrap();
-    let f = fs::File::open(b.destino()).unwrap();
+    // No Windows, set_modified exige o arquivo aberto para escrita.
+    let f = fs::OpenOptions::new().write(true).open(b.destino()).unwrap();
     f.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(950000000))
         .unwrap();
     assert!(!b.instalado() && b.precisa_conferir());
