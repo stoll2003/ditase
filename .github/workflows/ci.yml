@@ -109,6 +109,16 @@ jobs:
         shell: powershell
         run: .\scripts\windows\preparar-vendor.ps1
 
+      - name: diag llama TLS (nao juntar)
+        if: steps.modo.outputs.tauri == 'true'
+        shell: powershell
+        run: |
+          $env:PATH = "$PWD\windows\vendor\sherpa;$env:PATH"
+          $g = Join-Path $env:RUNNER_TEMP "stories260K.gguf"
+          Invoke-WebRequest -Uri "https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf" -OutFile $g -UseBasicParsing
+          cargo run --release -p motores --bin medir -- --diagnostico-llama --llama windows\vendor\llama\llama-server.exe --gguf $g --sha256 270cba1bd5109f42d03350f60406024560464db173c0e387d91f0426d3bd256d
+          if ($LASTEXITCODE -ne 0) { Write-Host "DIAG EXIT $LASTEXITCODE"; exit 1 }
+
       - name: Build Tauri (NSIS por usuário, sem atualizador)
         if: steps.modo.outputs.tauri == 'true'
         working-directory: windows
