@@ -2,20 +2,22 @@
 # antes do `tauri build` no Windows (CI e canal de teste).
 # Tudo vai para windows/vendor/ (ignorado no git).
 # Fontes e hashes fixados conforme motores/LICENCAS.md.
+param([switch]$SomenteSherpa)
+
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 $Raiz = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 $Vendor = Join-Path $Raiz "windows\vendor"
 $Cache = Join-Path $Raiz "target\vendor-cache"
+if ($env:RUNNER_TEMP) { $Cache = Join-Path $env:RUNNER_TEMP "ditase-vendor-cache" }
 
 New-Item -ItemType Directory -Force -Path $Cache | Out-Null
-if (Test-Path $Vendor) { Remove-Item -Recurse -Force $Vendor }
+if (-not $SomenteSherpa -and (Test-Path -LiteralPath $Vendor)) { Remove-Item -Recurse -Force -LiteralPath $Vendor }
 $DirSherpa = Join-Path $Vendor "sherpa"
 $DirLlama = Join-Path $Vendor "llama"
 $DirVc = Join-Path $Vendor "vcruntime"
 $DirAvisos = Join-Path $Vendor "avisos"
-New-Item -ItemType Directory -Force -Path $DirSherpa, $DirLlama, $DirVc, $DirAvisos | Out-Null
 
 function Baixar-E-Conferir {
   param(
@@ -23,22 +25,35 @@ function Baixar-E-Conferir {
     [Parameter(Mandatory)][string]$Destino,
     [Parameter(Mandatory)][string]$Sha256Esperado
   )
-  if (Test-Path $Destino) {
-    $atual = (Get-FileHash -Algorithm SHA256 -Path $Destino).Hash.ToLowerInvariant()
-    if ($atual -eq $Sha256Esperado.ToLowerInvariant()) {
+  if (Test-Path -LiteralPath $Destino) {
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $Destino).Hash -eq $Sha256Esperado) {
       Write-Host "Cache válido: $(Split-Path -Leaf $Destino)"
       return
     }
-    Remove-Item -Force $Destino
+    Remove-Item -Force -LiteralPath $Destino
   }
-  Write-Host "Baixando $Url ..."
-  Invoke-WebRequest -Uri $Url -OutFile $Destino -UseBasicParsing
-  $hash = (Get-FileHash -Algorithm SHA256 -Path $Destino).Hash.ToLowerInvariant()
-  if ($hash -ne $Sha256Esperado.ToLowerInvariant()) {
-    Remove-Item -Force $Destino
-    throw "SHA-256 divergente para $Url. Esperado: $Sha256Esperado, obtido: $hash"
+
+  $parcial = "$Destino.part"
+  try {
+    for ($tentativa = 1; $tentativa -le 3; $tentativa++) {
+      try {
+        Write-Host "Baixando $Url (tentativa $tentativa/3)..."
+        Invoke-WebRequest -Uri $Url -OutFile $parcial -UseBasicParsing -TimeoutSec 120
+        break
+      } catch {
+        if ($tentativa -eq 3) { throw }
+        Start-Sleep -Seconds (2 * $tentativa)
+      }
+    }
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $parcial).Hash
+    if ($hash -ne $Sha256Esperado) {
+      throw "SHA-256 divergente para $Url. Esperado: $Sha256Esperado, obtido: $hash"
+    }
+    Move-Item -LiteralPath $parcial -Destination $Destino
+    Write-Host "SHA-256 ok: $(Split-Path -Leaf $Destino)"
+  } finally {
+    Remove-Item -Force -LiteralPath $parcial -ErrorAction SilentlyContinue
   }
-  Write-Host "SHA-256 ok: $(Split-Path -Leaf $Destino)"
 }
 
 # 1. sherpa-onnx v2.0.1 (DLLs de fala e diarização)
@@ -48,16 +63,33 @@ Baixar-E-Conferir `
   -Destino $SherpaTar `
   -Sha256Esperado "afa4de3ca4ab0afd53bb4aab40d28ee15608364b549ffc0fe0caf6489bfc39a5"
 
-$TmpSherpa = Join-Path $Cache "extract-sherpa"
+$Extracao = Join-Path $Raiz "target"
+if ($env:RUNNER_TEMP) { $Extracao = $env:RUNNER_TEMP }
+$TmpSherpa = Join-Path $Extracao "ditase-extract-sherpa"
 if (Test-Path $TmpSherpa) { Remove-Item -Recurse -Force $TmpSherpa }
 New-Item -ItemType Directory -Force -Path $TmpSherpa | Out-Null
 & tar -xjf $SherpaTar -C $TmpSherpa
 if ($LASTEXITCODE -ne 0) { throw "Falha ao extrair $SherpaTar" }
 
-foreach ($dll in @("sherpa-onnx-c-api.dll", "onnxruntime.dll", "onnxruntime_providers_shared.dll")) {
-  $encontrado = Get-ChildItem -Path $TmpSherpa -Recurse -Filter $dll | Select-Object -First 1
-  if (-not $encontrado) { throw "DLL ausente no pacote sherpa-onnx: $dll" }
-  Copy-Item -Path $encontrado.FullName -Destination (Join-Path $DirSherpa $dll) -Force
+$ImportLib = Get-ChildItem -LiteralPath $TmpSherpa -Recurse -Filter "sherpa-onnx-c-api.lib" | Select-Object -First 1
+if (-not $ImportLib) { throw "Biblioteca de link do sherpa-onnx ausente." }
+$SherpaLib = $ImportLib.DirectoryName
+$DllsSherpa = @("sherpa-onnx-c-api.dll", "onnxruntime.dll", "onnxruntime_providers_shared.dll")
+foreach ($dll in $DllsSherpa) {
+  if (-not (Test-Path -LiteralPath (Join-Path $SherpaLib $dll) -PathType Leaf)) {
+    throw "DLL ausente no diretório de bibliotecas do sherpa-onnx: $dll"
+  }
+}
+if ($env:GITHUB_ENV) {
+  Add-Content -LiteralPath $env:GITHUB_ENV -Value "SHERPA_ONNX_LIB_DIR=$SherpaLib" -Encoding UTF8
+  # Os testes em target/debug/deps também precisam das DLLs quando o Cargo usa cache.
+  Add-Content -LiteralPath $env:GITHUB_PATH -Value $SherpaLib -Encoding UTF8
+}
+if ($SomenteSherpa) { return }
+
+New-Item -ItemType Directory -Force -Path $DirSherpa, $DirLlama, $DirVc, $DirAvisos | Out-Null
+foreach ($dll in $DllsSherpa) {
+  Copy-Item -LiteralPath (Join-Path $SherpaLib $dll) -Destination (Join-Path $DirSherpa $dll)
 }
 
 $AvisoOrt = Get-ChildItem -Path $TmpSherpa -Recurse -Filter "ThirdPartyNotices.txt" | Select-Object -First 1
@@ -77,7 +109,7 @@ Baixar-E-Conferir `
   -Destino $LlamaZip `
   -Sha256Esperado "837c1655e87df3b66989f4be33a792a1399c785bf259038dc75c900096683e69"
 
-$TmpLlama = Join-Path $Cache "extract-llama"
+$TmpLlama = Join-Path $Extracao "ditase-extract-llama"
 if (Test-Path $TmpLlama) { Remove-Item -Recurse -Force $TmpLlama }
 Expand-Archive -Path $LlamaZip -DestinationPath $TmpLlama -Force
 

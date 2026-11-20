@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -70,16 +70,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: windows-x64
+          shared-key: windows-x64-sherpa-verified-v1
 
-      # O rust-cache restaura o build do sherpa-onnx-sys sem as bibliotecas que o build.rs dele
-      # baixa para target/sherpa-onnx-prebuilt (LNK1181 sherpa-onnx-c-api.lib). Refaz só esse crate.
-      - name: Refazer sherpa-onnx-sys (cache sem as bibliotecas baixadas)
-        shell: bash
-        run: rm -rf target/sherpa-onnx-prebuilt && cargo clean -p sherpa-onnx-sys && cargo clean -p sherpa-onnx-sys --release
+      # Cache só dos arquivos baixados. O hash é conferido mesmo quando há cache.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows/preparar-vendor.ps1') }}
+
+      - name: Preparar bibliotecas verificadas do Windows
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1 ${{ steps.modo.outputs.tauri == 'false' && '-SomenteSherpa' || '' }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -94,7 +99,7 @@ jobs:
           npm run build
 
       - name: cargo test (workspace)
-        run: cargo test --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets
 
       - name: install.ps1 no Windows PowerShell 5.1 (sintaxe e recusa de hash errado)
         shell: powershell
@@ -104,11 +109,6 @@ jobs:
         shell: pwsh
         run: .\scripts\windows\testar-install.ps1 -Modo sintaxe
 
-      - name: Preparar binários (vendor)
-        if: steps.modo.outputs.tauri == 'true'
-        shell: powershell
-        run: .\scripts\windows\preparar-vendor.ps1
-
       - name: Build Tauri (NSIS por usuário, sem atualizador)
         if: steps.modo.outputs.tauri == 'true'
         working-directory: windows
@@ -116,13 +116,20 @@ jobs:
         run: |
           # installMode currentUser: instala em %LOCALAPPDATA% sem pedir administrador.
           # Em CI não há chave do atualizador (PRs de fora não leem secrets).
-          npx --yes @tauri-apps/cli@2 build --bundles nsis --ci \
+          npx --yes @tauri-apps/cli@2.12.6 build --bundles nsis --ci \
             --config src-tauri/tauri.distribuicao.conf.json \
-            --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}'
+            --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' -- --locked
 
       - name: install.ps1 instalando o build do CI (por usuário, atalho, desinstala)
         if: steps.modo.outputs.tauri == 'true'
         shell: powershell
+        run: |
+          $exe = Get-ChildItem target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
+          .\scripts\windows\testar-install.ps1 -Modo instalacao -Instalador $exe.FullName
+
+      - name: Reinstalação em pasta com acento e espaço (PowerShell 7)
+        if: steps.modo.outputs.tauri == 'true'
+        shell: pwsh
         run: |
           $exe = Get-ChildItem target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
           .\scripts\windows\testar-install.ps1 -Modo instalacao -Instalador $exe.FullName
@@ -135,3 +142,14 @@ jobs:
           path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
+
+      - name: Regressão da taxa de erro por palavra (WER)
+        run: cargo test --locked -p motores --lib medicao::testes::wer_basico -- --exact
+
+      - name: Formatação Rust
+        if: success() || failure()
+        run: cargo fmt --all --check
+
+      - name: Clippy Windows
+        if: success() || failure()
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings

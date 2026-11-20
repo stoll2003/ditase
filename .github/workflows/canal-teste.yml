@@ -2,6 +2,7 @@
 # Cada push na branch windows gera o instalador NSIS por usuário (sem assinatura do
 # atualizador) e guarda como artefato "canal-teste-windows":
 #   Dita.se-windows-x64-setup.exe   instalador
+#   SHA256SUMS.txt                 hash do instalador
 #   versao.txt                      <versão do workspace>-teste.<número da execução>
 #   commit.txt                      commit do build
 # A assinatura do atualizador, o latest.json e o pre-release windows-teste são feitos
@@ -17,8 +18,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: canal-teste-windows
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,15 +58,20 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         if: steps.modo.outputs.tauri == 'true'
         with:
-          shared-key: windows-x64
+          shared-key: windows-x64-sherpa-verified-v1
           save-if: false
 
-      # O rust-cache restaura o build do sherpa-onnx-sys sem as bibliotecas que o build.rs dele
-      # baixa para target/sherpa-onnx-prebuilt (LNK1181 sherpa-onnx-c-api.lib). Refaz só esse crate.
-      - name: Refazer sherpa-onnx-sys (cache sem as bibliotecas baixadas)
+      # Cache só dos arquivos baixados. O hash é conferido mesmo quando há cache.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         if: steps.modo.outputs.tauri == 'true'
-        shell: bash
-        run: rm -rf target/sherpa-onnx-prebuilt && cargo clean -p sherpa-onnx-sys && cargo clean -p sherpa-onnx-sys --release
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows/preparar-vendor.ps1') }}
+
+      - name: Preparar bibliotecas verificadas do Windows
+        if: steps.modo.outputs.tauri == 'true'
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         if: steps.modo.outputs.tauri == 'true'
@@ -83,12 +89,7 @@ jobs:
 
       - name: cargo test (workspace)
         if: steps.modo.outputs.tauri == 'true'
-        run: cargo test --workspace --all-targets
-
-      - name: Preparar binários (vendor)
-        if: steps.modo.outputs.tauri == 'true'
-        shell: powershell
-        run: .\scripts\windows\preparar-vendor.ps1
+        run: cargo test --locked --workspace --all-targets
 
       - name: Build Tauri (NSIS por usuário, sem assinatura do atualizador)
         if: steps.modo.outputs.tauri == 'true'
@@ -98,7 +99,7 @@ jobs:
           VERSAO: ${{ steps.modo.outputs.versao }}
         run: |
           config=$(printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' "$VERSAO")
-          npx --yes @tauri-apps/cli@2 build --bundles nsis --ci --config src-tauri/tauri.distribuicao.conf.json --config "$config"
+          npx --yes @tauri-apps/cli@2.12.6 build --bundles nsis --ci --config src-tauri/tauri.distribuicao.conf.json --config "$config" -- --locked
 
       - name: Montar artefato
         if: steps.modo.outputs.tauri == 'true'
@@ -112,7 +113,7 @@ jobs:
           cp "$exe" "saida/$INSTALADOR"
           printf '%s\n' "$VERSAO" > saida/versao.txt
           printf '%s\n' "$GITHUB_SHA" > saida/commit.txt
-          (cd saida && sha256sum "$INSTALADOR")
+          (cd saida && sha256sum "$INSTALADOR" > SHA256SUMS.txt)
 
       - name: Guardar artefato
         if: steps.modo.outputs.tauri == 'true'
