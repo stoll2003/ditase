@@ -3,7 +3,10 @@
 //! e do Alt+Tab.
 use windows::Win32::{
     Foundation::HWND,
-    UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST},
+    UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST,
+    },
 };
 
 pub fn sem_foco(hwnd: isize) {

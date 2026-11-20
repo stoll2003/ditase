@@ -12,15 +12,18 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::{atomic::{AtomicBool, Ordering}, mpsc, Arc, Mutex, MutexGuard},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex, MutexGuard,
+    },
     thread,
     time::{Duration, Instant},
 };
 
 use nucleo::{
-    motores::ReconhecedorDeFala,
-    ArmazemLancamento, CampoDocumento, ColetorDeReuniao, Desfecho, DiscoDeBlocos, FonteDeAudio, Palavras,
-    ProcessadorDeArquivo, ProcessadorDeReuniao, TranscricaoLonga, TrechoNovo,
+    motores::ReconhecedorDeFala, ArmazemLancamento, CampoDocumento, ColetorDeReuniao, Desfecho,
+    DiscoDeBlocos, FonteDeAudio, Palavras, ProcessadorDeArquivo, ProcessadorDeReuniao,
+    TranscricaoLonga, TrechoNovo,
 };
 use serde_json::{json, Value};
 
@@ -42,7 +45,12 @@ pub type AoBloco = Box<dyn FnMut(f64, Vec<f32>, f32) + Send>;
 /// Abre fontes de áudio. No app, `cpal` (microfone e loopback); nos testes, um dublê.
 pub trait Capturador: Send + Sync {
     /// Devolve um guarda: soltá-lo fecha a fonte.
-    fn abrir(&self, fonte: Fonte, relogio: Instant, ao_bloco: AoBloco) -> Result<Box<dyn Send>, String>;
+    fn abrir(
+        &self,
+        fonte: Fonte,
+        relogio: Instant,
+        ao_bloco: AoBloco,
+    ) -> Result<Box<dyn Send>, String>;
 }
 
 /// Tempo de cada bloco de uma fonte, pela contagem de amostras entregues desde o primeiro bloco.
@@ -50,7 +58,10 @@ pub trait Capturador: Send + Sync {
 /// atraso de 60 ms vira lacuna no coletor (tolerância de 960 amostras do núcleo). Só ressincroniza
 /// quando a diferença passa de `RESSINCRONIA` (o dispositivo realmente parou ou pulou).
 #[derive(Default)]
-pub struct RelogioDeFonte { inicio: Option<f64>, amostras: u64 }
+pub struct RelogioDeFonte {
+    inicio: Option<f64>,
+    amostras: u64,
+}
 
 pub const RESSINCRONIA: f64 = 0.3;
 
@@ -71,16 +82,28 @@ impl RelogioDeFonte {
 }
 
 /// Capturador real: `audio::Captura`. O tempo do bloco vem do [`RelogioDeFonte`].
-pub struct CapturaDoSistema { pub microfone: Arc<dyn Fn() -> String + Send + Sync> }
+pub struct CapturaDoSistema {
+    pub microfone: Arc<dyn Fn() -> String + Send + Sync>,
+}
 
 impl Capturador for CapturaDoSistema {
-    fn abrir(&self, fonte: Fonte, relogio: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
-        let nome = if fonte == Fonte::Microfone { (self.microfone)() } else { String::new() };
+    fn abrir(
+        &self,
+        fonte: Fonte,
+        relogio: Instant,
+        mut ao_bloco: AoBloco,
+    ) -> Result<Box<dyn Send>, String> {
+        let nome = if fonte == Fonte::Microfone {
+            (self.microfone)()
+        } else {
+            String::new()
+        };
         let mut tempo = RelogioDeFonte::default();
         let c = crate::audio::Captura::iniciar(fonte, &nome, move |bloco, nivel| {
             let t = tempo.tempo(relogio.elapsed().as_secs_f64(), bloco.len());
             ao_bloco(t, bloco, nivel);
-        }).map_err(|e| e.to_string())?;
+        })
+        .map_err(|e| e.to_string())?;
         Ok(Box::new(c))
     }
 }
@@ -95,9 +118,19 @@ struct ItemArquivo {
     cancelado: Arc<AtomicBool>,
 }
 
-struct Tarefa { doc: String, nome: String, caminho: PathBuf, cancelado: Arc<AtomicBool> }
+struct Tarefa {
+    doc: String,
+    nome: String,
+    caminho: PathBuf,
+    cancelado: Arc<AtomicBool>,
+}
 
-enum Captado { Audio(FonteDeAudio, f64, Vec<f32>), Pausar(f64), Retomar(f64), Encerrar(f64) }
+enum Captado {
+    Audio(FonteDeAudio, f64, Vec<f32>),
+    Pausar(f64),
+    Retomar(f64),
+    Encerrar(f64),
+}
 
 /// Estado ao vivo compartilhado com as threads da reunião.
 struct Vivo {
@@ -117,15 +150,30 @@ impl Vivo {
     }
 }
 
-struct Ativa { doc: String, vivo: Arc<Vivo>, capturas: Vec<Box<dyn Send>>, envio: mpsc::Sender<Captado>, coletor_fim: Arc<AtomicBool>, microfone: bool }
+struct Ativa {
+    doc: String,
+    vivo: Arc<Vivo>,
+    capturas: Vec<Box<dyn Send>>,
+    envio: mpsc::Sender<Captado>,
+    coletor_fim: Arc<AtomicBool>,
+    microfone: bool,
+}
 
 /// Destino da derivação do microfone da reunião para um ditado (I5). Vazio sem ditado.
 type Derivacao = Arc<Mutex<Option<crate::controlador::AoBlocoDeAudio>>>;
 
 /// Fonte do ditado derivada da reunião: soltar ou parar fecha a derivação.
 struct FonteDerivada(Derivacao);
-impl crate::controlador::FonteAberta for FonteDerivada { fn parar(&mut self) { self.0.lock().unwrap().take(); } }
-impl Drop for FonteDerivada { fn drop(&mut self) { self.0.lock().unwrap().take(); } }
+impl crate::controlador::FonteAberta for FonteDerivada {
+    fn parar(&mut self) {
+        self.0.lock().unwrap().take();
+    }
+}
+impl Drop for FonteDerivada {
+    fn drop(&mut self) {
+        self.0.lock().unwrap().take();
+    }
+}
 
 pub struct Lancamento {
     derivacao: Derivacao,
@@ -158,22 +206,47 @@ fn uuid() -> String {
     let parte = |extra: u64| {
         let mut h = semente.build_hasher();
         h.write_u64(extra);
-        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        h.write_u128(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        );
         h.write_u64(N.fetch_add(1, Ordering::Relaxed));
         h.finish()
     };
     let (a, b) = (parte(1), parte(2));
-    format!("{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}", a >> 32, (a >> 16) & 0xffff, a & 0xfff, 0x8000 | (b >> 48 & 0x3fff), b & 0xffff_ffff_ffff)
+    format!(
+        "{:08x}-{:04x}-4{:03x}-{:04x}-{:012x}",
+        a >> 32,
+        (a >> 16) & 0xffff,
+        a & 0xfff,
+        0x8000 | (b >> 48 & 0x3fff),
+        b & 0xffff_ffff_ffff
+    )
 }
 
 /// Deixa passar no máximo uma vez por `intervalo`, salvo quando forçado.
-pub struct Limitador { intervalo: Duration, ultimo: Option<Instant> }
+pub struct Limitador {
+    intervalo: Duration,
+    ultimo: Option<Instant>,
+}
 
 impl Limitador {
-    pub fn new(intervalo: Duration) -> Self { Self { intervalo, ultimo: None } }
+    pub fn new(intervalo: Duration) -> Self {
+        Self {
+            intervalo,
+            ultimo: None,
+        }
+    }
     pub fn deixar(&mut self, agora: Instant, forcar: bool) -> bool {
-        let passa = forcar || self.ultimo.is_none_or(|u| agora.duration_since(u) >= self.intervalo);
-        if passa { self.ultimo = Some(agora); }
+        let passa = forcar
+            || self
+                .ultimo
+                .is_none_or(|u| agora.duration_since(u) >= self.intervalo);
+        if passa {
+            self.ultimo = Some(agora);
+        }
         passa
     }
 }
@@ -188,16 +261,30 @@ fn rotulo_de_etapa(etapa: &str) -> (&'static str, &'static str) {
 }
 
 /// Corpo do evento `ditado:progresso` (contrato da ponte). Sem `progresso` quando a fração é desconhecida.
-fn progresso_json(id: &str, fase: &str, etapa: &str, rotulo: &str, fracao: Option<f64>, longo: bool, reuniao_ativa: bool) -> Value {
+fn progresso_json(
+    id: &str,
+    fase: &str,
+    etapa: &str,
+    rotulo: &str,
+    fracao: Option<f64>,
+    longo: bool,
+    reuniao_ativa: bool,
+) -> Value {
     let mut v = json!({"id": id, "fase": fase, "etapa": {"id": etapa, "rotulo": rotulo}, "estimativa": fracao.is_some(), "longo": longo, "reuniaoAtiva": reuniao_ativa});
-    if let Some(f) = fracao { v["progresso"] = json!(f); }
+    if let Some(f) = fracao {
+        v["progresso"] = json!(f);
+    }
     v
 }
 
 /// Marca de "app fechando" no processamento da reunião.
 #[derive(Debug)]
 struct Desligando;
-impl std::fmt::Display for Desligando { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("app fechando") } }
+impl std::fmt::Display for Desligando {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("app fechando")
+    }
+}
 impl std::error::Error for Desligando {}
 
 /// Alterna pausa e gravação. A ordem importa: na pausa, a captura para de enviar antes do
@@ -208,7 +295,11 @@ fn alternar_pausa(vivo: &Vivo, enviar: impl FnOnce(Captado)) -> bool {
     let pausar = !vivo.pausada.load(Ordering::Acquire);
     {
         let mut pausas = vivo.pausas.lock().unwrap();
-        if pausar { pausas.1 = Some(t); } else if let Some(d) = pausas.1.take() { pausas.0 += t - d; }
+        if pausar {
+            pausas.1 = Some(t);
+        } else if let Some(d) = pausas.1.take() {
+            pausas.0 += t - d;
+        }
     }
     if pausar {
         vivo.pausada.store(true, Ordering::Release);
@@ -225,7 +316,14 @@ fn trecho_json(t: &TrechoNovo) -> Value {
 }
 
 impl Lancamento {
-    pub fn new(banco: &Path, pasta_audio: &Path, motores: Arc<dyn Motores>, capturador: Arc<dyn Capturador>, preparar: Preparar, avisar: Avisar) -> Res<Arc<Self>> {
+    pub fn new(
+        banco: &Path,
+        pasta_audio: &Path,
+        motores: Arc<dyn Motores>,
+        capturador: Arc<dyn Capturador>,
+        preparar: Preparar,
+        avisar: Avisar,
+    ) -> Res<Arc<Self>> {
         let disco = DiscoDeBlocos::new(pasta_audio.to_path_buf());
         let mut leitor = ArmazemLancamento::new(banco)?;
         let r = leitor.preparar_abertura(&disco);
@@ -237,28 +335,54 @@ impl Lancamento {
         std::fs::create_dir_all(&trabalho)?;
         let (tx, rx) = mpsc::channel::<Tarefa>();
         let servico = Arc::new(Self {
-            banco: banco.to_path_buf(), disco, trabalho, motores, capturador, preparar, avisar,
-            derivacao: Arc::new(Mutex::new(None)), leitor: Mutex::new(leitor), fila: Arc::new(Mutex::new(Vec::new())), caminhos: Mutex::new(HashMap::new()),
-            envio: Mutex::new(tx), reuniao: Mutex::new(None), finalizando: Arc::new(Mutex::new(None)),
-            resumo_cancelado: Arc::new(AtomicBool::new(false)), desligando: AtomicBool::new(false), resumindo: AtomicBool::new(false),
+            banco: banco.to_path_buf(),
+            disco,
+            trabalho,
+            motores,
+            capturador,
+            preparar,
+            avisar,
+            derivacao: Arc::new(Mutex::new(None)),
+            leitor: Mutex::new(leitor),
+            fila: Arc::new(Mutex::new(Vec::new())),
+            caminhos: Mutex::new(HashMap::new()),
+            envio: Mutex::new(tx),
+            reuniao: Mutex::new(None),
+            finalizando: Arc::new(Mutex::new(None)),
+            resumo_cancelado: Arc::new(AtomicBool::new(false)),
+            desligando: AtomicBool::new(false),
+            resumindo: AtomicBool::new(false),
         });
         let fraco = Arc::downgrade(&servico);
-        thread::Builder::new().name("ditase.arquivos".into()).spawn(move || {
-            for t in rx {
-                let Some(s) = fraco.upgrade() else { break };
-                s.processar_arquivo(t);
-            }
-        })?;
+        thread::Builder::new()
+            .name("ditase.arquivos".into())
+            .spawn(move || {
+                for t in rx {
+                    let Some(s) = fraco.upgrade() else { break };
+                    s.processar_arquivo(t);
+                }
+            })?;
         Ok(servico)
     }
 
     /// Conexão própria ao banco (processador, coletor e gravações de fim têm cada um a sua).
-    fn armazem(&self) -> Result<ArmazemLancamento, nucleo::motores::Erro> { ArmazemLancamento::new(&self.banco) }
-    fn leitor(&self) -> MutexGuard<'_, ArmazemLancamento> { self.leitor.lock().unwrap_or_else(|e| e.into_inner()) }
-    fn mudou(&self) { (self.avisar)("lancamento", None) }
+    fn armazem(&self) -> Result<ArmazemLancamento, nucleo::motores::Erro> {
+        ArmazemLancamento::new(&self.banco)
+    }
+    fn leitor(&self) -> MutexGuard<'_, ArmazemLancamento> {
+        self.leitor.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    fn mudou(&self) {
+        (self.avisar)("lancamento", None)
+    }
 
     fn reuniao_atual(&self) -> Option<String> {
-        self.reuniao.lock().unwrap().as_ref().map(|a| a.doc.clone()).or_else(|| self.finalizando.lock().unwrap().clone())
+        self.reuniao
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|a| a.doc.clone())
+            .or_else(|| self.finalizando.lock().unwrap().clone())
     }
 
     // MARK: Leitura
@@ -269,61 +393,110 @@ impl Lancamento {
         let fila = self.fila.lock().unwrap().clone();
         let mut arquivos: Vec<Value> = Vec::new();
         for d in leitor.lista("arquivo")? {
-            if d.oculto == Some(true) { continue; }
+            if d.oculto == Some(true) {
+                continue;
+            }
             let mut v = serde_json::to_value(&d)?;
             if let Some(item) = fila.iter().find(|i| i.doc == d.id) {
                 v["fase"] = json!(item.fase);
                 v["progresso"] = json!(item.progresso);
-                if let Some(m) = &item.motivo { v["motivo"] = json!(m); }
+                if let Some(m) = &item.motivo {
+                    v["motivo"] = json!(m);
+                }
             }
             arquivos.push(v);
         }
         // Itens que nunca chegaram ao banco (formato não suportado).
-        let faltando: Vec<&ItemArquivo> = fila.iter().filter(|i| !arquivos.iter().any(|a| a["id"] == json!(i.doc))).collect();
+        let faltando: Vec<&ItemArquivo> = fila
+            .iter()
+            .filter(|i| !arquivos.iter().any(|a| a["id"] == json!(i.doc)))
+            .collect();
         for item in faltando {
             arquivos.insert(0, json!({"id": item.doc, "nome": item.nome, "criadoEm": crate::integracao::agora(), "vozes": [], "trechos": [], "fase": item.fase, "motivo": item.motivo}));
         }
-        let reuniao = match &atual { Some(id) => leitor.documento(id)?, None => None };
+        let reuniao = match &atual {
+            Some(id) => leitor.documento(id)?,
+            None => None,
+        };
         let mut reuniao = reuniao.map(serde_json::to_value).transpose()?;
         if let (Some(r), Some(f)) = (reuniao.as_mut(), self.finalizando.lock().unwrap().as_ref()) {
             if r["id"] == json!(f) {
                 r["fase"] = json!("finalizando");
-                r["etapa"] = json!(if self.resumindo.load(Ordering::Acquire) { "resumindo" } else { "passadaFinal" });
+                r["etapa"] = json!(if self.resumindo.load(Ordering::Acquire) {
+                    "resumindo"
+                } else {
+                    "passadaFinal"
+                });
             }
         }
-        let anteriores: Vec<TranscricaoLonga> = leitor.lista("reuniao")?.into_iter()
-            .filter(|d| d.oculto != Some(true) && Some(&d.id) != atual.as_ref() && d.fase == "pronta").collect();
+        let anteriores: Vec<TranscricaoLonga> = leitor
+            .lista("reuniao")?
+            .into_iter()
+            .filter(|d| {
+                d.oculto != Some(true) && Some(&d.id) != atual.as_ref() && d.fase == "pronta"
+            })
+            .collect();
         // O núcleo não tem campo próprio para o erro do processamento: a casca guarda em `aviso`.
-        let recuperaveis: Vec<Value> = leitor.recuperaveis(atual.as_deref())?.into_iter().map(|d| {
-            let aviso = d.aviso.clone();
-            let mut v = serde_json::to_value(d).unwrap_or_default();
-            if v.get("erroProcessamento").is_none() { if let Some(a) = aviso { v["erroProcessamento"] = json!(a); } }
-            v
-        }).collect();
+        let recuperaveis: Vec<Value> = leitor
+            .recuperaveis(atual.as_deref())?
+            .into_iter()
+            .map(|d| {
+                let aviso = d.aviso.clone();
+                let mut v = serde_json::to_value(d).unwrap_or_default();
+                if v.get("erroProcessamento").is_none() {
+                    if let Some(a) = aviso {
+                        v["erroProcessamento"] = json!(a);
+                    }
+                }
+                v
+            })
+            .collect();
         let mut v = json!({
             "arquivos": arquivos, "anteriores": anteriores, "recuperaveis": recuperaveis,
             "permissoes": {"audioSistema": "concedida", "microfone": if microfone { "concedida" } else { "negada" }},
             "disponivel": self.motores.fala_disponivel(),
         });
-        if let Some(r) = reuniao { v["reuniao"] = r; }
+        if let Some(r) = reuniao {
+            v["reuniao"] = r;
+        }
         Ok(v)
     }
 
     pub fn documento(&self, id: &str) -> Res<Value> {
-        Ok(serde_json::to_value(self.leitor().documento(id)?.ok_or("Documento inexistente")?)?)
+        Ok(serde_json::to_value(
+            self.leitor()
+                .documento(id)?
+                .ok_or("Documento inexistente")?,
+        )?)
     }
 
     /// IDs dos arquivos cujo texto contém o termo (sem acento, sem diferença de caixa).
     pub fn procurar_arquivos(&self, termo: &str) -> Res<Value> {
         let alvo = Palavras::normalizadas(termo).join(" ");
-        if alvo.is_empty() { return Ok(json!([])); }
+        if alvo.is_empty() {
+            return Ok(json!([]));
+        }
         let leitor = self.leitor();
         let mut ids = Vec::new();
         for d in leitor.lista("arquivo")? {
-            if d.oculto == Some(true) { continue; }
-            let Some(completo) = leitor.documento(&d.id)? else { continue };
-            let texto = completo.trechos.iter().map(|t| t.texto.as_str()).collect::<Vec<_>>().join(" ");
-            if Palavras::normalizadas(&format!("{} {}", completo.nome, texto)).join(" ").contains(&alvo) { ids.push(d.id); }
+            if d.oculto == Some(true) {
+                continue;
+            }
+            let Some(completo) = leitor.documento(&d.id)? else {
+                continue;
+            };
+            let texto = completo
+                .trechos
+                .iter()
+                .map(|t| t.texto.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if Palavras::normalizadas(&format!("{} {}", completo.nome, texto))
+                .join(" ")
+                .contains(&alvo)
+            {
+                ids.push(d.id);
+            }
         }
         Ok(json!(ids))
     }
@@ -332,12 +505,27 @@ impl Lancamento {
 
     fn enfileirar(&self, doc: String, nome: String, caminho: PathBuf) {
         let cancelado = Arc::new(AtomicBool::new(false));
-        self.caminhos.lock().unwrap().insert(doc.clone(), caminho.clone());
+        self.caminhos
+            .lock()
+            .unwrap()
+            .insert(doc.clone(), caminho.clone());
         let mut fila = self.fila.lock().unwrap();
         fila.retain(|i| i.doc != doc);
-        fila.push(ItemArquivo { doc: doc.clone(), nome: nome.clone(), fase: "naFila", progresso: None, motivo: None, cancelado: cancelado.clone() });
+        fila.push(ItemArquivo {
+            doc: doc.clone(),
+            nome: nome.clone(),
+            fase: "naFila",
+            progresso: None,
+            motivo: None,
+            cancelado: cancelado.clone(),
+        });
         drop(fila);
-        let _ = self.envio.lock().unwrap().send(Tarefa { doc, nome, caminho, cancelado });
+        let _ = self.envio.lock().unwrap().send(Tarefa {
+            doc,
+            nome,
+            caminho,
+            cancelado,
+        });
     }
 
     /// Põe os arquivos na fila, na ordem. Devolve o ID do primeiro.
@@ -345,14 +533,24 @@ impl Lancamento {
         let mut primeiro = None;
         for caminho in arquivos {
             let doc = uuid();
-            let nome = caminho.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Arquivo".into());
+            let nome = caminho
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Arquivo".into());
             if !decodificacao::suportado(caminho) {
                 self.fila.lock().unwrap().push(ItemArquivo {
-                    doc: doc.clone(), nome, fase: "formatoNaoSuportado", progresso: None,
-                    motivo: Some("Formato não suportado. Use MP3, M4A, WAV, FLAC, MP4 ou MOV.".into()), cancelado: Arc::new(AtomicBool::new(true)),
+                    doc: doc.clone(),
+                    nome,
+                    fase: "formatoNaoSuportado",
+                    progresso: None,
+                    motivo: Some(
+                        "Formato não suportado. Use MP3, M4A, WAV, FLAC, MP4 ou MOV.".into(),
+                    ),
+                    cancelado: Arc::new(AtomicBool::new(true)),
                 });
             } else {
-                self.leitor().criar_documento(&doc, "arquivo", &nome, None, "ativo")?;
+                self.leitor()
+                    .criar_documento(&doc, "arquivo", &nome, None, "ativo")?;
                 self.enfileirar(doc.clone(), nome, caminho.clone());
             }
             primeiro.get_or_insert(doc);
@@ -362,13 +560,25 @@ impl Lancamento {
     }
 
     pub fn fonte_para_repetir(&self, id: &str) -> Res<Option<PathBuf>> {
-        Ok(self.caminhos.lock().unwrap().get(id).filter(|p| p.is_file()).cloned())
+        Ok(self
+            .caminhos
+            .lock()
+            .unwrap()
+            .get(id)
+            .filter(|p| p.is_file())
+            .cloned())
     }
 
     /// Nova versão do mesmo documento. A anterior continua valendo até a nova ser publicada.
     pub fn repetir(&self, id: &str, caminho: &Path) -> Res<()> {
-        if !decodificacao::suportado(caminho) { return Err("Formato não suportado.".into()); }
-        let nome = self.leitor().documento(id)?.ok_or("Documento inexistente")?.nome;
+        if !decodificacao::suportado(caminho) {
+            return Err("Formato não suportado.".into());
+        }
+        let nome = self
+            .leitor()
+            .documento(id)?
+            .ok_or("Documento inexistente")?
+            .nome;
         self.enfileirar(id.to_string(), nome, caminho.to_path_buf());
         self.mudou();
         Ok(())
@@ -379,24 +589,38 @@ impl Lancamento {
         if let Some(i) = fila.iter_mut().find(|i| i.doc == doc) {
             i.fase = fase;
             // Frações do mesmo trabalho nunca voltam.
-            if let Some(p) = progresso { i.progresso = Some(i.progresso.map_or(p, |a| a.max(p))); }
+            if let Some(p) = progresso {
+                i.progresso = Some(i.progresso.map_or(p, |a| a.max(p)));
+            }
         }
     }
 
     fn processar_arquivo(&self, t: Tarefa) {
-        if t.cancelado.load(Ordering::Acquire) { return; }
+        if t.cancelado.load(Ordering::Acquire) {
+            return;
+        }
         self.atualizar_item(&t.doc, "decodificando", None);
         self.mudou();
         let resultado = self.transcrever_arquivo(&t);
         let cancelado = t.cancelado.load(Ordering::Acquire);
-        self.fila.lock().unwrap().retain(|i| i.doc != t.doc || !Arc::ptr_eq(&i.cancelado, &t.cancelado));
+        self.fila
+            .lock()
+            .unwrap()
+            .retain(|i| i.doc != t.doc || !Arc::ptr_eq(&i.cancelado, &t.cancelado));
         let (fim, motivo) = match &resultado {
             Ok(_) => ("concluido", None),
             Err(_) if cancelado => ("cancelado", None),
             Err(e) => ("erro", Some(e.to_string())),
         };
-        if let Err(e) = &resultado { if !cancelado { nota(format!("arquivo {}: falhou ({e})", t.doc)); } }
-        (self.avisar)("ditado:resultado", Some(json!({"id": t.doc, "resultado": fim, "motivo": motivo})));
+        if let Err(e) = &resultado {
+            if !cancelado {
+                nota(format!("arquivo {}: falhou ({e})", t.doc));
+            }
+        }
+        (self.avisar)(
+            "ditado:resultado",
+            Some(json!({"id": t.doc, "resultado": fim, "motivo": motivo})),
+        );
         self.mudou();
     }
 
@@ -405,22 +629,40 @@ impl Lancamento {
         let falantes = self.motores.falantes();
         let mut armazem = self.armazem()?;
         let versao = armazem.criar_versao(&t.doc, &t.nome, "arquivo")?;
-        let encerrar = |armazem: &ArmazemLancamento, estado: &str, erro: Option<&str>| { let _ = armazem.encerrar_versao(&versao.id, estado, erro); };
-        let assinatura = |p: &Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+        let encerrar = |armazem: &ArmazemLancamento, estado: &str, erro: Option<&str>| {
+            let _ = armazem.encerrar_versao(&versao.id, estado, erro);
+        };
+        let assinatura = |p: &Path| {
+            std::fs::metadata(p)
+                .ok()
+                .map(|m| (m.len(), m.modified().ok()))
+        };
         let original = assinatura(&t.caminho);
         let pcm = match decodificacao::decodificar(&t.caminho) {
             Ok(p) if !t.cancelado.load(Ordering::Acquire) => p,
-            Ok(_) => { encerrar(&armazem, "cancelada", None); return Err("cancelado".into()); }
+            Ok(_) => {
+                encerrar(&armazem, "cancelada", None);
+                return Err("cancelado".into());
+            }
             Err(_) => {
-                encerrar(&armazem, "falhou", Some("Não consegui ler o áudio deste arquivo."));
+                encerrar(
+                    &armazem,
+                    "falhou",
+                    Some("Não consegui ler o áudio deste arquivo."),
+                );
                 return Err("Não consegui ler o áudio deste arquivo.".into());
             }
         };
         // Sem o WAV (disco cheio), o arquivo ainda é transcrito: só os falantes ficam de fora.
-        let mut wav = falantes.as_ref().map(|_| self.trabalho.join(format!("falantes-{}.wav", versao.id)));
+        let mut wav = falantes
+            .as_ref()
+            .map(|_| self.trabalho.join(format!("falantes-{}.wav", versao.id)));
         if let Some(w) = wav.clone() {
             if let Err(e) = motores::audio::gravar_wav(&w, &pcm) {
-                nota(format!("arquivo {}: wav de falantes não gravado ({e}); segue sem falantes", t.doc));
+                nota(format!(
+                    "arquivo {}: wav de falantes não gravado ({e}); segue sem falantes",
+                    t.doc
+                ));
                 let _ = std::fs::remove_file(&w);
                 wav = None;
             }
@@ -430,8 +672,12 @@ impl Lancamento {
         let cancelado = t.cancelado.clone();
         let caminho = t.caminho.clone();
         let conferir = || -> Result<(), nucleo::motores::Erro> {
-            if cancelado.load(Ordering::Acquire) { return Err("cancelado".into()); }
-            if assinatura(&caminho) != original { return Err("O arquivo mudou durante a transcrição. Tente de novo.".into()); }
+            if cancelado.load(Ordering::Acquire) {
+                return Err("cancelado".into());
+            }
+            if assinatura(&caminho) != original {
+                return Err("O arquivo mudou durante a transcrição. Tente de novo.".into());
+            }
             Ok(())
         };
         // Evento de progresso (pílula) a cada 250 ms; o estado completo da interface, que relê a
@@ -445,22 +691,54 @@ impl Lancamento {
             self.atualizar_item(&t.doc, fase, fracao);
             let fim = fracao == Some(1.0);
             let trocou = etapa != etapa_anterior;
-            if trocou { etapa_anterior = etapa.to_string(); }
+            if trocou {
+                etapa_anterior = etapa.to_string();
+            }
             let agora = Instant::now();
             if evento.deixar(agora, fim || trocou) {
-                (self.avisar)("ditado:progresso", Some(progresso_json(&versao.id, "processando", etapa, rotulo, fracao, longo, false)));
+                (self.avisar)(
+                    "ditado:progresso",
+                    Some(progresso_json(
+                        &versao.id,
+                        "processando",
+                        etapa,
+                        rotulo,
+                        fracao,
+                        longo,
+                        false,
+                    )),
+                );
             }
-            if estado.deixar(agora, fim || trocou) { self.mudou(); }
+            if estado.deixar(agora, fim || trocou) {
+                self.mudou();
+            }
         };
         let reconhecedor: &dyn ReconhecedorDeFala = &*fala;
-        let resultado = ProcessadorDeArquivo { armazem: &mut armazem, reconhecedor, identificador: falantes.as_deref() }
-            .transcrever(&versao, &pcm, wav.as_deref(), |texto| preparar(texto), conferir, progresso);
-        if let Some(w) = &wav { let _ = std::fs::remove_file(w); }
+        let resultado = ProcessadorDeArquivo {
+            armazem: &mut armazem,
+            reconhecedor,
+            identificador: falantes.as_deref(),
+        }
+        .transcrever(
+            &versao,
+            &pcm,
+            wav.as_deref(),
+            |texto| preparar(texto),
+            conferir,
+            progresso,
+        );
+        if let Some(w) = &wav {
+            let _ = std::fs::remove_file(w);
+        }
         match resultado {
             Ok(d) => Ok(d),
             Err(e) => {
                 let cancelou = t.cancelado.load(Ordering::Acquire);
-                encerrar(&armazem, if cancelou { "cancelada" } else { "falhou" }, (!cancelou).then(|| e.to_string()).as_deref());
+                encerrar(
+                    &armazem,
+                    if cancelou { "cancelada" } else { "falhou" },
+                    (!cancelou).then(|| e.to_string()).as_deref(),
+                );
                 Err(e)
             }
         }
@@ -471,32 +749,60 @@ impl Lancamento {
     pub fn cancelar(&self, id: &str) -> Res<()> {
         let mut fila = self.fila.lock().unwrap();
         let mut achou = false;
-        for i in fila.iter().filter(|i| i.doc == id) { i.cancelado.store(true, Ordering::Release); achou = true; }
+        for i in fila.iter().filter(|i| i.doc == id) {
+            i.cancelado.store(true, Ordering::Release);
+            achou = true;
+        }
         fila.retain(|i| i.doc != id || (i.fase != "naFila" && i.fase != "formatoNaoSuportado"));
         drop(fila);
         if achou {
             let mut leitor = self.leitor();
-            if leitor.versao_ativa(id)?.is_none() && leitor.existe_documento(id)? { leitor.descartar(id)?; }
+            if leitor.versao_ativa(id)?.is_none() && leitor.existe_documento(id)? {
+                leitor.descartar(id)?;
+            }
         }
         self.mudou();
         Ok(())
     }
 
     pub fn cancelar_fila(&self) -> Res<()> {
-        let ids: Vec<String> = self.fila.lock().unwrap().iter().map(|i| i.doc.clone()).collect();
-        for id in ids { self.cancelar(&id)?; }
+        let ids: Vec<String> = self
+            .fila
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|i| i.doc.clone())
+            .collect();
+        for id in ids {
+            self.cancelar(&id)?;
+        }
         Ok(())
     }
 
     /// Esconde arquivo ou reunião arquivada (reversível com `desfazer`).
     pub fn remover(&self, id: &str) -> Res<()> {
-        if self.reuniao.lock().unwrap().as_ref().is_some_and(|a| a.doc == id) { return Err("Encerre a reunião antes de remover.".into()); }
+        if self
+            .reuniao
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|a| a.doc == id)
+        {
+            return Err("Encerre a reunião antes de remover.".into());
+        }
         if self.fila.lock().unwrap().iter().any(|i| i.doc == id) {
-            for i in self.fila.lock().unwrap().iter().filter(|i| i.doc == id) { i.cancelado.store(true, Ordering::Release); }
-            self.fila.lock().unwrap().retain(|i| i.doc != id || (i.fase != "naFila" && i.fase != "formatoNaoSuportado"));
+            for i in self.fila.lock().unwrap().iter().filter(|i| i.doc == id) {
+                i.cancelado.store(true, Ordering::Release);
+            }
+            self.fila
+                .lock()
+                .unwrap()
+                .retain(|i| i.doc != id || (i.fase != "naFila" && i.fase != "formatoNaoSuportado"));
         }
         let leitor = self.leitor();
-        if leitor.existe_documento(id)? { leitor.definir(id, CampoDocumento::Oculto(true))?; }
+        if leitor.existe_documento(id)? {
+            leitor.definir(id, CampoDocumento::Oculto(true))?;
+        }
         drop(leitor);
         self.mudou();
         Ok(())
@@ -511,7 +817,8 @@ impl Lancamento {
     // MARK: Edição
 
     pub fn alterar_titulo(&self, id: &str, nome: &str) -> Res<()> {
-        self.leitor().definir(id, CampoDocumento::Nome(nome.to_string()))?;
+        self.leitor()
+            .definir(id, CampoDocumento::Nome(nome.to_string()))?;
         self.mudou();
         Ok(())
     }
@@ -523,7 +830,13 @@ impl Lancamento {
         Ok(())
     }
 
-    pub fn reatribuir(&self, id: &str, trecho: &str, voz: Option<&str>, nome: Option<&str>) -> Res<()> {
+    pub fn reatribuir(
+        &self,
+        id: &str,
+        trecho: &str,
+        voz: Option<&str>,
+        nome: Option<&str>,
+    ) -> Res<()> {
         let mut leitor = self.leitor();
         match (voz, nome) {
             (Some(v), _) => leitor.reatribuir(id, trecho, v)?,
@@ -540,20 +853,41 @@ impl Lancamento {
     /// `fonte`: "mac"/"sistema" (só o áudio do computador) ou "macEMicrofone"/"sistemaEMicrofone".
     pub fn iniciar_reuniao(self: &Arc<Self>, fonte: &str) -> Res<String> {
         let mut atual = self.reuniao.lock().unwrap();
-        if self.desligando.load(Ordering::Acquire) { return Err("O Dita.se está fechando.".into()); }
-        if atual.is_some() { return Err("Já há uma reunião em andamento.".into()); }
-        if self.finalizando.lock().unwrap().is_some() { return Err("Espere a reunião anterior terminar de processar.".into()); }
-        let fala = self.motores.fala(false).map_err(|e| format!("Não dá para começar agora: {e}"))?;
+        if self.desligando.load(Ordering::Acquire) {
+            return Err("O Dita.se está fechando.".into());
+        }
+        if atual.is_some() {
+            return Err("Já há uma reunião em andamento.".into());
+        }
+        if self.finalizando.lock().unwrap().is_some() {
+            return Err("Espere a reunião anterior terminar de processar.".into());
+        }
+        let fala = self
+            .motores
+            .fala(false)
+            .map_err(|e| format!("Não dá para começar agora: {e}"))?;
         let com_microfone = fonte.ends_with("EMicrofone");
         let doc = uuid();
-        self.leitor().criar_documento(&doc, "reuniao", "Reunião", Some(fonte), "gravando")?;
+        self.leitor()
+            .criar_documento(&doc, "reuniao", "Reunião", Some(fonte), "gravando")?;
         let relogio = Instant::now();
-        let vivo = Arc::new(Vivo { pausada: AtomicBool::new(false), nivel: Mutex::new(0.0), ultimo_audio: Mutex::new(relogio), pausas: Mutex::new((0.0, None)), relogio });
+        let vivo = Arc::new(Vivo {
+            pausada: AtomicBool::new(false),
+            nivel: Mutex::new(0.0),
+            ultimo_audio: Mutex::new(relogio),
+            pausas: Mutex::new((0.0, None)),
+            relogio,
+        });
 
         let mut fontes = vec![(Fonte::Sistema, FonteDeAudio::Mac)];
-        if com_microfone { fontes.push((Fonte::Microfone, FonteDeAudio::Mic)); }
-        let mut coletor = ColetorDeReuniao::new(doc.clone(), self.armazem()?, self.disco.clone(), 0.0);
-        for (_, f) in &fontes { coletor.abrir(*f, 0.0)?; }
+        if com_microfone {
+            fontes.push((Fonte::Microfone, FonteDeAudio::Mic));
+        }
+        let mut coletor =
+            ColetorDeReuniao::new(doc.clone(), self.armazem()?, self.disco.clone(), 0.0);
+        for (_, f) in &fontes {
+            coletor.abrir(*f, 0.0)?;
+        }
 
         let (envio, recebe) = mpsc::channel::<Captado>();
         let (fim_tx, fim_rx) = mpsc::channel::<()>();
@@ -565,66 +899,130 @@ impl Lancamento {
             let derivacao = (*fonte_casca == Fonte::Microfone).then(|| self.derivacao.clone());
             let ao_bloco: AoBloco = Box::new(move |t, bloco, nivel| {
                 // Ditado durante a reunião: recebe o microfone mesmo com a reunião pausada.
-                if let Some(d) = &derivacao { if let Some(ditado) = d.lock().unwrap().as_mut() { ditado(bloco.clone(), nivel); } }
+                if let Some(d) = &derivacao {
+                    if let Some(ditado) = d.lock().unwrap().as_mut() {
+                        ditado(bloco.clone(), nivel);
+                    }
+                }
                 // Todo bloco vai ao coletor, inclusive com a reunião pausada: a linha do tempo do
                 // núcleo recorta a parte pausada pelo tempo. Descartar aqui perdia o trecho de antes
                 // da pausa no bloco que a atravessa (lacuna de até 100 ms a cada pausa).
                 if !v.pausada.load(Ordering::Acquire) {
-                    { let mut n = v.nivel.lock().unwrap(); *n = n.max(nivel); }
-                    if nivel > 0.05 { *v.ultimo_audio.lock().unwrap() = Instant::now(); }
+                    {
+                        let mut n = v.nivel.lock().unwrap();
+                        *n = n.max(nivel);
+                    }
+                    if nivel > 0.05 {
+                        *v.ultimo_audio.lock().unwrap() = Instant::now();
+                    }
                 }
                 let _ = tx.send(Captado::Audio(f, t, bloco));
             });
             match self.capturador.abrir(*fonte_casca, relogio, ao_bloco) {
-                Ok(g) => { capturas.push(g); if *fonte_casca == Fonte::Microfone { microfone_aberto = true; } }
+                Ok(g) => {
+                    capturas.push(g);
+                    if *fonte_casca == Fonte::Microfone {
+                        microfone_aberto = true;
+                    }
+                }
                 Err(e) => {
-                    nota(format!("reunião: fonte {} indisponível ({e})", fonte_nucleo.nome()));
-                    aviso = Some(if *fonte_casca == Fonte::Microfone { "O microfone não abriu; só o áudio do computador está sendo gravado." } else { "O áudio do computador não abriu; só o microfone está sendo gravado." });
+                    nota(format!(
+                        "reunião: fonte {} indisponível ({e})",
+                        fonte_nucleo.nome()
+                    ));
+                    aviso = Some(if *fonte_casca == Fonte::Microfone {
+                        "O microfone não abriu; só o áudio do computador está sendo gravado."
+                    } else {
+                        "O áudio do computador não abriu; só o microfone está sendo gravado."
+                    });
                 }
             }
         }
         if capturas.is_empty() {
             let mut leitor = self.leitor();
             let _ = leitor.descartar(&doc);
-            return Err("Nenhuma fonte de áudio abriu. Confira o microfone e a saída de som.".into());
+            return Err(
+                "Nenhuma fonte de áudio abriu. Confira o microfone e a saída de som.".into(),
+            );
         }
-        if let Some(a) = aviso { self.leitor().definir(&doc, CampoDocumento::AvisoCaptura(Some(a.into())))?; }
+        if let Some(a) = aviso {
+            self.leitor()
+                .definir(&doc, CampoDocumento::AvisoCaptura(Some(a.into())))?;
+        }
 
         // Coletor: grava cada bloco em disco antes de qualquer reconhecimento.
         let servico = Arc::downgrade(self);
         let doc_c = doc.clone();
         let coletor_fim = Arc::new(AtomicBool::new(false));
         let fim_coletor = coletor_fim.clone();
-        thread::Builder::new().name("ditase.coletor".into()).spawn(move || {
-            let mut falha = None;
-            for m in recebe {
-                let r = match m {
-                    Captado::Audio(f, t, a) => coletor.receber(f, t, &a),
-                    Captado::Pausar(t) => coletor.pausar(t),
-                    Captado::Retomar(t) => { coletor.retomar(t); Ok(()) }
-                    Captado::Encerrar(t) => { let r = coletor.encerrar(t); if let Err(e) = r { falha = Some(e.to_string()); } break; }
-                };
-                if let Err(e) = r { falha = Some(e.to_string()); break; }
-            }
-            if let Some(e) = falha {
-                nota(format!("reunião {doc_c}: gravação em disco falhou ({e})"));
-                let _ = coletor.armazem.definir(&doc_c, CampoDocumento::ErroCaptura(Some("A gravação em disco falhou. O áudio já gravado pode ser recuperado.".into())));
-                if let Some(s) = servico.upgrade() { s.parar_capturas(&doc_c); }
-            }
-            drop(coletor);
-            fim_coletor.store(true, Ordering::Release);
-            let _ = fim_tx.send(());
-        })?;
+        thread::Builder::new()
+            .name("ditase.coletor".into())
+            .spawn(move || {
+                let mut falha = None;
+                for m in recebe {
+                    let r = match m {
+                        Captado::Audio(f, t, a) => coletor.receber(f, t, &a),
+                        Captado::Pausar(t) => coletor.pausar(t),
+                        Captado::Retomar(t) => {
+                            coletor.retomar(t);
+                            Ok(())
+                        }
+                        Captado::Encerrar(t) => {
+                            let r = coletor.encerrar(t);
+                            if let Err(e) = r {
+                                falha = Some(e.to_string());
+                            }
+                            break;
+                        }
+                    };
+                    if let Err(e) = r {
+                        falha = Some(e.to_string());
+                        break;
+                    }
+                }
+                if let Some(e) = falha {
+                    nota(format!("reunião {doc_c}: gravação em disco falhou ({e})"));
+                    let _ = coletor.armazem.definir(
+                        &doc_c,
+                        CampoDocumento::ErroCaptura(Some(
+                            "A gravação em disco falhou. O áudio já gravado pode ser recuperado."
+                                .into(),
+                        )),
+                    );
+                    if let Some(s) = servico.upgrade() {
+                        s.parar_capturas(&doc_c);
+                    }
+                }
+                drop(coletor);
+                fim_coletor.store(true, Ordering::Release);
+                let _ = fim_tx.send(());
+            })?;
 
         // Processador: trechos ao vivo a cada segundo; no fim, passada final e resumo.
         let servico = self.clone();
         let (doc_p, vivo_p) = (doc.clone(), vivo.clone());
-        thread::Builder::new().name("ditase.reuniao".into()).spawn(move || servico.processar_reuniao(&doc_p, fala, Some((vivo_p, fim_rx))))?;
+        thread::Builder::new()
+            .name("ditase.reuniao".into())
+            .spawn(move || servico.processar_reuniao(&doc_p, fala, Some((vivo_p, fim_rx))))?;
 
         self.resumo_cancelado.store(false, Ordering::Release);
-        *atual = Some(Ativa { doc: doc.clone(), vivo, capturas, envio, coletor_fim, microfone: microfone_aberto });
+        *atual = Some(Ativa {
+            doc: doc.clone(),
+            vivo,
+            capturas,
+            envio,
+            coletor_fim,
+            microfone: microfone_aberto,
+        });
         drop(atual);
-        nota(format!("reunião {doc} iniciada ({})", if com_microfone { "sistema e microfone" } else { "sistema" }));
+        nota(format!(
+            "reunião {doc} iniciada ({})",
+            if com_microfone {
+                "sistema e microfone"
+            } else {
+                "sistema"
+            }
+        ));
         self.mudou();
         Ok(doc)
     }
@@ -633,7 +1031,9 @@ impl Lancamento {
     /// `iniciar_reuniao`): não há instante em que ela não esteja em nenhuma das duas.
     fn tirar_ativa(&self, doc: Option<&str>) -> Option<Ativa> {
         let mut r = self.reuniao.lock().unwrap();
-        if doc.is_some_and(|d| r.as_ref().is_none_or(|a| a.doc != d)) { return None; }
+        if doc.is_some_and(|d| r.as_ref().is_none_or(|a| a.doc != d)) {
+            return None;
+        }
         let a = r.take()?;
         *self.finalizando.lock().unwrap() = Some(a.doc.clone());
         Some(a)
@@ -643,19 +1043,47 @@ impl Lancamento {
     fn parar_capturas(&self, doc: &str) {
         if let Some(a) = self.tirar_ativa(Some(doc)) {
             drop(a.capturas);
-            let _ = self.leitor().mudar_estado(doc, "processando", &["gravando", "pausada"]);
+            let _ = self
+                .leitor()
+                .mudar_estado(doc, "processando", &["gravando", "pausada"]);
             self.mudou();
         }
     }
 
-    fn emitir_trechos(&self, doc: &str, novos: &[TrechoNovo], leitura: &ArmazemLancamento, vivo: Option<&Vivo>) {
-        if novos.is_empty() { return; }
-        let vozes = leitura.documento(doc).ok().flatten().map(|d| serde_json::to_value(d.vozes).unwrap_or_default()).unwrap_or_else(|| json!([]));
-        let duracao = vivo.map_or_else(|| novos.iter().map(|t| t.fim).fold(0.0, f64::max), |v| v.decorrido());
-        (self.avisar)("ditado:trechos", Some(json!({"id": doc, "trechos": novos.iter().map(trecho_json).collect::<Vec<_>>(), "vozes": vozes, "duracao": duracao, "atraso": 0})));
+    fn emitir_trechos(
+        &self,
+        doc: &str,
+        novos: &[TrechoNovo],
+        leitura: &ArmazemLancamento,
+        vivo: Option<&Vivo>,
+    ) {
+        if novos.is_empty() {
+            return;
+        }
+        let vozes = leitura
+            .documento(doc)
+            .ok()
+            .flatten()
+            .map(|d| serde_json::to_value(d.vozes).unwrap_or_default())
+            .unwrap_or_else(|| json!([]));
+        let duracao = vivo.map_or_else(
+            || novos.iter().map(|t| t.fim).fold(0.0, f64::max),
+            |v| v.decorrido(),
+        );
+        (self.avisar)(
+            "ditado:trechos",
+            Some(
+                json!({"id": doc, "trechos": novos.iter().map(trecho_json).collect::<Vec<_>>(), "vozes": vozes, "duracao": duracao, "atraso": 0}),
+            ),
+        );
     }
 
-    fn processar_reuniao(&self, doc: &str, fala: Arc<dyn crate::integracao::Fala>, ao_vivo: Option<(Arc<Vivo>, mpsc::Receiver<()>)>) {
+    fn processar_reuniao(
+        &self,
+        doc: &str,
+        fala: Arc<dyn crate::integracao::Fala>,
+        ao_vivo: Option<(Arc<Vivo>, mpsc::Receiver<()>)>,
+    ) {
         let falantes = self.motores.falantes();
         let resultado = (|| -> Res<bool> {
             let mut armazem = self.armazem()?;
@@ -663,9 +1091,12 @@ impl Lancamento {
             let preparar = self.preparar.clone();
             let preparar = move |t: &str| preparar(t);
             let reconhecedor: &dyn ReconhecedorDeFala = &*fala;
-            let mut p = ProcessadorDeReuniao::new(doc, &mut armazem, &self.disco, reconhecedor).com_preparar(&preparar);
+            let mut p = ProcessadorDeReuniao::new(doc, &mut armazem, &self.disco, reconhecedor)
+                .com_preparar(&preparar);
             if let Some((vivo, fim)) = &ao_vivo {
-                while let Err(mpsc::RecvTimeoutError::Timeout) = fim.recv_timeout(Duration::from_secs(1)) {
+                while let Err(mpsc::RecvTimeoutError::Timeout) =
+                    fim.recv_timeout(Duration::from_secs(1))
+                {
                     match p.bloco_selado() {
                         Ok(novos) => self.emitir_trechos(doc, &novos, &leitura, Some(vivo)),
                         Err(e) => nota(format!("reunião {doc}: bloco ao vivo ({e})")),
@@ -673,7 +1104,9 @@ impl Lancamento {
                     self.progresso_ao_vivo(doc, vivo);
                 }
                 // App fechando: o coletor já gravou tudo; o reconhecimento fica para a recuperação.
-                if self.desligando.load(Ordering::Acquire) { return Err(Box::new(Desligando)); }
+                if self.desligando.load(Ordering::Acquire) {
+                    return Err(Box::new(Desligando));
+                }
                 let novos = p.fechar()?;
                 self.emitir_trechos(doc, &novos, &leitura, Some(vivo));
             } else {
@@ -681,44 +1114,83 @@ impl Lancamento {
                 self.emitir_trechos(doc, &novos, &leitura, None);
             }
             p.encerrar_costuras()?;
-            (self.avisar)("ditado:progresso", Some(progresso_json(doc, "processando", "passadaFinal", "Passada final", None, false, false)));
+            (self.avisar)(
+                "ditado:progresso",
+                Some(progresso_json(
+                    doc,
+                    "processando",
+                    "passadaFinal",
+                    "Passada final",
+                    None,
+                    false,
+                    false,
+                )),
+            );
             let identificados = p.passada_final(falantes.as_deref())?;
             Ok(identificados)
         })();
         if let Err(e) = &resultado {
             if e.is::<Desligando>() {
-                nota(format!("reunião {doc}: app fechando; áudio guardado para recuperar"));
+                nota(format!(
+                    "reunião {doc}: app fechando; áudio guardado para recuperar"
+                ));
                 *self.finalizando.lock().unwrap() = None;
                 return;
             }
         }
-        const FALHOU: &str = "O processamento não terminou. O áudio continua guardado para nova tentativa.";
+        const FALHOU: &str =
+            "O processamento não terminou. O áudio continua guardado para nova tentativa.";
         let motivo = match &resultado {
             Ok(id) => {
-                nota(format!("reunião {doc}: finalizada, falantes {}", if *id { "identificados" } else { "indisponíveis" }));
-                if let Ok(a) = self.armazem() { let _ = a.definir(doc, CampoDocumento::Aviso(None)); }
+                nota(format!(
+                    "reunião {doc}: finalizada, falantes {}",
+                    if *id {
+                        "identificados"
+                    } else {
+                        "indisponíveis"
+                    }
+                ));
+                if let Ok(a) = self.armazem() {
+                    let _ = a.definir(doc, CampoDocumento::Aviso(None));
+                }
                 None
             }
             Err(e) => {
-                nota(format!("reunião {doc}: processamento incompleto ({e}); áudio mantido para recuperar"));
+                nota(format!(
+                    "reunião {doc}: processamento incompleto ({e}); áudio mantido para recuperar"
+                ));
                 // Persistido: some do "finalizando" e aparece em "Reuniões interrompidas" com o motivo, também depois de reabrir.
                 if let Ok(a) = self.armazem() {
-                    let _ = a.mudar_estado(doc, "interrompida", &["processando", "gravando", "pausada"]);
+                    let _ = a.mudar_estado(
+                        doc,
+                        "interrompida",
+                        &["processando", "gravando", "pausada"],
+                    );
                     let _ = a.definir(doc, CampoDocumento::Aviso(Some(FALHOU.into())));
                 }
                 Some(FALHOU.to_string())
             }
         };
-        if resultado.is_ok() && self.motores.resumo_disponivel() && !self.desligando.load(Ordering::Acquire) {
+        if resultado.is_ok()
+            && self.motores.resumo_disponivel()
+            && !self.desligando.load(Ordering::Acquire)
+        {
             // Cancelado durante a passada final: dispensa o resumo em vez de gerar.
             if self.resumo_cancelado.load(Ordering::Acquire) {
-                if let Ok(a) = self.armazem() { let _ = a.definir(doc, CampoDocumento::ResumoCancelado); }
+                if let Ok(a) = self.armazem() {
+                    let _ = a.definir(doc, CampoDocumento::ResumoCancelado);
+                }
             } else {
                 self.gerar_resumo(doc);
             }
         }
         *self.finalizando.lock().unwrap() = None;
-        (self.avisar)("ditado:resultado", Some(json!({"id": doc, "resultado": if motivo.is_some() { "erro" } else { "concluido" }, "motivo": motivo})));
+        (self.avisar)(
+            "ditado:resultado",
+            Some(
+                json!({"id": doc, "resultado": if motivo.is_some() { "erro" } else { "concluido" }, "motivo": motivo}),
+            ),
+        );
         self.mudou();
     }
 
@@ -731,20 +1203,33 @@ impl Lancamento {
             "etapa": {"id": "gravando", "rotulo": if pausada { "Reunião pausada" } else { "Reunião em andamento" }},
             "estimativa": false, "longo": false, "reuniaoAtiva": true, "nivel": nivel, "decorrido": vivo.decorrido(), "audioChegando": sem_audio < 3.0,
         });
-        if !pausada && sem_audio >= 3.0 { v["motivo"] = json!("Nenhum som chegando. Confira o volume e o microfone."); }
+        if !pausada && sem_audio >= 3.0 {
+            v["motivo"] = json!("Nenhum som chegando. Confira o volume e o microfone.");
+        }
         (self.avisar)("ditado:progresso", Some(v));
     }
 
     fn com_ativa<T>(&self, id: &str, f: impl FnOnce(&Ativa) -> T) -> Res<T> {
         let r = self.reuniao.lock().unwrap();
-        match r.as_ref() { Some(a) if a.doc == id => Ok(f(a)), _ => Err("Essa reunião não está em andamento.".into()) }
+        match r.as_ref() {
+            Some(a) if a.doc == id => Ok(f(a)),
+            _ => Err("Essa reunião não está em andamento.".into()),
+        }
     }
 
     /// Alterna pausa e gravação. O tempo pausado fica fora da transcrição.
     pub fn pausar(&self, id: &str) -> Res<()> {
-        let pausou = self.com_ativa(id, |a| alternar_pausa(&a.vivo, |m| { let _ = a.envio.send(m); }))?;
+        let pausou = self.com_ativa(id, |a| {
+            alternar_pausa(&a.vivo, |m| {
+                let _ = a.envio.send(m);
+            })
+        })?;
         let leitor = self.leitor();
-        if pausou { leitor.mudar_estado(id, "pausada", &["gravando"])?; } else { leitor.mudar_estado(id, "gravando", &["pausada"])?; }
+        if pausou {
+            leitor.mudar_estado(id, "pausada", &["gravando"])?;
+        } else {
+            leitor.mudar_estado(id, "gravando", &["pausada"])?;
+        }
         drop(leitor);
         self.mudou();
         Ok(())
@@ -752,7 +1237,9 @@ impl Lancamento {
 
     /// Encerra a captura; a passada final e o resumo seguem em segundo plano.
     pub fn encerrar(&self, id: &str) -> Res<()> {
-        let a = self.tirar_ativa(Some(id)).ok_or("Essa reunião não está em andamento.")?;
+        let a = self
+            .tirar_ativa(Some(id))
+            .ok_or("Essa reunião não está em andamento.")?;
         let t = a.vivo.relogio.elapsed().as_secs_f64();
         drop(a.capturas);
         let _ = a.envio.send(Captado::Encerrar(t));
@@ -770,11 +1257,21 @@ impl Lancamento {
     pub fn recuperar_reuniao(self: &Arc<Self>, id: &str) -> Res<()> {
         self.reservar(id)?;
         self.resumo_cancelado.store(false, Ordering::Release);
-        let fala = match self.motores.fala(false) { Ok(f) => f, Err(e) => { *self.finalizando.lock().unwrap() = None; return Err(e.into()); } };
-        let _ = self.leitor().mudar_estado(id, "processando", &["gravando", "pausada", "interrompida"]);
+        let fala = match self.motores.fala(false) {
+            Ok(f) => f,
+            Err(e) => {
+                *self.finalizando.lock().unwrap() = None;
+                return Err(e.into());
+            }
+        };
+        let _ =
+            self.leitor()
+                .mudar_estado(id, "processando", &["gravando", "pausada", "interrompida"]);
         let s = self.clone();
         let doc = id.to_string();
-        thread::Builder::new().name("ditase.recuperar".into()).spawn(move || s.processar_reuniao(&doc, fala, None))?;
+        thread::Builder::new()
+            .name("ditase.recuperar".into())
+            .spawn(move || s.processar_reuniao(&doc, fala, None))?;
         self.mudou();
         Ok(())
     }
@@ -782,16 +1279,24 @@ impl Lancamento {
     /// Reserva a vaga única de processamento para `id`, sob as mesmas travas de `tirar_ativa`.
     fn reservar(&self, id: &str) -> Res<()> {
         let r = self.reuniao.lock().unwrap();
-        if self.desligando.load(Ordering::Acquire) { return Err("O Dita.se está fechando.".into()); }
-        if r.is_some() { return Err("Encerre a reunião em andamento antes.".into()); }
+        if self.desligando.load(Ordering::Acquire) {
+            return Err("O Dita.se está fechando.".into());
+        }
+        if r.is_some() {
+            return Err("Encerre a reunião em andamento antes.".into());
+        }
         let mut f = self.finalizando.lock().unwrap();
-        if f.is_some() { return Err("Espere o processamento atual terminar.".into()); }
+        if f.is_some() {
+            return Err("Espere o processamento atual terminar.".into());
+        }
         *f = Some(id.to_string());
         Ok(())
     }
 
     pub fn descartar_reuniao(&self, id: &str) -> Res<()> {
-        if self.reuniao_atual().as_deref() == Some(id) { return Err("Essa reunião está em andamento.".into()); }
+        if self.reuniao_atual().as_deref() == Some(id) {
+            return Err("Essa reunião está em andamento.".into());
+        }
         let mut leitor = self.leitor();
         leitor.descartar(id)?;
         leitor.limpar(id, &self.disco)?;
@@ -812,41 +1317,85 @@ impl Lancamento {
     }
 
     fn gerar_resumo_dentro(&self, doc: &str) {
-        let Ok(Some(d)) = self.armazem().and_then(|a| a.documento(doc)) else { return };
-        if d.trechos.is_empty() { return; }
-        let nomes: HashMap<&str, &str> = d.vozes.iter().map(|v| (v.id.as_str(), v.nome.as_str())).collect();
-        let linhas: Vec<String> = d.trechos.iter().map(|t| format!("{}: {}", nomes.get(t.voz.as_str()).copied().unwrap_or(&t.voz), t.texto)).collect();
-        (self.avisar)("ditado:progresso", Some(progresso_json(doc, "processando", "resumindo", "Gerando resumo", None, false, false)));
+        let Ok(Some(d)) = self.armazem().and_then(|a| a.documento(doc)) else {
+            return;
+        };
+        if d.trechos.is_empty() {
+            return;
+        }
+        let nomes: HashMap<&str, &str> = d
+            .vozes
+            .iter()
+            .map(|v| (v.id.as_str(), v.nome.as_str()))
+            .collect();
+        let linhas: Vec<String> = d
+            .trechos
+            .iter()
+            .map(|t| {
+                format!(
+                    "{}: {}",
+                    nomes.get(t.voz.as_str()).copied().unwrap_or(&t.voz),
+                    t.texto
+                )
+            })
+            .collect();
+        (self.avisar)(
+            "ditado:progresso",
+            Some(progresso_json(
+                doc,
+                "processando",
+                "resumindo",
+                "Gerando resumo",
+                None,
+                false,
+                false,
+            )),
+        );
         let cancelado = self.resumo_cancelado.clone();
-        let r = self.motores.resumir(&linhas, &|| cancelado.load(Ordering::Acquire));
+        let r = self
+            .motores
+            .resumir(&linhas, &|| cancelado.load(Ordering::Acquire));
         let Ok(armazem) = self.armazem() else { return };
         let campo = match r {
             _ if self.resumo_cancelado.load(Ordering::Acquire) => CampoDocumento::ResumoCancelado,
             Ok(topicos) if !topicos.is_empty() => CampoDocumento::Resumo(topicos),
             Ok(_) => CampoDocumento::ErroResumo("O resumo veio vazio.".into()),
-            Err(e) => { nota(format!("reunião {doc}: resumo falhou")); CampoDocumento::ErroResumo(e) }
+            Err(e) => {
+                nota(format!("reunião {doc}: resumo falhou"));
+                CampoDocumento::ErroResumo(e)
+            }
         };
-        if let Err(e) = armazem.definir(doc, campo) { nota(format!("reunião {doc}: resumo não gravado ({e})")); }
+        if let Err(e) = armazem.definir(doc, campo) {
+            nota(format!("reunião {doc}: resumo não gravado ({e})"));
+        }
     }
 
     /// Gera de novo; a reunião aparece como "finalizando" e o resumo anterior fica até sair o novo.
     pub fn resumir(self: &Arc<Self>, id: &str) -> Res<()> {
-        if !self.motores.resumo_disponivel() { return Err("Ligue a IA local nos Ajustes e baixe o modelo para gerar o resumo.".into()); }
+        if !self.motores.resumo_disponivel() {
+            return Err(
+                "Ligue a IA local nos Ajustes e baixe o modelo para gerar o resumo.".into(),
+            );
+        }
         self.reservar(id)?;
         self.resumo_cancelado.store(false, Ordering::Release);
         let s = self.clone();
         let doc = id.to_string();
-        thread::Builder::new().name("ditase.resumo".into()).spawn(move || {
-            s.gerar_resumo(&doc);
-            *s.finalizando.lock().unwrap() = None;
-            s.mudou();
-        })?;
+        thread::Builder::new()
+            .name("ditase.resumo".into())
+            .spawn(move || {
+                s.gerar_resumo(&doc);
+                *s.finalizando.lock().unwrap() = None;
+                s.mudou();
+            })?;
         self.mudou();
         Ok(())
     }
 
     pub fn cancelar_resumo(&self, id: &str) {
-        if self.finalizando.lock().unwrap().as_deref() == Some(id) { self.resumo_cancelado.store(true, Ordering::Release); }
+        if self.finalizando.lock().unwrap().as_deref() == Some(id) {
+            self.resumo_cancelado.store(true, Ordering::Release);
+        }
     }
 
     /// Fecha as fontes e espera, até `prazo`, o coletor gravar em disco o que ainda estava em
@@ -863,8 +1412,15 @@ impl Lancamento {
             let t = a.vivo.relogio.elapsed().as_secs_f64();
             drop(a.capturas);
             let _ = a.envio.send(Captado::Encerrar(t));
-            while !a.coletor_fim.load(Ordering::Acquire) && Instant::now() < limite { thread::sleep(Duration::from_millis(10)); }
-            if !a.coletor_fim.load(Ordering::Acquire) { nota(format!("reunião {}: o coletor não terminou no prazo de saída", a.doc)); }
+            while !a.coletor_fim.load(Ordering::Acquire) && Instant::now() < limite {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !a.coletor_fim.load(Ordering::Acquire) {
+                nota(format!(
+                    "reunião {}: o coletor não terminou no prazo de saída",
+                    a.doc
+                ));
+            }
         }
         self.cancelar_fila().ok();
     }
@@ -873,15 +1429,25 @@ impl Lancamento {
     #[cfg(test)]
     pub fn esperar_ocioso(&self, prazo: Duration) -> bool {
         let limite = Instant::now() + prazo;
-        let ocioso = || self.finalizando.lock().unwrap().is_none() && self.fila.lock().unwrap().is_empty();
-        while !ocioso() && Instant::now() < limite { thread::sleep(Duration::from_millis(10)); }
+        let ocioso =
+            || self.finalizando.lock().unwrap().is_none() && self.fila.lock().unwrap().is_empty();
+        while !ocioso() && Instant::now() < limite {
+            thread::sleep(Duration::from_millis(10));
+        }
         ocioso()
     }
 }
 
 #[cfg(test)]
 pub mod dubles {
-    use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, thread, time::Instant};
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        thread,
+        time::Instant,
+    };
 
     use super::{AoBloco, Capturador};
     use crate::{audio::Fonte, integracao::dubles::voz};
@@ -891,7 +1457,12 @@ pub mod dubles {
     /// (mesmo cálculo da captura real), até ser solta.
     pub struct CapturaEmTempoReal;
     impl Capturador for CapturaEmTempoReal {
-        fn abrir(&self, _f: Fonte, relogio: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
+        fn abrir(
+            &self,
+            _f: Fonte,
+            relogio: Instant,
+            mut ao_bloco: AoBloco,
+        ) -> Result<Box<dyn Send>, String> {
             let fim = Arc::new(AtomicBool::new(false));
             let p = fim.clone();
             let fio = thread::spawn(move || {
@@ -899,33 +1470,63 @@ pub mod dubles {
                 let mut tempo = super::RelogioDeFonte::default();
                 while !p.load(Ordering::Acquire) {
                     thread::sleep(std::time::Duration::from_millis(100));
-                    ao_bloco(tempo.tempo(relogio.elapsed().as_secs_f64(), bloco.len()), bloco.clone(), 0.3);
+                    ao_bloco(
+                        tempo.tempo(relogio.elapsed().as_secs_f64(), bloco.len()),
+                        bloco.clone(),
+                        0.3,
+                    );
                 }
             });
             struct Guarda(Arc<AtomicBool>, Option<thread::JoinHandle<()>>);
-            impl Drop for Guarda { fn drop(&mut self) { self.0.store(true, Ordering::Release); if let Some(f) = self.1.take() { let _ = f.join(); } } }
+            impl Drop for Guarda {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                    if let Some(f) = self.1.take() {
+                        let _ = f.join();
+                    }
+                }
+            }
             Ok(Box::new(Guarda(fim, Some(fio))))
         }
     }
 
-    pub struct CapturaDuble { pub segundos: f64 }
+    pub struct CapturaDuble {
+        pub segundos: f64,
+    }
     impl Capturador for CapturaDuble {
-        fn abrir(&self, fonte: Fonte, _relogio: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
-            let pcm = if fonte == Fonte::Sistema { voz(self.segundos, 0.6) } else { voz(1.0, self.segundos - 0.4) };
+        fn abrir(
+            &self,
+            fonte: Fonte,
+            _relogio: Instant,
+            mut ao_bloco: AoBloco,
+        ) -> Result<Box<dyn Send>, String> {
+            let pcm = if fonte == Fonte::Sistema {
+                voz(self.segundos, 0.6)
+            } else {
+                voz(1.0, self.segundos - 0.4)
+            };
             let fim = Arc::new(AtomicBool::new(false));
             let parar = fim.clone();
             let fio = thread::spawn(move || {
                 for (i, bloco) in pcm.chunks(1600).enumerate() {
-                    if parar.load(Ordering::Acquire) { break; }
+                    if parar.load(Ordering::Acquire) {
+                        break;
+                    }
                     ao_bloco(i as f64 * 0.1, bloco.to_vec(), 0.3);
                 }
             });
             struct Guarda(Arc<AtomicBool>, Option<thread::JoinHandle<()>>);
-            impl Drop for Guarda { fn drop(&mut self) { self.0.store(true, Ordering::Release); if let Some(f) = self.1.take() { let _ = f.join(); } } }
+            impl Drop for Guarda {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                    if let Some(f) = self.1.take() {
+                        let _ = f.join();
+                    }
+                }
+            }
             Ok(Box::new(Guarda(fim, Some(fio))))
         }
     }
-
 }
 
 #[cfg(test)]
@@ -935,22 +1536,38 @@ mod testes {
 
     struct Registro(Mutex<Vec<(String, Option<Value>)>>);
 
-    fn servico(segundos: f64) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) { servico_com(segundos, MotoresDuble::novo()) }
+    fn servico(segundos: f64) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) {
+        servico_com(segundos, MotoresDuble::novo())
+    }
 
-    fn servico_com(segundos: f64, motores: Arc<MotoresDuble>) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) {
+    fn servico_com(
+        segundos: f64,
+        motores: Arc<MotoresDuble>,
+    ) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) {
         let tmp = crate::caminhos::pasta_de_teste();
         let reg = Arc::new(Registro(Mutex::new(Vec::new())));
         let r = reg.clone();
         let avisar: Avisar = Arc::new(move |a, v| r.0.lock().unwrap().push((a.to_string(), v)));
         let preparar: Preparar = Arc::new(|t: &str| nucleo::RegrasFala::filtrar(t));
-        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), motores, Arc::new(CapturaDuble { segundos }), preparar, avisar).unwrap();
+        let s = Lancamento::new(
+            &tmp.path().join("t.sqlite"),
+            &tmp.path().join("Audio"),
+            motores,
+            Arc::new(CapturaDuble { segundos }),
+            preparar,
+            avisar,
+        )
+        .unwrap();
         (tmp, s, reg)
     }
 
     fn esperar(mut condicao: impl FnMut() -> bool, o_que: &str) {
         let inicio = Instant::now();
         while !condicao() {
-            assert!(inicio.elapsed() < Duration::from_secs(30), "tempo esgotado esperando {o_que}");
+            assert!(
+                inicio.elapsed() < Duration::from_secs(30),
+                "tempo esgotado esperando {o_que}"
+            );
             thread::sleep(Duration::from_millis(50));
         }
     }
@@ -972,13 +1589,25 @@ mod testes {
         let mut depois = 0;
         for i in 0..240u64 {
             antes += 1;
-            if estado.deixar(t0 + Duration::from_millis(250 * i), i == 239) { depois += 1; }
+            if estado.deixar(t0 + Duration::from_millis(250 * i), i == 239) {
+                depois += 1;
+            }
         }
         assert_eq!(antes, 240);
         assert_eq!(depois, 61, "60 por segundo de processamento mais o fim");
-        assert!(estado.deixar(t0 + Duration::from_millis(59_800), true), "forçado sempre passa");
-        assert_eq!(rotulo_de_etapa("limpando"), ("diarizando", "Preparando o texto"));
-        assert!(progresso_json("v", "processando", "diarizando", "x", None, false, false).get("progresso").is_none());
+        assert!(
+            estado.deixar(t0 + Duration::from_millis(59_800), true),
+            "forçado sempre passa"
+        );
+        assert_eq!(
+            rotulo_de_etapa("limpando"),
+            ("diarizando", "Preparando o texto")
+        );
+        assert!(
+            progresso_json("v", "processando", "diarizando", "x", None, false, false)
+                .get("progresso")
+                .is_none()
+        );
     }
 
     #[test]
@@ -998,14 +1627,26 @@ mod testes {
     /// bloco de depois chega antes dele); na pausa, a captura já parou quando o `Pausar` entra.
     #[test]
     fn pausa_e_retomada_mandam_a_mensagem_na_ordem_certa() {
-        let vivo = Vivo { pausada: AtomicBool::new(false), nivel: Mutex::new(0.0), ultimo_audio: Mutex::new(Instant::now()), pausas: Mutex::new((0.0, None)), relogio: Instant::now() };
+        let vivo = Vivo {
+            pausada: AtomicBool::new(false),
+            nivel: Mutex::new(0.0),
+            ultimo_audio: Mutex::new(Instant::now()),
+            pausas: Mutex::new((0.0, None)),
+            relogio: Instant::now(),
+        };
         assert!(alternar_pausa(&vivo, |m| {
             assert!(matches!(m, Captado::Pausar(_)));
-            assert!(vivo.pausada.load(Ordering::Acquire), "a captura ainda enviava quando o Pausar entrou");
+            assert!(
+                vivo.pausada.load(Ordering::Acquire),
+                "a captura ainda enviava quando o Pausar entrou"
+            );
         }));
         assert!(!alternar_pausa(&vivo, |m| {
             assert!(matches!(m, Captado::Retomar(_)));
-            assert!(vivo.pausada.load(Ordering::Acquire), "a captura voltou a enviar antes do Retomar");
+            assert!(
+                vivo.pausada.load(Ordering::Acquire),
+                "a captura voltou a enviar antes do Retomar"
+            );
         }));
         assert!(!vivo.pausada.load(Ordering::Acquire));
     }
@@ -1014,8 +1655,15 @@ mod testes {
     #[test]
     fn pausas_seguidas_nao_geram_lacuna() {
         let tmp = crate::caminhos::pasta_de_teste();
-        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(dubles::CapturaEmTempoReal),
-            Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
+        let s = Lancamento::new(
+            &tmp.path().join("t.sqlite"),
+            &tmp.path().join("Audio"),
+            MotoresDuble::novo(),
+            Arc::new(dubles::CapturaEmTempoReal),
+            Arc::new(|t: &str| t.to_string()),
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
         let id = s.iniciar_reuniao("mac").unwrap();
         for _ in 0..8 {
             thread::sleep(Duration::from_millis(130));
@@ -1027,7 +1675,11 @@ mod testes {
         s.encerrar(&id).unwrap();
         esperar(|| s.documento(&id).unwrap()["fase"] == "pronta", "fim");
         let doc = s.documento(&id).unwrap();
-        assert!(doc.get("lacunas").is_none_or(|l| l.as_array().is_none_or(|l| l.is_empty())), "{doc}");
+        assert!(
+            doc.get("lacunas")
+                .is_none_or(|l| l.as_array().is_none_or(|l| l.is_empty())),
+            "{doc}"
+        );
     }
 
     /// I3: cancelar durante a passada final dispensa o resumo (antes, gerar_resumo zerava o pedido).
@@ -1038,7 +1690,10 @@ mod testes {
         thread::sleep(Duration::from_millis(300));
         s.encerrar(&id).unwrap();
         s.cancelar_resumo(&id);
-        esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim do processamento");
+        esperar(
+            || s.esperar_ocioso(Duration::from_millis(10)),
+            "fim do processamento",
+        );
         let doc = s.documento(&id).unwrap();
         assert_eq!(doc["resumoCancelado"], true, "{doc}");
         assert!(doc.get("resumo").is_none_or(Value::is_null), "{doc}");
@@ -1048,15 +1703,34 @@ mod testes {
     /// resumo" assim) e cancelar ali grava `resumoCancelado`.
     #[test]
     fn resumo_em_andamento_aparece_como_resumindo_e_cancela() {
-        let (_tmp, s, reg) = servico_com(3.0, MotoresDuble::com(|m| { m.com_limpeza = true; m.resumo_lento = true; }));
+        let (_tmp, s, reg) = servico_com(
+            3.0,
+            MotoresDuble::com(|m| {
+                m.com_limpeza = true;
+                m.resumo_lento = true;
+            }),
+        );
         let id = s.iniciar_reuniao("mac").unwrap();
         thread::sleep(Duration::from_millis(300));
         s.encerrar(&id).unwrap();
-        esperar(|| s.estado(true).unwrap()["reuniao"]["etapa"] == "resumindo", "etapa resumindo");
+        esperar(
+            || s.estado(true).unwrap()["reuniao"]["etapa"] == "resumindo",
+            "etapa resumindo",
+        );
         // O estado muda um instante antes de o evento sair: espera os dois.
-        esperar(|| reg.0.lock().unwrap().iter().any(|(a, v)| a == "ditado:progresso" && v.as_ref().unwrap()["etapa"]["id"] == "resumindo"), "evento resumindo");
+        esperar(
+            || {
+                reg.0.lock().unwrap().iter().any(|(a, v)| {
+                    a == "ditado:progresso" && v.as_ref().unwrap()["etapa"]["id"] == "resumindo"
+                })
+            },
+            "evento resumindo",
+        );
         s.cancelar_resumo(&id);
-        esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim do resumo");
+        esperar(
+            || s.esperar_ocioso(Duration::from_millis(10)),
+            "fim do resumo",
+        );
         assert_eq!(s.documento(&id).unwrap()["resumoCancelado"], true);
     }
 
@@ -1072,8 +1746,12 @@ mod testes {
             let intruso = thread::spawn(move || {
                 let mut entrou = 0;
                 while !f2.load(Ordering::Acquire) {
-                    if s2.descartar_reuniao(&id2).is_ok() { entrou += 1; }
-                    if s2.recuperar_reuniao(&id2).is_ok() { entrou += 1; }
+                    if s2.descartar_reuniao(&id2).is_ok() {
+                        entrou += 1;
+                    }
+                    if s2.recuperar_reuniao(&id2).is_ok() {
+                        entrou += 1;
+                    }
                 }
                 entrou
             });
@@ -1081,7 +1759,11 @@ mod testes {
             s.encerrar(&id).unwrap();
             thread::sleep(Duration::from_millis(20));
             fim.store(true, Ordering::Release);
-            assert_eq!(intruso.join().unwrap(), 0, "descartar ou recuperar entrou na reunião em transição");
+            assert_eq!(
+                intruso.join().unwrap(),
+                0,
+                "descartar ou recuperar entrou na reunião em transição"
+            );
             esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim");
         }
     }
@@ -1095,9 +1777,18 @@ mod testes {
         s.encerrar(&id).unwrap();
         esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim");
         let estado = s.estado(true).unwrap();
-        let r = estado["recuperaveis"].as_array().unwrap().iter().find(|r| r["id"] == json!(id)).cloned().unwrap_or_else(|| panic!("não está em recuperáveis: {estado}"));
+        let r = estado["recuperaveis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == json!(id))
+            .cloned()
+            .unwrap_or_else(|| panic!("não está em recuperáveis: {estado}"));
         assert_eq!(r["fase"], "interrompida");
-        assert!(r["erroProcessamento"].as_str().unwrap().contains("não terminou"));
+        assert!(r["erroProcessamento"]
+            .as_str()
+            .unwrap()
+            .contains("não terminou"));
         assert!(estado.get("reuniao").is_none());
     }
 
@@ -1110,16 +1801,43 @@ mod testes {
         thread::sleep(Duration::from_millis(300));
         let inicio = Instant::now();
         s.desligar(Duration::from_secs(2));
-        assert!(inicio.elapsed() < Duration::from_millis(1500), "desligar esperou {:?}", inicio.elapsed());
-        assert!(s.iniciar_reuniao("mac").is_err(), "nada novo começa depois de desligar");
+        assert!(
+            inicio.elapsed() < Duration::from_millis(1500),
+            "desligar esperou {:?}",
+            inicio.elapsed()
+        );
+        assert!(
+            s.iniciar_reuniao("mac").is_err(),
+            "nada novo começa depois de desligar"
+        );
         assert!(s.esperar_ocioso(Duration::from_secs(5)));
         drop(s);
         let avisar: Avisar = Arc::new(|_, _| {});
-        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(CapturaDuble { segundos: 1.0 }), Arc::new(|t: &str| t.to_string()), avisar).unwrap();
-        assert!(s.estado(true).unwrap()["recuperaveis"].as_array().unwrap().iter().any(|r| r["id"] == json!(id)));
+        let s = Lancamento::new(
+            &tmp.path().join("t.sqlite"),
+            &tmp.path().join("Audio"),
+            MotoresDuble::novo(),
+            Arc::new(CapturaDuble { segundos: 1.0 }),
+            Arc::new(|t: &str| t.to_string()),
+            avisar,
+        )
+        .unwrap();
+        assert!(s.estado(true).unwrap()["recuperaveis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["id"] == json!(id)));
         s.recuperar_reuniao(&id).unwrap();
-        esperar(|| s.documento(&id).unwrap()["fase"] == "pronta", "recuperação");
-        let palavras: usize = s.documento(&id).unwrap()["trechos"].as_array().unwrap().iter().map(|t| t["texto"].as_str().unwrap().split_whitespace().count()).sum();
+        esperar(
+            || s.documento(&id).unwrap()["fase"] == "pronta",
+            "recuperação",
+        );
+        let palavras: usize = s.documento(&id).unwrap()["trechos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["texto"].as_str().unwrap().split_whitespace().count())
+            .sum();
         assert_eq!(palavras, 6, "3 s de voz = 6 palavras");
     }
 
@@ -1142,27 +1860,62 @@ mod testes {
         assert_eq!(s.estado(true).unwrap()["disponivel"], true);
         let arq = wav(tmp.path(), "pauta.wav", &voz(3.0, 1.0));
         let id = s.adicionar(&[arq]).unwrap().unwrap();
-        esperar(|| s.estado(true).unwrap()["arquivos"][0]["fase"] == "pronto", "arquivo pronto");
+        esperar(
+            || s.estado(true).unwrap()["arquivos"][0]["fase"] == "pronto",
+            "arquivo pronto",
+        );
         let doc = s.documento(&id).unwrap();
         assert_eq!(doc["nome"], "pauta.wav");
         assert!(!doc["trechos"].as_array().unwrap().is_empty());
-        assert!(doc["vozes"].as_array().unwrap().iter().any(|v| v["id"] == "offline-1"), "{doc}");
+        assert!(
+            doc["vozes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == "offline-1"),
+            "{doc}"
+        );
         let lista = s.estado(true).unwrap();
         assert!(lista["arquivos"][0]["palavras"].as_u64().unwrap() > 0);
-        assert!(reg.0.lock().unwrap().iter().any(|(a, v)| a == "ditado:resultado" && v.as_ref().unwrap()["resultado"] == "concluido"));
-        let progresso: Vec<f64> = reg.0.lock().unwrap().iter().filter(|(a, _)| a == "ditado:progresso").filter_map(|(_, v)| v.as_ref()?["progresso"].as_f64()).collect();
-        assert!(progresso.windows(2).all(|p| p[1] >= p[0]), "progresso voltou: {progresso:?}");
+        assert!(reg.0.lock().unwrap().iter().any(
+            |(a, v)| a == "ditado:resultado" && v.as_ref().unwrap()["resultado"] == "concluido"
+        ));
+        let progresso: Vec<f64> = reg
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(a, _)| a == "ditado:progresso")
+            .filter_map(|(_, v)| v.as_ref()?["progresso"].as_f64())
+            .collect();
+        assert!(
+            progresso.windows(2).all(|p| p[1] >= p[0]),
+            "progresso voltou: {progresso:?}"
+        );
         // Busca, título, falante, remover e desfazer.
         assert_eq!(s.procurar_arquivos("PALAVRA").unwrap()[0], json!(id));
         s.alterar_titulo(&id, "Pauta revisada").unwrap();
         s.renomear_voz(&id, "offline-1", "Ana").unwrap();
         let doc = s.documento(&id).unwrap();
         assert_eq!(doc["nome"], "Pauta revisada");
-        assert!(doc["vozes"].as_array().unwrap().iter().any(|v| v["nome"] == "Ana"));
+        assert!(doc["vozes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v["nome"] == "Ana"));
         s.remover(&id).unwrap();
-        assert!(s.estado(true).unwrap()["arquivos"].as_array().unwrap().is_empty());
+        assert!(s.estado(true).unwrap()["arquivos"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         s.desfazer(&id).unwrap();
-        assert_eq!(s.estado(true).unwrap()["arquivos"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            s.estado(true).unwrap()["arquivos"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -1171,32 +1924,67 @@ mod testes {
         let txt = tmp.path().join("notas.txt");
         std::fs::write(&txt, "x").unwrap();
         s.adicionar(&[txt]).unwrap();
-        assert_eq!(s.estado(true).unwrap()["arquivos"][0]["fase"], "formatoNaoSuportado");
+        assert_eq!(
+            s.estado(true).unwrap()["arquivos"][0]["fase"],
+            "formatoNaoSuportado"
+        );
         let ruim = tmp.path().join("quebrado.mp3");
         std::fs::write(&ruim, b"isto nao e mp3").unwrap();
         let id = s.adicionar(&[ruim]).unwrap().unwrap();
-        esperar(|| s.estado(true).unwrap()["arquivos"].as_array().unwrap().iter().any(|a| a["id"] == json!(id) && a["fase"] == "falhou"), "falha registrada");
+        esperar(
+            || {
+                s.estado(true).unwrap()["arquivos"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|a| a["id"] == json!(id) && a["fase"] == "falhou")
+            },
+            "falha registrada",
+        );
     }
 
     #[test]
     fn reuniao_com_microfone_e_sistema_grava_transcreve_e_identifica_falantes() {
         let (_tmp, s, reg) = servico(4.0);
         let id = s.iniciar_reuniao("macEMicrofone").unwrap();
-        assert!(s.iniciar_reuniao("mac").is_err(), "segunda reunião ao mesmo tempo");
+        assert!(
+            s.iniciar_reuniao("mac").is_err(),
+            "segunda reunião ao mesmo tempo"
+        );
         assert_eq!(s.estado(true).unwrap()["reuniao"]["fase"], "gravando");
         thread::sleep(Duration::from_millis(1500));
         s.encerrar(&id).unwrap();
-        esperar(|| s.estado(true).unwrap()["anteriores"].as_array().unwrap().iter().any(|r| r["id"] == json!(id)), "reunião arquivada");
+        esperar(
+            || {
+                s.estado(true).unwrap()["anteriores"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|r| r["id"] == json!(id))
+            },
+            "reunião arquivada",
+        );
         let doc = s.documento(&id).unwrap();
         assert_eq!(doc["fase"], "pronta");
         assert_eq!(doc["falantes"], "identificados");
         let trechos = doc["trechos"].as_array().unwrap();
         assert!(!trechos.is_empty());
         assert!(trechos.iter().all(|t| t["parcial"] != true));
-        assert!(s.estado(true).unwrap()["recuperaveis"].as_array().unwrap().is_empty(), "áudio liberado depois da passada final");
+        assert!(
+            s.estado(true).unwrap()["recuperaveis"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "áudio liberado depois da passada final"
+        );
         let eventos = reg.0.lock().unwrap();
-        assert!(eventos.iter().any(|(a, _)| a == "ditado:trechos"), "trechos ao vivo");
-        assert!(eventos.iter().any(|(a, v)| a == "ditado:resultado" && v.as_ref().unwrap()["resultado"] == "concluido"));
+        assert!(
+            eventos.iter().any(|(a, _)| a == "ditado:trechos"),
+            "trechos ao vivo"
+        );
+        assert!(eventos.iter().any(
+            |(a, v)| a == "ditado:resultado" && v.as_ref().unwrap()["resultado"] == "concluido"
+        ));
     }
 
     #[test]
@@ -1209,20 +1997,48 @@ mod testes {
             // Captura direta pelo coletor, sem processar: simula o app fechando no meio.
             let armazem = ArmazemLancamento::new(&banco).unwrap();
             id = uuid();
-            armazem.criar_documento(&id, "reuniao", "Reunião", Some("mac"), "gravando").unwrap();
-            let mut c = ColetorDeReuniao::new(id.clone(), ArmazemLancamento::new(&banco).unwrap(), DiscoDeBlocos::new(audio.clone()), 0.0);
+            armazem
+                .criar_documento(&id, "reuniao", "Reunião", Some("mac"), "gravando")
+                .unwrap();
+            let mut c = ColetorDeReuniao::new(
+                id.clone(),
+                ArmazemLancamento::new(&banco).unwrap(),
+                DiscoDeBlocos::new(audio.clone()),
+                0.0,
+            );
             c.abrir(FonteDeAudio::Mac, 0.0).unwrap();
-            for (i, b) in voz(3.0, 0.5).chunks(1600).enumerate() { c.receber(FonteDeAudio::Mac, i as f64 * 0.1, b).unwrap(); }
+            for (i, b) in voz(3.0, 0.5).chunks(1600).enumerate() {
+                c.receber(FonteDeAudio::Mac, i as f64 * 0.1, b).unwrap();
+            }
             c.selar_tudo().unwrap();
         }
         let avisar: Avisar = Arc::new(|_, _| {});
-        let s = Lancamento::new(&banco, &audio, MotoresDuble::novo(), Arc::new(CapturaDuble { segundos: 1.0 }), Arc::new(|t: &str| t.to_string()), avisar).unwrap();
+        let s = Lancamento::new(
+            &banco,
+            &audio,
+            MotoresDuble::novo(),
+            Arc::new(CapturaDuble { segundos: 1.0 }),
+            Arc::new(|t: &str| t.to_string()),
+            avisar,
+        )
+        .unwrap();
         let rec = s.estado(true).unwrap()["recuperaveis"].clone();
-        assert!(rec.as_array().unwrap().iter().any(|r| r["id"] == json!(id)), "{rec}");
+        assert!(
+            rec.as_array().unwrap().iter().any(|r| r["id"] == json!(id)),
+            "{rec}"
+        );
         s.recuperar_reuniao(&id).unwrap();
-        esperar(|| s.documento(&id).unwrap()["fase"] == "pronta", "recuperação");
+        esperar(
+            || s.documento(&id).unwrap()["fase"] == "pronta",
+            "recuperação",
+        );
         let doc = s.documento(&id).unwrap();
-        let palavras: usize = doc["trechos"].as_array().unwrap().iter().map(|t| t["texto"].as_str().unwrap().split_whitespace().count()).sum();
+        let palavras: usize = doc["trechos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["texto"].as_str().unwrap().split_whitespace().count())
+            .sum();
         assert_eq!(palavras, 6, "3 s de voz = 6 palavras do dublê: {doc}");
     }
 
@@ -1242,9 +2058,14 @@ mod testes {
 }
 
 impl crate::controlador::MicrofoneCompartilhado for Lancamento {
-    fn derivar(&self, ao_bloco: crate::controlador::AoBlocoDeAudio) -> Option<Box<dyn crate::controlador::FonteAberta>> {
+    fn derivar(
+        &self,
+        ao_bloco: crate::controlador::AoBlocoDeAudio,
+    ) -> Option<Box<dyn crate::controlador::FonteAberta>> {
         let r = self.reuniao.lock().unwrap();
-        if !r.as_ref().is_some_and(|a| a.microfone) { return None; }
+        if !r.as_ref().is_some_and(|a| a.microfone) {
+            return None;
+        }
         *self.derivacao.lock().unwrap() = Some(ao_bloco);
         Some(Box::new(FonteDerivada(self.derivacao.clone())))
     }
@@ -1258,12 +2079,31 @@ mod testes_derivacao {
     /// Captura contínua: um bloco de 100 ms de silêncio a cada 10 ms até ser solta.
     struct CapturaContinua;
     impl Capturador for CapturaContinua {
-        fn abrir(&self, _f: Fonte, _r: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
+        fn abrir(
+            &self,
+            _f: Fonte,
+            _r: Instant,
+            mut ao_bloco: AoBloco,
+        ) -> Result<Box<dyn Send>, String> {
             let fim = Arc::new(AtomicBool::new(false));
             let p = fim.clone();
-            let fio = thread::spawn(move || { let mut i = 0; while !p.load(Ordering::Acquire) { ao_bloco(i as f64 * 0.1, vec![0.0; 1600], 0.0); i += 1; thread::sleep(Duration::from_millis(10)); } });
+            let fio = thread::spawn(move || {
+                let mut i = 0;
+                while !p.load(Ordering::Acquire) {
+                    ao_bloco(i as f64 * 0.1, vec![0.0; 1600], 0.0);
+                    i += 1;
+                    thread::sleep(Duration::from_millis(10));
+                }
+            });
             struct Guarda(Arc<AtomicBool>, Option<thread::JoinHandle<()>>);
-            impl Drop for Guarda { fn drop(&mut self) { self.0.store(true, Ordering::Release); if let Some(f) = self.1.take() { let _ = f.join(); } } }
+            impl Drop for Guarda {
+                fn drop(&mut self) {
+                    self.0.store(true, Ordering::Release);
+                    if let Some(f) = self.1.take() {
+                        let _ = f.join();
+                    }
+                }
+            }
             Ok(Box::new(Guarda(fim, Some(fio))))
         }
     }
@@ -1273,29 +2113,61 @@ mod testes_derivacao {
     #[test]
     fn derivacao_do_microfone_da_reuniao() {
         let tmp = crate::caminhos::pasta_de_teste();
-        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(CapturaContinua),
-            Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
-        assert!(s.derivar(Box::new(|_, _| {})).is_none(), "sem reunião não há derivação");
+        let s = Lancamento::new(
+            &tmp.path().join("t.sqlite"),
+            &tmp.path().join("Audio"),
+            MotoresDuble::novo(),
+            Arc::new(CapturaContinua),
+            Arc::new(|t: &str| t.to_string()),
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        assert!(
+            s.derivar(Box::new(|_, _| {})).is_none(),
+            "sem reunião não há derivação"
+        );
         let id = s.iniciar_reuniao("macEMicrofone").unwrap();
         s.pausar(&id).unwrap();
         let recebido = Arc::new(Mutex::new(0usize));
         let r = recebido.clone();
-        let mut fonte = s.derivar(Box::new(move |b, _| *r.lock().unwrap() += b.len())).expect("derivação");
+        let mut fonte = s
+            .derivar(Box::new(move |b, _| *r.lock().unwrap() += b.len()))
+            .expect("derivação");
         thread::sleep(Duration::from_millis(300));
         let antes = *recebido.lock().unwrap();
-        assert!(antes > 0, "a derivação não recebeu nada com a reunião pausada");
+        assert!(
+            antes > 0,
+            "a derivação não recebeu nada com a reunião pausada"
+        );
         fonte.parar();
         thread::sleep(Duration::from_millis(200));
         let depois = *recebido.lock().unwrap();
         thread::sleep(Duration::from_millis(200));
-        assert_eq!(*recebido.lock().unwrap(), depois, "continuou recebendo depois de parar");
+        assert_eq!(
+            *recebido.lock().unwrap(),
+            depois,
+            "continuou recebendo depois de parar"
+        );
         s.encerrar(&id).unwrap();
         s.desligar(Duration::from_secs(2));
-        let id2 = { let s2 = Lancamento::new(&tmp.path().join("u.sqlite"), &tmp.path().join("Audio2"), MotoresDuble::novo(), Arc::new(CapturaDuble { segundos: 3.0 }), Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
+        let id2 = {
+            let s2 = Lancamento::new(
+                &tmp.path().join("u.sqlite"),
+                &tmp.path().join("Audio2"),
+                MotoresDuble::novo(),
+                Arc::new(CapturaDuble { segundos: 3.0 }),
+                Arc::new(|t: &str| t.to_string()),
+                Arc::new(|_, _| {}),
+            )
+            .unwrap();
             let id = s2.iniciar_reuniao("mac").unwrap();
-            assert!(s2.derivar(Box::new(|_, _| {})).is_none(), "reunião sem microfone não deriva");
+            assert!(
+                s2.derivar(Box::new(|_, _| {})).is_none(),
+                "reunião sem microfone não deriva"
+            );
             s2.desligar(Duration::from_secs(2));
-            id };
+            id
+        };
         assert!(!id2.is_empty());
     }
 }
@@ -1317,19 +2189,41 @@ mod medicoes {
             {
                 let a = ArmazemLancamento::new(&banco).unwrap();
                 let id = uuid();
-                a.criar_documento(&id, "reuniao", "Reunião", Some("mac"), "gravando").unwrap();
-                let mut c = ColetorDeReuniao::new(id, ArmazemLancamento::new(&banco).unwrap(), DiscoDeBlocos::new(audio.clone()), 0.0);
+                a.criar_documento(&id, "reuniao", "Reunião", Some("mac"), "gravando")
+                    .unwrap();
+                let mut c = ColetorDeReuniao::new(
+                    id,
+                    ArmazemLancamento::new(&banco).unwrap(),
+                    DiscoDeBlocos::new(audio.clone()),
+                    0.0,
+                );
                 c.abrir(FonteDeAudio::Mac, 0.0).unwrap();
                 let bloco = voz(1.0, 0.0);
-                for i in 0..min * 60 { c.receber(FonteDeAudio::Mac, i as f64, &bloco).unwrap(); }
+                for i in 0..min * 60 {
+                    c.receber(FonteDeAudio::Mac, i as f64, &bloco).unwrap();
+                }
                 c.selar_tudo().unwrap();
             }
             let inicio = Instant::now();
-            let s = Lancamento::new(&banco, &audio, MotoresDuble::novo(), Arc::new(dubles::CapturaDuble { segundos: 1.0 }), Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
+            let s = Lancamento::new(
+                &banco,
+                &audio,
+                MotoresDuble::novo(),
+                Arc::new(dubles::CapturaDuble { segundos: 1.0 }),
+                Arc::new(|t: &str| t.to_string()),
+                Arc::new(|_, _| {}),
+            )
+            .unwrap();
             let abrir = inicio.elapsed();
             let inicio = Instant::now();
-            for _ in 0..20 { s.estado(true).unwrap(); }
-            println!("reunião de {min} min em disco: abrir {:.1} ms; lancamento.estado {:.2} ms cada", abrir.as_secs_f64() * 1e3, inicio.elapsed().as_secs_f64() * 1e3 / 20.0);
+            for _ in 0..20 {
+                s.estado(true).unwrap();
+            }
+            println!(
+                "reunião de {min} min em disco: abrir {:.1} ms; lancamento.estado {:.2} ms cada",
+                abrir.as_secs_f64() * 1e3,
+                inicio.elapsed().as_secs_f64() * 1e3 / 20.0
+            );
         }
     }
 }

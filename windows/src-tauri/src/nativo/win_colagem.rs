@@ -9,7 +9,10 @@
 //!   Formatos de objeto GDI (bitmap, metarquivo, paleta) não voltam; o Windows recria o bitmap a
 //!   partir do DIB.
 use std::{
-    sync::{atomic::{AtomicIsize, Ordering}, Mutex},
+    sync::{
+        atomic::{AtomicIsize, Ordering},
+        Mutex,
+    },
     thread,
     time::Duration,
 };
@@ -20,12 +23,21 @@ use windows::{
         Foundation::{CloseHandle, HANDLE, HGLOBAL, HWND},
         Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY},
         System::{
-            DataExchange::{CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData},
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+                GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW,
+                SetClipboardData,
+            },
             Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
-            Threading::{GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
+            Threading::{
+                GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
         },
         UI::{
-            Input::KeyboardAndMouse::{SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_V},
+            Input::KeyboardAndMouse::{
+                SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+                KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_V,
+            },
             WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
         },
     },
@@ -44,15 +56,25 @@ type Conteudo = Vec<(u32, Vec<u8>)>;
 static RESERVA: Mutex<Option<(Conteudo, u32)>> = Mutex::new(None);
 
 /// A área de transferência precisa de uma janela dona: a principal do app.
-pub fn definir_dono(hwnd: isize) { DONO.store(hwnd, Ordering::SeqCst); }
+pub fn definir_dono(hwnd: isize) {
+    DONO.store(hwnd, Ordering::SeqCst);
+}
 
 struct Aberta;
-impl Drop for Aberta { fn drop(&mut self) { unsafe { let _ = CloseClipboard(); } } }
+impl Drop for Aberta {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseClipboard();
+        }
+    }
+}
 
 fn abrir() -> Result<Aberta, String> {
     let dono = HWND(DONO.load(Ordering::SeqCst) as *mut _);
     for _ in 0..20 {
-        if unsafe { OpenClipboard(Some(dono)) }.is_ok() { return Ok(Aberta); }
+        if unsafe { OpenClipboard(Some(dono)) }.is_ok() {
+            return Ok(Aberta);
+        }
         thread::sleep(Duration::from_millis(15));
     }
     Err("área de transferência ocupada por outro programa".into())
@@ -64,14 +86,22 @@ fn guardar() -> Vec<(u32, Vec<u8>)> {
     let mut formato = 0u32;
     loop {
         formato = unsafe { EnumClipboardFormats(formato) };
-        if formato == 0 { break; }
-        if GDI.contains(&formato) || (0x300..=0x3FF).contains(&formato) { continue; }
+        if formato == 0 {
+            break;
+        }
+        if GDI.contains(&formato) || (0x300..=0x3FF).contains(&formato) {
+            continue;
+        }
         unsafe {
-            let Ok(h) = GetClipboardData(formato) else { continue };
+            let Ok(h) = GetClipboardData(formato) else {
+                continue;
+            };
             let g = HGLOBAL(h.0);
             let tamanho = GlobalSize(g);
             let p = GlobalLock(g) as *const u8;
-            if p.is_null() || tamanho == 0 { continue; }
+            if p.is_null() || tamanho == 0 {
+                continue;
+            }
             itens.push((formato, std::slice::from_raw_parts(p, tamanho).to_vec()));
             let _ = GlobalUnlock(g);
         }
@@ -81,11 +111,17 @@ fn guardar() -> Vec<(u32, Vec<u8>)> {
 
 /// Põe um formato na área de transferência aberta. Devolve se o Windows aceitou.
 fn por(formato: u32, bytes: &[u8]) -> bool {
-    if formato == 0 { return false; }
+    if formato == 0 {
+        return false;
+    }
     unsafe {
-        let Ok(g) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else { return false };
+        let Ok(g) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else {
+            return false;
+        };
         let p = GlobalLock(g) as *mut u8;
-        if p.is_null() { return false; }
+        if p.is_null() {
+            return false;
+        }
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
         let _ = GlobalUnlock(g);
         // Sucesso: o Windows passa a ser dono da memória.
@@ -94,19 +130,31 @@ fn por(formato: u32, bytes: &[u8]) -> bool {
 }
 
 fn restaurar_aberta(itens: &[(u32, Vec<u8>)]) {
-    unsafe { let _ = EmptyClipboard(); }
-    for (formato, bytes) in itens { por(*formato, bytes); }
+    unsafe {
+        let _ = EmptyClipboard();
+    }
+    for (formato, bytes) in itens {
+        por(*formato, bytes);
+    }
 }
 
 fn texto_utf16(texto: &str) -> Vec<u8> {
-    texto.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect()
+    texto
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(u16::to_le_bytes)
+        .collect()
 }
 
 /// Cópia pedida pela pessoa (botão Copiar): comportamento comum do Windows.
 pub fn copiar(texto: &str) -> Result<(), String> {
     let _a = abrir()?;
-    unsafe { EmptyClipboard().map_err(|e| e.to_string())?; }
-    if !por(CF_UNICODETEXT, &texto_utf16(texto)) { return Err("a área de transferência recusou o texto".into()); }
+    unsafe {
+        EmptyClipboard().map_err(|e| e.to_string())?;
+    }
+    if !por(CF_UNICODETEXT, &texto_utf16(texto)) {
+        return Err("a área de transferência recusou o texto".into());
+    }
     Ok(())
 }
 
@@ -115,11 +163,20 @@ pub fn copiar(texto: &str) -> Result<(), String> {
 /// volta ao que era (`anterior`) e nada do ditado fica nela. Devolve a sequência do nosso conteúdo.
 fn escrever_transitorio(texto: &str, anterior: &[(u32, Vec<u8>)]) -> Result<u32, String> {
     let _a = abrir()?;
-    unsafe { EmptyClipboard().map_err(|e| e.to_string())?; }
+    unsafe {
+        EmptyClipboard().map_err(|e| e.to_string())?;
+    }
     let marcas = unsafe {
-        por(RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")), &[])
-            & por(RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")), &0u32.to_le_bytes())
-            & por(RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")), &0u32.to_le_bytes())
+        por(
+            RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")),
+            &[],
+        ) & por(
+            RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")),
+            &0u32.to_le_bytes(),
+        ) & por(
+            RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")),
+            &0u32.to_le_bytes(),
+        )
     };
     if !marcas || !por(CF_UNICODETEXT, &texto_utf16(texto)) {
         restaurar_aberta(anterior);
@@ -135,7 +192,13 @@ fn elevado(processo: HANDLE) -> Option<bool> {
         OpenProcessToken(processo, TOKEN_QUERY, &mut token).ok()?;
         let mut el = TOKEN_ELEVATION::default();
         let mut tam = 0u32;
-        let r = GetTokenInformation(token, TokenElevation, Some(&mut el as *mut _ as *mut _), std::mem::size_of::<TOKEN_ELEVATION>() as u32, &mut tam);
+        let r = GetTokenInformation(
+            token,
+            TokenElevation,
+            Some(&mut el as *mut _ as *mut _),
+            std::mem::size_of::<TOKEN_ELEVATION>() as u32,
+            &mut tam,
+        );
         let _ = CloseHandle(token);
         r.ok()?;
         Some(el.TokenIsElevated != 0)
@@ -148,8 +211,12 @@ fn destino_bloqueado() -> bool {
         let janela = GetForegroundWindow();
         let mut pid = 0u32;
         GetWindowThreadProcessId(janela, Some(&mut pid));
-        if pid == 0 { return false; }
-        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else { return false };
+        if pid == 0 {
+            return false;
+        }
+        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
         let alvo = elevado(p);
         let _ = CloseHandle(p);
         alvo == Some(true) && elevado(GetCurrentProcess()) != Some(true)
@@ -159,7 +226,19 @@ fn destino_bloqueado() -> bool {
 fn tecla(vk: VIRTUAL_KEY, solta: bool) -> INPUT {
     INPUT {
         r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 { ki: KEYBDINPUT { wVk: vk, wScan: 0, dwFlags: if solta { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) }, time: 0, dwExtraInfo: 0 } },
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: vk,
+                wScan: 0,
+                dwFlags: if solta {
+                    KEYEVENTF_KEYUP
+                } else {
+                    KEYBD_EVENT_FLAGS(0)
+                },
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
     }
 }
 
@@ -170,7 +249,10 @@ pub fn inserir(texto: &str) -> Insercao {
         crate::caminhos::nota("colagem: app de destino como administrador");
         return match escrever_transitorio(texto, &guardar()) {
             Ok(_) => Insercao::SoCopiado,
-            Err(e) => { crate::caminhos::nota(format!("colagem: não copiei ({e})")); Insercao::Recusado }
+            Err(e) => {
+                crate::caminhos::nota(format!("colagem: não copiei ({e})"));
+                Insercao::Recusado
+            }
         };
     }
     // Duas colagens seguidas: a área ainda tem o nosso texto anterior; vale a reserva da primeira.
@@ -183,10 +265,18 @@ pub fn inserir(texto: &str) -> Insercao {
     };
     let sequencia = match escrever_transitorio(texto, &guardado) {
         Ok(s) => s,
-        Err(e) => { crate::caminhos::nota(format!("colagem: não colei ({e})")); return Insercao::Recusado; }
+        Err(e) => {
+            crate::caminhos::nota(format!("colagem: não colei ({e})"));
+            return Insercao::Recusado;
+        }
     };
     *RESERVA.lock().unwrap() = Some((guardado, sequencia));
-    let entradas = [tecla(VK_CONTROL, false), tecla(VK_V, false), tecla(VK_V, true), tecla(VK_CONTROL, true)];
+    let entradas = [
+        tecla(VK_CONTROL, false),
+        tecla(VK_V, false),
+        tecla(VK_V, true),
+        tecla(VK_CONTROL, true),
+    ];
     let enviadas = unsafe { SendInput(&entradas, std::mem::size_of::<INPUT>() as i32) };
     if enviadas != entradas.len() as u32 {
         // O texto já está copiado com as marcas: fica para a pessoa colar, e a pílula avisa.
@@ -199,8 +289,12 @@ pub fn inserir(texto: &str) -> Insercao {
     thread::spawn(move || {
         thread::sleep(Duration::from_secs_f64(espera));
         let mut reserva = RESERVA.lock().unwrap();
-        let Some((itens, nossa)) = reserva.as_ref() else { return };
-        if *nossa != sequencia { return; } // houve outra colagem depois: ela restaura
+        let Some((itens, nossa)) = reserva.as_ref() else {
+            return;
+        };
+        if *nossa != sequencia {
+            return;
+        } // houve outra colagem depois: ela restaura
         let itens = itens.clone();
         *reserva = None;
         drop(reserva);
@@ -209,7 +303,9 @@ pub fn inserir(texto: &str) -> Insercao {
             match abrir() {
                 Ok(_a) => {
                     // O usuário copiou outra coisa nesse meio tempo: fica a dele.
-                    if unsafe { GetClipboardSequenceNumber() } == sequencia { restaurar_aberta(&itens); }
+                    if unsafe { GetClipboardSequenceNumber() } == sequencia {
+                        restaurar_aberta(&itens);
+                    }
                     return;
                 }
                 Err(_) => thread::sleep(Duration::from_millis(200 * (tentativa + 1))),

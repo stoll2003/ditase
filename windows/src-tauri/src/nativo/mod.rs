@@ -11,25 +11,48 @@ pub enum Insercao {
     Recusado,
 }
 
-#[cfg(windows)] #[path = "win_gancho.rs"] pub mod gancho;
-#[cfg(windows)] #[path = "win_colagem.rs"] pub mod colagem;
-#[cfg(windows)] #[path = "win_janela.rs"] pub mod janela;
-#[cfg(windows)] #[path = "win_midia.rs"] pub mod midia;
-#[cfg(windows)] #[path = "win_sistema.rs"] pub mod sistema;
+#[cfg(windows)]
+#[path = "win_colagem.rs"]
+pub mod colagem;
+#[cfg(windows)]
+#[path = "win_gancho.rs"]
+pub mod gancho;
+#[cfg(windows)]
+#[path = "win_janela.rs"]
+pub mod janela;
+#[cfg(windows)]
+#[path = "win_midia.rs"]
+pub mod midia;
+#[cfg(windows)]
+#[path = "win_sistema.rs"]
+pub mod sistema;
 
 #[cfg(not(windows))]
 pub mod gancho {
-    use std::{sync::{mpsc::Sender, Arc, Mutex}, time::Instant};
     use crate::atalho::{Entrada, Visao};
+    use std::{
+        sync::{mpsc::Sender, Arc, Mutex},
+        time::Instant,
+    };
     /// Sem gancho fora do Windows.
-    pub fn instalar(_visao: Arc<Mutex<Visao>>, _emissor: Sender<Entrada>, _relogio: Instant) -> bool { false }
+    pub fn instalar(
+        _visao: Arc<Mutex<Visao>>,
+        _emissor: Sender<Entrada>,
+        _relogio: Instant,
+    ) -> bool {
+        false
+    }
 }
 
 #[cfg(not(windows))]
 pub mod colagem {
     use super::Insercao;
-    pub fn copiar(_texto: &str) -> Result<(), String> { Err("área de transferência só no Windows".into()) }
-    pub fn inserir(_texto: &str) -> Insercao { Insercao::SoCopiado }
+    pub fn copiar(_texto: &str) -> Result<(), String> {
+        Err("área de transferência só no Windows".into())
+    }
+    pub fn inserir(_texto: &str) -> Insercao {
+        Insercao::SoCopiado
+    }
 }
 
 #[cfg(not(windows))]
@@ -40,16 +63,31 @@ pub mod janela {
 
 #[cfg(not(windows))]
 pub mod midia {
-    pub fn decodificar(_caminho: &std::path::Path) -> Result<Vec<f32>, String> { Err("Media Foundation só no Windows".into()) }
+    pub fn decodificar(_caminho: &std::path::Path) -> Result<Vec<f32>, String> {
+        Err("Media Foundation só no Windows".into())
+    }
 }
 
 #[cfg(not(windows))]
 pub mod sistema {
-    pub fn versao() -> String { format!("{} (fora do Windows)", std::env::consts::OS) }
+    pub fn versao() -> String {
+        format!("{} (fora do Windows)", std::env::consts::OS)
+    }
     /// Programa em primeiro plano: (nome do executável, nome para exibir). Nunca o título da janela.
-    pub fn app_em_foco() -> (String, String) { (String::new(), String::new()) }
-    pub fn abrir(alvo: &str) -> std::io::Result<()> { std::process::Command::new("open").arg(alvo).spawn().map(|_| ()) }
+    pub fn app_em_foco() -> (String, String) {
+        (String::new(), String::new())
+    }
+    pub fn abrir(alvo: &str) -> std::io::Result<()> {
+        std::process::Command::new("open")
+            .arg(alvo)
+            .spawn()
+            .map(|_| ())
+    }
     /// Espaço livre no volume; fora do Windows o baixador segue sem a conferência.
-    pub fn alerta(titulo: &str, texto: &str) { eprintln!("{titulo}: {texto}"); }
-    pub fn espaco_livre(_pasta: &std::path::Path) -> Option<u64> { None }
+    pub fn alerta(titulo: &str, texto: &str) {
+        eprintln!("{titulo}: {texto}");
+    }
+    pub fn espaco_livre(_pasta: &std::path::Path) -> Option<u64> {
+        None
+    }
 }

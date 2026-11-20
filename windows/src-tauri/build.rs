@@ -7,7 +7,11 @@ fn copiar(de: &Path, para: &Path) {
     for entrada in fs::read_dir(de).expect("ler ui/dist") {
         let entrada = entrada.unwrap();
         let destino = para.join(entrada.file_name());
-        if entrada.file_type().unwrap().is_dir() { copiar(&entrada.path(), &destino) } else { fs::copy(entrada.path(), destino).unwrap(); }
+        if entrada.file_type().unwrap().is_dir() {
+            copiar(&entrada.path(), &destino)
+        } else {
+            fs::copy(entrada.path(), destino).unwrap();
+        }
     }
 }
 
@@ -34,12 +38,19 @@ fn main() {
 
     let chave = raiz.join("../updater.pub");
     println!("cargo:rerun-if-changed=../updater.pub");
-    let pub_key = fs::read_to_string(&chave).map(|s| s.trim().to_string()).unwrap_or_default();
-    if pub_key.is_empty() { println!("cargo:warning=windows/updater.pub ausente: atualização do canal de teste desligada"); }
+    let pub_key = fs::read_to_string(&chave)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    if pub_key.is_empty() {
+        println!(
+            "cargo:warning=windows/updater.pub ausente: atualização do canal de teste desligada"
+        );
+    }
     println!("cargo:rustc-env=DITASE_UPDATER_PUB={pub_key}");
 
     // Manifesto próprio: o padrão do Tauri mais `activeCodePage` UTF-8 (pedido dos motores).
     println!("cargo:rerun-if-changed=app.manifest");
     let windows = tauri_build::WindowsAttributes::new().app_manifest(include_str!("app.manifest"));
-    tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows)).expect("tauri-build");
+    tauri_build::try_build(tauri_build::Attributes::new().windows_attributes(windows))
+        .expect("tauri-build");
 }
