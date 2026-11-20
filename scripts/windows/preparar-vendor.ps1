@@ -145,7 +145,10 @@ if (-not $PastaCrt) {
 foreach ($dll in @("MSVCP140.dll", "VCRUNTIME140.dll", "VCRUNTIME140_1.dll")) {
   $origem = Join-Path $PastaCrt.FullName $dll
   if (-not (Test-Path $origem)) { throw "DLL do Visual C++ ausente em $($PastaCrt.FullName): $dll" }
-  Copy-Item -Path $origem -Destination (Join-Path $DirVc $dll) -Force
+  $origemCrt = Get-Item -LiteralPath $origem
+  $hashCrt = (Get-FileHash -LiteralPath $origem -Algorithm SHA256).Hash
+  Write-Host "Visual C++: $dll $($origemCrt.VersionInfo.FileVersion) SHA-256 $hashCrt"
+  Copy-Item -LiteralPath $origem -Destination (Join-Path $DirVc $dll) -Force
 }
 
 # 4. Conferência final

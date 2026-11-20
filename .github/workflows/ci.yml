@@ -75,9 +75,12 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           shared-key: windows-x64-sherpa-verified-v1
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
 
       # Cache só dos arquivos baixados. O hash é conferido mesmo quando há cache.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vendor-cache
         with:
           path: ${{ runner.temp }}/ditase-vendor-cache
           key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows/preparar-vendor.ps1') }}
@@ -85,6 +88,12 @@ jobs:
       - name: Preparar bibliotecas verificadas do Windows
         shell: powershell
         run: .\scripts\windows\preparar-vendor.ps1 ${{ steps.modo.outputs.tauri == 'false' && '-SomenteSherpa' || '' }}
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name != 'pull_request' && steps.vendor-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ${{ steps.vendor-cache.outputs.cache-primary-key }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -150,7 +159,11 @@ jobs:
           retention-days: 7
 
       - name: Regressão da taxa de erro por palavra (WER)
-        run: cargo test --locked -p motores --lib medicao::testes::wer_basico -- --exact
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p motores --lib medicao::testes::wer_basico -- --exact | tee wer.log
+          grep -F 'test medicao::testes::wer_basico ... ok' wer.log
 
       - name: Formatação Rust
         if: success() || failure()
