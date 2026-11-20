@@ -32,7 +32,16 @@ pub const MARGEM: usize = TAXA as usize * 8 / 10;
 pub const PASSO_MINIMO: usize = TAXA as usize * 2;
 pub const JANELA_MAXIMA: usize = TAXA as usize * 15;
 
+const LIMITE_SOM_CURTO: usize = TAXA as usize * 3 / 10;
+const MOTIVO_RETIDO: &str =
+    "Um som breve ficou sem texto após duas tentativas. O áudio continua guardado.";
 const MOTIVO_INCOMPLETO: &str = "Áudio do bloco ausente ou incompleto.";
+
+struct TrechoParaDiarizar {
+    id: String,
+    inicio: f64,
+    fim: f64,
+}
 
 pub struct ProcessadorDeReuniao<'a> {
     pub documento: &'a str,
@@ -105,40 +114,43 @@ impl<'a> ProcessadorDeReuniao<'a> {
 
     /// Fecha as caudas de todas as fontes (pausa, fim ou recuperação).
     pub fn fechar(&mut self) -> Result<Vec<TrechoNovo>, Erro> {
-        self.avancar(true)
+        let mut trechos = self.avancar(true)?;
+        trechos.extend(self.tentar_pendencias(true)?);
+        Ok(trechos)
     }
 
     /// Recuperar é transcrever: fecha as costuras abertas e tenta de novo cada faixa pendente.
     /// A adoção de PCM órfão é feita antes, por `ArmazemLancamento::preparar_abertura`.
     pub fn recuperar(&mut self) -> Result<Vec<TrechoNovo>, Erro> {
-        let mut t = self.fechar()?;
+        // Versões anteriores podiam fechar a costura mesmo com blocos ainda não reconhecidos.
+        self.armazem.db.execute(
+            "UPDATE lt_costuras AS c SET fechada=0 WHERE c.documento=? AND c.fechada=1
+             AND EXISTS (SELECT 1 FROM lt_blocos b WHERE b.documento=c.documento
+                AND b.fonte=c.fonte AND b.geracao=c.geracao AND b.estado='capturado'
+                AND b.inicio+b.quantidade>c.confirmado_ate)",
+            [self.documento],
+        )?;
+        let mut t = self.avancar(true)?;
         t.extend(self.repetir_pendencias()?);
         Ok(t)
     }
 
     fn avancar(&mut self, fechamento: bool) -> Result<Vec<TrechoNovo>, Erro> {
         let mut persistidos = vec![];
-        let blocos = self.armazem.blocos(self.documento)?;
         for costura in self.armazem.costuras(self.documento)? {
             if costura.fechada {
                 continue;
             }
             let (f, g) = (costura.fonte, costura.geracao);
-            let Some(disponivel) = blocos
-                .iter()
-                .filter(|b| b.id.fonte == f && b.id.geracao == g)
-                .map(|b| b.fim())
-                .max()
-            else {
+            let disponivel: Option<usize> = self.armazem.db.prepare_cached(
+                "SELECT MAX(inicio+quantidade) FROM lt_blocos WHERE documento=? AND fonte=? AND geracao=?",
+            )?.query_row(rusqlite::params![self.documento, f.nome(), g], |r| r.get(0))?;
+            let Some(disponivel) = disponivel else {
                 continue;
             };
-            if self.tomadas.insert((f, g)) {
-                self.armazem
-                    .tomar_costura(self.documento, f, g, &self.dono)?;
-            }
             let mut confirmado = costura.confirmado_ate;
             loop {
-                let fim_janela = disponivel.min(confirmado + JANELA_MAXIMA);
+                let fim_janela = disponivel.min(confirmado.saturating_add(JANELA_MAXIMA));
                 let fecha = fechamento && fim_janela == disponivel;
                 let limite = if fecha {
                     fim_janela
@@ -148,14 +160,12 @@ impl<'a> ProcessadorDeReuniao<'a> {
                 if limite <= confirmado || (!fecha && limite - confirmado < PASSO_MINIMO) {
                     break;
                 }
-                let atual: Vec<_> = self
-                    .armazem
-                    .blocos(self.documento)?
-                    .into_iter()
-                    .filter(|b| b.id.fonte == f && b.id.geracao == g)
-                    .collect();
-                let (novo, trechos) =
-                    self.passo(f, g, &atual, confirmado, fim_janela, limite, fecha)?;
+                if !self.tomadas.contains(&(f, g)) {
+                    self.armazem
+                        .tomar_costura(self.documento, f, g, &self.dono)?;
+                    self.tomadas.insert((f, g));
+                }
+                let (novo, trechos) = self.passo(f, g, confirmado, fim_janela, limite, fecha)?;
                 persistidos.extend(trechos);
                 if novo == confirmado {
                     break;
@@ -167,21 +177,28 @@ impl<'a> ProcessadorDeReuniao<'a> {
     }
 
     /// Um passo: lê a janela com contexto, reconhece, decide o corte e confirma numa transação.
-    #[allow(clippy::too_many_arguments)]
     fn passo(
         &mut self,
         f: FonteDeAudio,
         g: u64,
-        blocos: &[BlocoRegistrado],
         confirmado: usize,
         fim_janela: usize,
         limite: usize,
         fechamento: bool,
     ) -> Result<(usize, Vec<TrechoNovo>), Erro> {
         let taxa = f64::from(TAXA);
-        let refs: Vec<&BlocoRegistrado> = blocos.iter().collect();
-        let inicio_geracao = blocos.iter().map(|b| b.inicio).min().unwrap_or(confirmado);
+        let inicio_geracao: usize = self
+            .armazem
+            .db
+            .prepare_cached(
+                "SELECT MIN(inicio) FROM lt_blocos WHERE documento=? AND fonte=? AND geracao=?",
+            )?
+            .query_row(rusqlite::params![self.documento, f.nome(), g], |r| r.get(0))?;
         let de = inicio_geracao.max(confirmado.saturating_sub(CONTEXTO));
+        let blocos = self
+            .armazem
+            .blocos_na_janela(self.documento, f, g, de, fim_janela)?;
+        let refs: Vec<_> = blocos.iter().collect();
         let (audio, quebrados) = self.disco.faixa(&refs, de, fim_janela);
         for b in &quebrados {
             self.armazem.marcar_lacuna(&b.id, MOTIVO_INCOMPLETO)?;
@@ -198,11 +215,12 @@ impl<'a> ProcessadorDeReuniao<'a> {
         let mut cauda_pendente = None;
         if fechamento {
             let mut inicio_cauda = fim_janela - audio.len().min(CaudaDaFala::CAPACIDADE);
-            let mut trecho_final = audio[audio.len() - (fim_janela - inicio_cauda)..].to_vec();
+            let mut trecho_final = &audio[audio.len() - (fim_janela - inicio_cauda)..];
+            let audio_expandido;
             let ultimo_fim = palavras.last().map(|p| p.fim);
             let corte_atual = (confirmado as f64 / taxa).max(ultimo_fim.unwrap_or(0.));
             let mut recuperada = recuperar_cauda(
-                &trecho_final,
+                trecho_final,
                 inicio_cauda as f64 / taxa,
                 corte_atual,
                 self.reconhecedor,
@@ -211,10 +229,23 @@ impl<'a> ProcessadorDeReuniao<'a> {
                 let expandido =
                     inicio_geracao.max(fim_janela.saturating_sub(CaudaDaFala::CAPACIDADE));
                 if expandido < de {
-                    trecho_final = self.disco.faixa(&refs, expandido, fim_janela).0;
+                    let contexto = self.armazem.blocos_na_janela(
+                        self.documento,
+                        f,
+                        g,
+                        expandido,
+                        fim_janela,
+                    )?;
+                    let refs: Vec<_> = contexto.iter().collect();
+                    let (pcm, quebrados) = self.disco.faixa(&refs, expandido, fim_janela);
+                    for b in quebrados {
+                        self.armazem.marcar_lacuna(&b.id, MOTIVO_INCOMPLETO)?;
+                    }
+                    audio_expandido = pcm;
+                    trecho_final = &audio_expandido;
                     inicio_cauda = expandido;
                     recuperada = recuperar_cauda(
-                        &trecho_final,
+                        trecho_final,
                         inicio_cauda as f64 / taxa,
                         corte_atual,
                         self.reconhecedor,
@@ -224,8 +255,7 @@ impl<'a> ProcessadorDeReuniao<'a> {
             if let Some((lim, extra)) = recuperada {
                 palavras.retain(|p| p.inicio < lim);
                 palavras.extend(extra);
-            } else if let (Some(fala), Some(u)) =
-                (CaudaDaFala::localizar(&trecho_final), ultimo_fim)
+            } else if let (Some(fala), Some(u)) = (CaudaDaFala::localizar(trecho_final), ultimo_fim)
             {
                 if inicio_cauda + fala.inicio >= confirmado.max(((u + 0.16) * taxa) as usize) {
                     cauda_pendente = Some(inicio_cauda + fala.inicio..inicio_cauda + fala.fim);
@@ -259,14 +289,22 @@ impl<'a> ProcessadorDeReuniao<'a> {
             })
             .map(|b| b.id.texto())
             .collect();
-        let pendencia = decisao.pendente.or(cauda_pendente).map(|r| {
-            (
-                r.start,
-                r.end,
-                "Havia voz, mas o reconhecedor não devolveu texto. O áudio continua guardado."
-                    .to_string(),
-            )
-        });
+        // Uma palavra na margem pode justificar um corte sem palavra antes dele.
+        // Se havia atividade nessa parte, mantenha a faixa para nova tentativa.
+        let sem_palavras = confirmado..decisao.novo_confirmado;
+        let sem_texto = decisao.confirmadas.is_empty() && atividade(sem_palavras.clone());
+        let pendencia = decisao
+            .pendente
+            .or(cauda_pendente)
+            .or(sem_texto.then_some(sem_palavras))
+            .map(|r| {
+                (
+                    r.start,
+                    r.end,
+                    "Havia voz, mas o reconhecedor não devolveu texto. O áudio continua guardado."
+                        .to_string(),
+                )
+            });
         let passo = Passo {
             documento: self.documento.into(),
             fonte: f,
@@ -286,140 +324,160 @@ impl<'a> ProcessadorDeReuniao<'a> {
         Ok((decisao.novo_confirmado, persistidos))
     }
 
-    /// Trechos crus da versão de reunião (sem edições): id, fonte, início, fim e voz.
-    #[allow(clippy::type_complexity)]
-    fn brutos(&self) -> Result<Vec<(String, FonteDeAudio, f64, f64, String)>, Erro> {
-        let mut s = self.armazem.db.prepare(
-            "SELECT id,fonte,inicio,fim,voz FROM lt_trechos WHERE documento=? AND versao=''",
+    fn trechos_para_diarizar(&self) -> Result<Vec<TrechoParaDiarizar>, Erro> {
+        let mut s = self.armazem.db.prepare_cached(
+            "SELECT id,inicio,fim FROM lt_trechos WHERE documento=? AND versao='' AND fonte='mac'
+             AND voz_final IS NULL AND (voz='chamada' OR voz GLOB 'fluxo-*')",
         )?;
         let linhas = s.query_map([self.documento], |r| {
-            Ok((
-                r.get(0)?,
-                disco_de_blocos::fonte(&r.get::<_, String>(1)?).unwrap_or(FonteDeAudio::Mac),
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-            ))
+            Ok(TrechoParaDiarizar {
+                id: r.get(0)?,
+                inicio: r.get(1)?,
+                fim: r.get(2)?,
+            })
         })?;
         Ok(linhas.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Nova tentativa de cada faixa com voz sem texto. Vazio de novo: continua pendente e repetível.
+    /// Nova tentativa de cada faixa sem texto, inclusive as retidas após a conclusão.
     pub fn repetir_pendencias(&mut self) -> Result<Vec<TrechoNovo>, Erro> {
-        let taxa = f64::from(TAXA);
+        self.tentar_pendencias(false)
+    }
+
+    fn tentar_pendencias(&mut self, so_curtas: bool) -> Result<Vec<TrechoNovo>, Erro> {
         let mut persistidos = vec![];
-        let blocos = self.armazem.blocos(self.documento)?;
         for p in self.armazem.pendencias(self.documento)? {
-            if p.estado != "aberta" {
+            if p.estado != "aberta" && (so_curtas || p.estado != "retida") {
                 continue;
             }
-            let da_fonte: Vec<&BlocoRegistrado> = blocos
-                .iter()
-                .filter(|b| b.id.fonte == p.fonte && b.id.geracao == p.geracao)
-                .collect();
-            let de = da_fonte
-                .iter()
-                .map(|b| b.inicio)
-                .min()
-                .unwrap_or(p.inicio)
-                .max(p.inicio.saturating_sub(CONTEXTO));
-            let ate = da_fonte
-                .iter()
-                .map(|b| b.fim())
-                .max()
-                .unwrap_or(p.fim)
-                .min(p.fim + CONTEXTO);
-            let (audio, quebrados) = self.disco.faixa(&da_fonte, de, ate);
-            for b in &quebrados {
-                self.armazem.marcar_lacuna(&b.id, MOTIVO_INCOMPLETO)?;
-            }
-            let sem_cobertura = quebrados
-                .iter()
-                .any(|b| b.inicio < p.fim && b.fim() > p.inicio)
-                || da_fonte.iter().any(|b| {
-                    b.estado == EstadoBloco::Lacuna && b.inicio < p.fim && b.fim() > p.inicio
-                });
-            // Pendência sobre intervalo que já tem texto da mesma fonte: não há como saber sem adivinhar
-            // o que falta. Decide antes de reconhecer; o áudio fica guardado e o motivo aparece. Áudio
-            // adotado retém em qualquer sobreposição; pendência normal só com sobreposição de verdade.
-            let (pi, pf) = (p.inicio as f64 / taxa, p.fim as f64 / taxa);
-            let adocao = p.id.starts_with("adocao|");
-            let sobre_texto = self.brutos()?.iter().any(|(_, fonte, i, z, _)| {
-                if *fonte != p.fonte || *i >= pf || *z <= pi {
-                    return false;
-                }
-                let centro = (i + z) / 2.;
-                adocao || (centro >= pi && centro < pf) || (*i <= pi && *z >= pf)
-            });
-            if sobre_texto {
-                let motivo = "Áudio guardado cobre um trecho que já tem texto. Para não duplicar nem perder fala, ele continua guardado até você decidir.";
-                if !self.armazem.resolver(
-                    &p.id,
-                    self.documento,
-                    p.tentativas,
-                    DesfechoPendencia::Continua(motivo.into()),
-                )? {
-                    return Err(FalhaReuniao::Concorrencia.into());
-                }
+            if so_curtas && p.id.starts_with("adocao|") {
                 continue;
             }
-            let palavras: Vec<_> = self
-                .reconhecedor
-                .palavras(&audio, de as f64 / taxa, Some((ate - de) as f64 / taxa))?
-                .into_iter()
-                .filter(|w| {
-                    let c = (w.inicio + w.fim) / 2.;
-                    c >= pi && c < pf
-                })
-                .collect();
-            let desfecho = if palavras.is_empty() {
-                let a = p.inicio.saturating_sub(de);
-                let z = audio.len().min(p.fim.saturating_sub(de));
-                if sem_cobertura {
-                    DesfechoPendencia::Continua(
-                        "Parte do áudio foi perdida. Confira a lacuna na transcrição.".into(),
-                    )
-                } else if a < z && AtividadeDeVoz::tem(&audio[a..z]) {
-                    DesfechoPendencia::Continua(format!(
-                        "Havia voz, mas o reconhecedor não devolveu texto em {} tentativas. O áudio continua guardado.",
-                        p.tentativas + 1
-                    ))
-                } else {
-                    DesfechoPendencia::SemFala
-                }
-            } else {
-                let trechos: Vec<TrechoNovo> =
-                    Costura::trechos(&palavras, self.documento, p.fonte, p.geracao, None)
-                        .into_iter()
-                        .map(|t| TrechoNovo {
-                            texto: self.preparado(&t.texto),
-                            voz: p.fonte.voz_ao_vivo().into(),
-                            ..t
-                        })
-                        .collect();
-                persistidos.extend(trechos.iter().cloned());
-                DesfechoPendencia::Resolvida(trechos)
-            };
-            if !self
-                .armazem
-                .resolver(&p.id, self.documento, p.tentativas, desfecho)?
-            {
-                return Err(FalhaReuniao::Concorrencia.into());
+            if let Some(desfecho) = self.tentar_pendencia(&p, so_curtas)? {
+                persistidos.extend(
+                    self.armazem
+                        .resolver_persistindo(&p.id, self.documento, p.tentativas, desfecho)?
+                        .ok_or(FalhaReuniao::Concorrencia)?,
+                );
             }
         }
         Ok(persistidos)
     }
 
-    /// Fecha as costuras de vez no fim da reunião (nenhuma geração recebe mais áudio).
-    pub fn encerrar_costuras(&mut self) -> Result<(), Erro> {
-        for c in self.armazem.costuras(self.documento)? {
-            if !c.fechada {
-                self.armazem.db.execute(
-                    "UPDATE lt_costuras SET fechada=1 WHERE documento=? AND fonte=? AND geracao=? AND confirmado_ate>=?",
-                    rusqlite::params![self.documento, c.fonte.nome(), c.geracao, c.confirmado_ate],
-                )?;
-            }
+    fn tentar_pendencia(
+        &mut self,
+        p: &Pendencia,
+        so_curtas: bool,
+    ) -> Result<Option<DesfechoPendencia>, Erro> {
+        let taxa = f64::from(TAXA);
+        let adocao = p.id.starts_with("adocao|");
+        let (pi, pf) = (p.inicio as f64 / taxa, p.fim as f64 / taxa);
+        // Intervalo com texto já confirmado: preservar a faixa sem deduzir o que falta.
+        let sobre_texto = self
+            .armazem
+            .db
+            .prepare_cached(
+                "SELECT 1 FROM lt_trechos WHERE documento=?1 AND versao='' AND fonte=?2
+             AND inicio<?4 AND fim>?3
+             AND (?5 OR ((inicio+fim)/2>=?3 AND (inicio+fim)/2<?4) OR (inicio<=?3 AND fim>=?4))
+             LIMIT 1",
+            )?
+            .exists(rusqlite::params![
+                self.documento,
+                p.fonte.nome(),
+                pi,
+                pf,
+                adocao
+            ])?;
+        if sobre_texto {
+            return Ok((!so_curtas).then(|| DesfechoPendencia::Continua(
+                "Áudio guardado cobre um trecho que já tem texto. Para não duplicar nem perder fala, ele continua guardado até você decidir.".into()
+            )));
         }
+
+        let janela_inicio = p.inicio.saturating_sub(CONTEXTO);
+        let janela_fim = p.fim.saturating_add(CONTEXTO);
+        let blocos = self.armazem.blocos_na_janela(
+            self.documento,
+            p.fonte,
+            p.geracao,
+            janela_inicio,
+            janela_fim,
+        )?;
+        let de = blocos
+            .iter()
+            .map(|b| b.inicio)
+            .min()
+            .unwrap_or(p.inicio)
+            .max(janela_inicio)
+            .min(p.inicio);
+        let ate = blocos
+            .iter()
+            .map(|b| b.fim())
+            .max()
+            .unwrap_or(p.fim)
+            .min(janela_fim)
+            .max(p.fim);
+        let refs: Vec<_> = blocos.iter().collect();
+        let (audio, quebrados) = self.disco.faixa(&refs, de, ate);
+        for b in &quebrados {
+            self.armazem.marcar_lacuna(&b.id, MOTIVO_INCOMPLETO)?;
+        }
+        let completo = quebrados
+            .iter()
+            .all(|b| b.inicio >= p.fim || b.fim() <= p.inicio)
+            && cobre_intervalo(&blocos, p.inicio, p.fim);
+        let trecho = &audio[p.inicio - de..p.fim - de];
+        let curto = !adocao && completo && AtividadeDeVoz::som_curto(trecho, LIMITE_SOM_CURTO);
+        if so_curtas && !curto {
+            return Ok(None);
+        }
+        let palavras: Vec<_> = self
+            .reconhecedor
+            .palavras(&audio, de as f64 / taxa, Some((ate - de) as f64 / taxa))?
+            .into_iter()
+            .filter(|w| {
+                let c = (w.inicio + w.fim) / 2.;
+                c >= pi && c < pf
+            })
+            .collect();
+        let desfecho = if palavras.is_empty() {
+            if !completo {
+                DesfechoPendencia::Continua(
+                    "Parte do áudio foi perdida. Confira a lacuna na transcrição.".into(),
+                )
+            } else if curto {
+                DesfechoPendencia::Retida(MOTIVO_RETIDO.into())
+            } else if AtividadeDeVoz::tem(trecho) {
+                DesfechoPendencia::Continua(format!(
+                    "Havia voz, mas o reconhecedor não devolveu texto em {} tentativas. O áudio continua guardado.",
+                    p.tentativas + 1
+                ))
+            } else {
+                DesfechoPendencia::SemFala
+            }
+        } else {
+            DesfechoPendencia::Resolvida(
+                Costura::trechos(&palavras, self.documento, p.fonte, p.geracao, None)
+                    .into_iter()
+                    .map(|t| TrechoNovo {
+                        texto: self.preparado(&t.texto),
+                        ..t
+                    })
+                    .collect(),
+            )
+        };
+        Ok(Some(desfecho))
+    }
+
+    /// Fecha costuras no fim da reunião. Uma costura incompleta ainda pode ser recuperada.
+    pub fn encerrar_costuras(&mut self) -> Result<(), Erro> {
+        self.armazem.db.execute(
+            "UPDATE lt_costuras AS c SET fechada=1 WHERE c.documento=? AND c.fechada=0
+             AND NOT EXISTS (SELECT 1 FROM lt_blocos b WHERE b.documento=c.documento
+                AND b.fonte=c.fonte AND b.geracao=c.geracao AND b.inicio+b.quantidade>c.confirmado_ate)",
+            [self.documento],
+        )?;
         Ok(())
     }
 
@@ -435,7 +493,7 @@ impl<'a> ProcessadorDeReuniao<'a> {
             if b.arquivo.is_some()
                 && !b.audio_liberado
                 && b.estado != EstadoBloco::Lacuna
-                && self.disco.ler(b).is_err()
+                && self.disco.ler_bytes(b).is_err()
             {
                 self.armazem.marcar_lacuna(&b.id, MOTIVO_INCOMPLETO)?;
                 b.estado = EstadoBloco::Lacuna;
@@ -452,14 +510,10 @@ impl<'a> ProcessadorDeReuniao<'a> {
         {
             return Err(FalhaReuniao::TextoIncompleto.into());
         }
-        let da_chamada = self.armazem.documento(self.documento)?.map(|d| {
-            d.trechos
-                .iter()
-                .any(|t| t.origem.as_deref() != Some("microfone"))
-        });
+        let trechos = self.trechos_para_diarizar()?;
         let mut atribuicao = HashMap::new();
         let mut identificados = true;
-        if da_chamada == Some(true) {
+        if !trechos.is_empty() {
             match identificador {
                 Some(id) => {
                     let wav = self.disco.pasta(self.documento)?.join(format!(
@@ -479,14 +533,11 @@ impl<'a> ProcessadorDeReuniao<'a> {
                     let _ = std::fs::remove_file(&wav);
                     match faixas {
                         Ok(faixas) => {
-                            // Só rótulos provisórios: "chamada" ao vivo e "fluxo-N" de diários antigos.
-                            for (tid, fonte, i, z, voz) in self.brutos()? {
-                                if fonte == FonteDeAudio::Mac
-                                    && (voz == "chamada" || voz.starts_with("fluxo-"))
-                                {
-                                    atribuicao
-                                        .insert(tid, AlinhamentoDeVoz::identificar(i, z, &faixas));
-                                }
+                            for t in trechos {
+                                atribuicao.insert(
+                                    t.id,
+                                    AlinhamentoDeVoz::identificar(t.inicio, t.fim, &faixas),
+                                );
                             }
                         }
                         Err(_) => identificados = false,
@@ -530,4 +581,26 @@ impl<'a> ProcessadorDeReuniao<'a> {
             let _ = self.armazem.esquecer_arquivo(&id);
         }
     }
+}
+
+/// Confere cobertura contínua. Silêncio preenchido pela leitura de uma janela pode ser uma lacuna.
+fn cobre_intervalo(blocos: &[BlocoRegistrado], inicio: usize, fim: usize) -> bool {
+    let mut validos: Vec<_> = blocos
+        .iter()
+        .filter(|b| {
+            !b.audio_liberado
+                && b.arquivo.is_some()
+                && b.estado != EstadoBloco::Lacuna
+                && b.estado != EstadoBloco::Descartado
+        })
+        .collect();
+    validos.sort_unstable_by_key(|b| b.inicio);
+    let mut ate = inicio;
+    for b in validos {
+        if b.inicio > ate || ate >= fim {
+            break;
+        }
+        ate = ate.max(b.fim());
+    }
+    ate >= fim
 }

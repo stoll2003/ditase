@@ -7,6 +7,8 @@
 //! commit do WAL). No runner Windows do GitHub essa folga foi consumida pela disputa de disco
 //! com os outros testes; aqui o teste mede o tempo sozinho, e a mensagem de falha traz
 //! quanto levou cada etapa.
+mod comum;
+
 use nucleo::{motores::TAXA, *};
 use std::{
     sync::{
@@ -52,7 +54,7 @@ struct Marcas {
 #[test]
 fn saida_com_escrita_lenta_responde_em_dois_segundos() {
     for custo in [1.2_f64, 3.0_f64] {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = comum::tempdir();
         let banco = tmp.path().join("teste.sqlite");
         let armazem = ArmazemLancamento::new(&banco).unwrap();
         let ligada = Arc::new(AtomicBool::new(false));

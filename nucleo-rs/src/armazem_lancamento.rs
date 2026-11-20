@@ -22,7 +22,7 @@ pub(crate) fn inserir(
     let mut id = t.id.clone();
     let mut n = 0;
     loop {
-        let igual=c.query_row("SELECT documento=? AND versao=? AND fonte=? AND inicio=? AND fim=? AND texto=? FROM lt_trechos WHERE id=?",params![doc,versao,t.fonte.nome(),t.inicio,t.fim,t.texto,id],|r|r.get::<_,bool>(0)).optional()?;
+        let igual=c.prepare_cached("SELECT documento=? AND versao=? AND fonte=? AND inicio=? AND fim=? AND texto=? FROM lt_trechos WHERE id=?")?.query_row(params![doc,versao,t.fonte.nome(),t.inicio,t.fim,t.texto,id],|r|r.get::<_,bool>(0)).optional()?;
         match igual {
             Some(true) => return Ok(None),
             Some(false) => {
@@ -32,7 +32,7 @@ pub(crate) fn inserir(
             None => break,
         }
     }
-    c.execute("INSERT INTO lt_trechos(id,documento,versao,fonte,inicio,fim,texto,voz,criado_em) VALUES(?,?,?,?,?,?,?,?,?)",params![id,doc,versao,t.fonte.nome(),t.inicio,t.fim,t.texto,t.voz,agora()])?;
+    c.prepare_cached("INSERT INTO lt_trechos(id,documento,versao,fonte,inicio,fim,texto,voz,criado_em) VALUES(?,?,?,?,?,?,?,?,?)")?.execute(params![id,doc,versao,t.fonte.nome(),t.inicio,t.fim,t.texto,t.voz,agora()])?;
     Ok(Some(TrechoNovo { id, ..t.clone() }))
 }
 impl ArmazemLancamento {
@@ -61,11 +61,45 @@ impl ArmazemLancamento {
     }
     pub fn registrar(&self, b: &BlocoRegistrado) -> SqlResult<bool> {
         let id = &b.id;
-        Ok(self.db.execute("INSERT INTO lt_blocos(id,documento,fonte,geracao,seq,inicio,quantidade,arquivo,tamanho,soma,estado,tentativas,erro,audio_liberado) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM lt_descartes WHERE documento=?) ON CONFLICT(id) DO NOTHING",params![id.texto(),id.documento,id.fonte.nome(),id.geracao,id.seq,b.inicio,b.quantidade,b.arquivo,b.arquivo.as_ref().map(|_|b.quantidade*4),b.soma,b.estado.nome(),b.tentativas,b.erro,b.audio_liberado,id.documento])?==1)
+        Ok(self.db.prepare_cached("INSERT INTO lt_blocos(id,documento,fonte,geracao,seq,inicio,quantidade,arquivo,tamanho,soma,estado,tentativas,erro,audio_liberado) SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM lt_descartes WHERE documento=?) ON CONFLICT(id) DO NOTHING")?.execute(params![id.texto(),id.documento,id.fonte.nome(),id.geracao,id.seq,b.inicio,b.quantidade,b.arquivo,b.arquivo.as_ref().map(|_|b.quantidade*4),b.soma,b.estado.nome(),b.tentativas,b.erro,b.audio_liberado,id.documento])?==1)
     }
     pub fn blocos(&self, doc: &str) -> SqlResult<Vec<BlocoRegistrado>> {
-        let mut s=self.db.prepare("SELECT fonte,geracao,seq,inicio,quantidade,arquivo,soma,estado,tentativas,erro,audio_liberado FROM lt_blocos WHERE documento=? ORDER BY fonte,geracao,seq")?;
-        let rows = s.query_map([doc], |r| {
+        Self::blocos_em(&self.db, doc)
+    }
+
+    pub(crate) fn blocos_em(db: &Connection, doc: &str) -> SqlResult<Vec<BlocoRegistrado>> {
+        Self::consultar_blocos(
+            db,
+            doc,
+            "SELECT fonte,geracao,seq,inicio,quantidade,arquivo,soma,estado,tentativas,erro,audio_liberado FROM lt_blocos WHERE documento=? ORDER BY fonte,geracao,seq",
+            [doc],
+        )
+    }
+
+    pub(crate) fn blocos_na_janela(
+        &self,
+        doc: &str,
+        fonte: crate::FonteDeAudio,
+        geracao: u64,
+        de: usize,
+        ate: usize,
+    ) -> SqlResult<Vec<BlocoRegistrado>> {
+        Self::consultar_blocos(
+            &self.db,
+            doc,
+            "SELECT fonte,geracao,seq,inicio,quantidade,arquivo,soma,estado,tentativas,erro,audio_liberado FROM lt_blocos WHERE documento=? AND fonte=? AND geracao=? AND inicio+quantidade>? AND inicio<? ORDER BY seq",
+            params![doc, fonte.nome(), geracao, de, ate],
+        )
+    }
+
+    fn consultar_blocos(
+        db: &Connection,
+        doc: &str,
+        sql: &str,
+        parametros: impl rusqlite::Params,
+    ) -> SqlResult<Vec<BlocoRegistrado>> {
+        let mut s = db.prepare_cached(sql)?;
+        let rows = s.query_map(parametros, |r| {
             Ok(BlocoRegistrado {
                 id: crate::IdBloco {
                     documento: doc.into(),
@@ -108,7 +142,16 @@ impl ArmazemLancamento {
         rows.collect()
     }
     pub fn reatribuir(&self, doc: &str, trecho: &str, voz: &str) -> SqlResult<()> {
-        if self.db.execute("INSERT INTO lt_edicoes(documento,versao,tipo,alvo,valor,criado_em) SELECT documento,versao,'vozTrecho',id,?,? FROM lt_trechos WHERE documento=? AND id=?",params![voz,agora(),doc,trecho])?==0{return Err(rusqlite::Error::QueryReturnedNoRows)}
+        Self::reatribuir_em(&self.db, doc, trecho, voz)
+    }
+
+    pub(crate) fn reatribuir_em(
+        db: &Connection,
+        doc: &str,
+        trecho: &str,
+        voz: &str,
+    ) -> SqlResult<()> {
+        if db.execute("INSERT INTO lt_edicoes(documento,versao,tipo,alvo,valor,criado_em) SELECT documento,versao,'vozTrecho',id,?,? FROM lt_trechos WHERE documento=? AND id=?",params![voz,agora(),doc,trecho])?==0{return Err(rusqlite::Error::QueryReturnedNoRows)}
         Ok(())
     }
     pub fn gravar_falantes(
@@ -121,18 +164,31 @@ impl ArmazemLancamento {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let mudou=tx.execute("UPDATE lt_documentos SET falantes=?,estado='finalizada' WHERE id=? AND estado<>'descartada' AND NOT EXISTS(SELECT 1 FROM lt_blocos WHERE documento=? AND estado='capturado')",params![if identificados{"identificados"}else{"indisponivel"},doc,doc])?;
+        let mudou = tx.execute(
+            "UPDATE lt_documentos SET falantes=?1,estado='finalizada' WHERE id=?2 AND estado<>'descartada'
+             AND NOT EXISTS(SELECT 1 FROM lt_blocos WHERE documento=?2 AND estado IN ('capturado','pendente'))
+             AND NOT EXISTS(SELECT 1 FROM lt_pendencias WHERE documento=?2 AND estado='aberta')",
+            params![if identificados { "identificados" } else { "indisponivel" }, doc],
+        )?;
         if mudou == 0 {
             return Ok(false);
         }
-        for (id, voz) in atribuicao {
-            tx.execute(
-                "UPDATE lt_trechos SET voz_final=? WHERE documento=? AND id=?",
-                params![voz, doc, id],
-            )?;
+        {
+            let mut atualizar =
+                tx.prepare("UPDATE lt_trechos SET voz_final=? WHERE documento=? AND id=?")?;
+            for (id, voz) in atribuicao {
+                atualizar.execute(params![voz, doc, id])?;
+            }
         }
         if liberar_audio {
-            tx.execute("UPDATE lt_blocos SET audio_liberado=1 WHERE documento=? AND estado IN ('transcrito','semFala','lacuna')",[doc])?;
+            tx.execute(
+                "UPDATE lt_blocos SET audio_liberado=1
+                 WHERE documento=? AND audio_liberado=0 AND estado IN ('transcrito','semFala','lacuna')
+                 AND NOT EXISTS (SELECT 1 FROM lt_pendencias p WHERE p.documento=lt_blocos.documento
+                    AND p.fonte=lt_blocos.fonte AND p.geracao=lt_blocos.geracao AND p.estado='retida'
+                    AND p.inicio<lt_blocos.inicio+lt_blocos.quantidade AND p.fim>lt_blocos.inicio)",
+                [doc],
+            )?;
         }
         tx.commit()?;
         Ok(true)
@@ -150,7 +206,7 @@ impl ArmazemLancamento {
         }
         tx.execute("UPDATE lt_blocos SET estado=CASE WHEN estado IN ('capturado','pendente') THEN 'descartado' ELSE estado END,audio_liberado=1 WHERE documento=?",[doc])?;
         tx.execute(
-            "UPDATE lt_pendencias SET estado='descartada' WHERE documento=? AND estado='aberta'",
+            "UPDATE lt_pendencias SET estado='descartada' WHERE documento=? AND estado IN ('aberta','retida')",
             [doc],
         )?;
         tx.execute(

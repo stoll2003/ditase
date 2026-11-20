@@ -104,6 +104,24 @@ fn pasta_real(p: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+/// Valida os componentes antes de atravessá-los. A pasta é controlada pelo perfil local do app.
+pub(crate) fn validar_pasta(p: &Path) -> io::Result<()> {
+    use std::path::Component;
+
+    if p.components().any(|c| c == Component::ParentDir) {
+        return Err(invalido());
+    }
+    let absoluto = std::path::absolute(p)?;
+    let mut caminho = PathBuf::new();
+    for c in absoluto.components() {
+        caminho.push(c);
+        if matches!(c, Component::Normal(_) | Component::RootDir) {
+            pasta_real(&caminho)?;
+        }
+    }
+    Ok(())
+}
+
 fn sincronizar(p: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -217,11 +235,8 @@ impl DiscoDeBlocos {
         let Some(a) = b.arquivo.as_deref() else {
             return false;
         };
-        if !Self::arquivo_valido(a, &b.id.documento) {
-            return false;
-        }
-        metadados(&self.raiz.join(a))
-            .map(|m| m.is_file() && Some(m.len()) == (b.quantidade as u64).checked_mul(4))
+        self.caminho(&b.id.documento, a)
+            .map(|(_, m)| Some(m.len()) == (b.quantidade as u64).checked_mul(4))
             .unwrap_or(false)
     }
     /// Remove sem erro (Swift `remover`). Caminho inválido não é seguido.
@@ -236,7 +251,7 @@ impl DiscoDeBlocos {
             return;
         }
         let p = self.raiz.join(documento);
-        if metadados(&p).map(|m| m.is_dir()).unwrap_or(false) {
+        if validar_pasta(&p).is_ok() {
             let _ = fs::remove_dir_all(p);
         }
     }
@@ -259,22 +274,42 @@ impl DiscoDeBlocos {
             {
                 continue;
             }
-            match self.ler(b) {
-                Ok(a) => {
+            match self.ler_bytes(b) {
+                Ok(dados) => {
                     let x = de.max(b.inicio);
                     let z = ate.min(fim);
-                    saida[x - de..z - de].copy_from_slice(&a[x - b.inicio..z - b.inicio])
+                    let pcm = &dados[4 * (x - b.inicio)..4 * (z - b.inicio)];
+                    for (amostra, bytes) in
+                        saida[x - de..z - de].iter_mut().zip(pcm.as_chunks::<4>().0)
+                    {
+                        *amostra = f32::from_le_bytes(*bytes);
+                    }
                 }
                 Err(_) => quebrados.push(b.clone()),
             }
         }
         (saida, quebrados)
     }
+    /// Pode ser chamada na abertura, antes de usar qualquer subpasta de trabalho.
+    /// Valida todos os ancestrais e cria a raiz privada quando só ela estiver ausente.
+    pub fn preparar_raiz(&self) -> io::Result<()> {
+        match validar_pasta(&self.raiz) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let pai = self.raiz.parent().filter(|p| !p.as_os_str().is_empty());
+                validar_pasta(pai.unwrap_or(Path::new(".")))?;
+                criar_pasta(&self.raiz)?;
+            }
+            Err(e) => return Err(e),
+        }
+        Ok(())
+    }
+
     pub fn pasta(&self, documento: &str) -> io::Result<PathBuf> {
         if !uuid(documento) {
             return Err(invalido());
         }
-        criar_pasta(&self.raiz)?;
+        self.preparar_raiz()?;
         let p = self.raiz.join(documento);
         criar_pasta(&p)?;
         Ok(p)
@@ -291,23 +326,31 @@ impl DiscoDeBlocos {
             && n.bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
     }
-    fn caminho(&self, doc: &str, arquivo: &str) -> io::Result<PathBuf> {
+    fn caminho(&self, doc: &str, arquivo: &str) -> io::Result<(PathBuf, fs::Metadata)> {
         if !Self::arquivo_valido(arquivo, doc) {
             return Err(invalido());
         }
         pasta_real(&self.raiz)?;
         pasta_real(&self.raiz.join(doc))?;
         let p = self.raiz.join(arquivo);
-        if !metadados(&p)?.is_file() {
+        let meta = metadados(&p)?;
+        if !meta.is_file() {
             return Err(invalido());
         }
-        Ok(p)
+        Ok((p, meta))
     }
     pub fn apagar(&self, documento: &str, arquivo: &str) -> io::Result<()> {
+        if let Err(e) = validar_pasta(&self.raiz) {
+            return if e.kind() == io::ErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(e)
+            };
+        }
         match self.caminho(documento, arquivo) {
-            Ok(p) => {
+            Ok((p, _)) => {
                 fs::remove_file(&p)?;
-                sincronizar(p.parent().unwrap())
+                sincronizar(&self.raiz.join(documento))
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
@@ -349,7 +392,7 @@ impl DiscoDeBlocos {
         };
         match metadados(&destino) {
             Ok(_) => {
-                self.ler(&b)?;
+                self.ler_bytes(&b)?;
                 return Ok(b);
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -358,15 +401,25 @@ impl DiscoDeBlocos {
         (self.escrita)(&dados, &destino)?;
         Ok(b)
     }
-    pub fn ler(&self, b: &BlocoRegistrado) -> io::Result<Vec<f32>> {
-        let p = self.caminho(&b.id.documento, b.arquivo.as_deref().ok_or_else(invalido)?)?;
+    pub(crate) fn ler_bytes(&self, b: &BlocoRegistrado) -> io::Result<Vec<u8>> {
+        let (p, meta) =
+            self.caminho(&b.id.documento, b.arquivo.as_deref().ok_or_else(invalido)?)?;
+        let bytes = b.quantidade.checked_mul(4).ok_or_else(invalido)?;
+        if meta.len() != bytes as u64 {
+            return Err(invalido());
+        }
         let dados = fs::read(p)?;
-        if Some(dados.len()) != b.quantidade.checked_mul(4)
+        if dados.len() != bytes
             || b.soma.as_deref() != Some(&format!("{:x}", Sha256::digest(&dados)))
         {
             return Err(invalido());
         }
-        Ok(dados
+        Ok(dados)
+    }
+
+    pub fn ler(&self, b: &BlocoRegistrado) -> io::Result<Vec<f32>> {
+        Ok(self
+            .ler_bytes(b)?
             .as_chunks::<4>()
             .0
             .iter()
@@ -379,7 +432,7 @@ impl DiscoDeBlocos {
     ) -> io::Result<(Vec<BlocoRegistrado>, Vec<String>)> {
         let mut blocos = vec![];
         let mut invalidos = vec![];
-        match pasta_real(&self.raiz) {
+        match validar_pasta(&self.raiz) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok((blocos, invalidos)),
             r => r?,
         }
@@ -417,6 +470,9 @@ impl DiscoDeBlocos {
                     let [f, g, s, i, q, h] = partes.as_slice() else {
                         return None;
                     };
+                    let inicio: usize = i.parse().ok()?;
+                    let quantidade = q.parse::<usize>().ok().filter(|&n| n > 0)?;
+                    i64::try_from(inicio.checked_add(quantidade)?).ok()?;
                     Some(BlocoRegistrado {
                         id: IdBloco {
                             documento: doc.clone(),
@@ -424,8 +480,8 @@ impl DiscoDeBlocos {
                             geracao: g.parse().ok()?,
                             seq: s.parse().ok()?,
                         },
-                        inicio: i.parse().ok()?,
-                        quantidade: q.parse::<usize>().ok().filter(|&n| n > 0)?,
+                        inicio,
+                        quantidade,
                         arquivo: Some(rel.clone()),
                         soma: Some(h.to_string()),
                         estado: EstadoBloco::Capturado,
@@ -435,7 +491,7 @@ impl DiscoDeBlocos {
                     })
                 };
                 match parse() {
-                    Some(b) if self.ler(&b).is_ok() => blocos.push(b),
+                    Some(b) if self.ler_bytes(&b).is_ok() => blocos.push(b),
                     _ => invalidos.push(rel),
                 }
             }
@@ -495,19 +551,16 @@ impl DiscoDeBlocos {
             for b in ordenados {
                 if b.estado == EstadoBloco::Lacuna
                     || b.estado == EstadoBloco::Descartado
-                    || b.inicio + b.quantidade <= fim
+                    || b.audio_liberado
+                    || b.fim() <= fim
                 {
                     continue;
                 }
-                let amostras = self.ler(b)?;
+                let dados = self.ler_bytes(b)?;
                 let inicio = fim.max(b.inicio);
                 f.seek(SeekFrom::Start(44 + 4 * inicio as u64))?;
-                let dados: Vec<_> = amostras[inicio - b.inicio..]
-                    .iter()
-                    .flat_map(|a| a.to_le_bytes())
-                    .collect();
-                f.write_all(&dados)?;
-                fim = b.inicio + b.quantidade
+                f.write_all(&dados[(inicio - b.inicio) * 4..])?;
+                fim = b.fim()
             }
             f.sync_all()
         };

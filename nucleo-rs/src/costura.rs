@@ -2,10 +2,30 @@ use crate::motores::{PalavraReconhecida, TAXA};
 use std::{collections::HashMap, ops::Range};
 pub struct AtividadeDeVoz;
 impl AtividadeDeVoz {
+    const QUADRO: usize = TAXA as usize / 50;
+
+    fn ativo(amostras: &[f32]) -> bool {
+        (amostras.iter().map(|a| a * a).sum::<f32>() / amostras.len() as f32).sqrt() >= 0.006
+    }
+
+    pub(crate) fn som_curto(amostras: &[f32], limite: usize) -> bool {
+        let mut quadros = amostras
+            .chunks(Self::QUADRO)
+            .enumerate()
+            .filter(|(_, q)| Self::ativo(q));
+        let Some((primeiro, quadro)) = quadros.next() else {
+            return false;
+        };
+        let (ultimo, tamanho) = quadros
+            .next_back()
+            .map_or((primeiro, quadro.len()), |(i, q)| (i, q.len()));
+        (ultimo - primeiro) * Self::QUADRO + tamanho <= limite
+    }
+
     pub fn tem(amostras: &[f32]) -> bool {
         let mut seguidos = 0;
-        for q in amostras.chunks(320) {
-            if (q.iter().map(|a| a * a).sum::<f32>() / q.len() as f32).sqrt() >= 0.006 {
+        for q in amostras.chunks(Self::QUADRO) {
+            if Self::ativo(q) {
                 seguidos += 1;
                 if seguidos == 3 {
                     return true;

@@ -31,6 +31,11 @@
       "operacao": "filtrar",
       "entrada": "Isso ha muito tempo não acontece.",
       "esperado": "Isso ha muito tempo não acontece."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "Ainda há sinal; hã, podemos prosseguir.",
+      "esperado": "Ainda há sinal; podemos prosseguir."
     }
   ],
   "testPreservaPalavrasComSentido": [
@@ -38,6 +43,11 @@
       "operacao": "filtrar",
       "entrada": "Aí eu falei ah não, esse trem aí tá muito simples, tipo, deixa assim.",
       "esperado": "Aí eu falei ah não, esse trem aí tá muito simples, tipo, deixa assim."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "O avô falou de d’água e guarda-chuva.",
+      "esperado": "O avô falou de d’água e guarda-chuva."
     }
   ],
   "testTiraGaguejoDeLigacao": [
@@ -52,6 +62,11 @@
       "operacao": "filtrar",
       "entrada": "Isso é muito muito bom, não não faz isso.",
       "esperado": "Isso é muito muito bom, não não faz isso."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "Sim, sim, mas não agora.",
+      "esperado": "Sim, sim, mas não agora."
     }
   ],
   "testComandosDeFormatacao": [
@@ -88,6 +103,11 @@
       "operacao": "arrumarEspacos",
       "entrada": "frase um. frase dois",
       "esperado": "Frase um. Frase dois"
+    },
+    {
+      "operacao": "arrumarEspacos",
+      "entrada": "versão 3.5 e arquivo.pcm . depois, salve",
+      "esperado": "Versão 3.5 e arquivo.pcm. Depois, salve"
     }
   ]
 }

@@ -1,6 +1,7 @@
 use crate::{motores::*, *};
 use std::{
     io::{Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc, Arc,
@@ -17,6 +18,8 @@ pub struct ConfigSessao {
     pub espera_base: f64,
     pub espera_por_palavra: f64,
     pub trechos_em_memoria: usize,
+    /// Pasta privada, existente e escolhida pela casca. Sem pasta, a fila usa só RAM.
+    pub pasta_de_trabalho: Option<PathBuf>,
     pub segmentador: segmentador::Config,
 }
 impl Default for ConfigSessao {
@@ -29,6 +32,7 @@ impl Default for ConfigSessao {
             espera_base: 8.,
             espera_por_palavra: 0.35,
             trechos_em_memoria: 12,
+            pasta_de_trabalho: None,
             segmentador: Default::default(),
         }
     }
@@ -57,6 +61,7 @@ pub struct SessaoDitado {
     memoria: Arc<AtomicUsize>,
     contagem: Arc<AtomicUsize>,
     limite: usize,
+    pasta_de_trabalho: Option<PathBuf>,
 }
 fn minuscula(t: &str, d: &AplicadorDicionario) -> String {
     let Some(p) = Palavras::ocorrencias(t).next() else {
@@ -75,6 +80,15 @@ fn minuscula(t: &str, d: &AplicadorDicionario) -> String {
         t.into()
     }
 }
+fn guardar_pcm(pasta: &Path, pcm: &[f32]) -> std::io::Result<std::fs::File> {
+    disco_de_blocos::validar_pasta(pasta)?;
+    let mut f = tempfile::tempfile_in(pasta)?;
+    let bytes: Vec<_> = pcm.iter().flat_map(|a| a.to_le_bytes()).collect();
+    f.write_all(&bytes)?;
+    f.seek(SeekFrom::Start(0))?;
+    Ok(f)
+}
+
 impl SessaoDitado {
     pub fn new(
         transcritor: Arc<dyn Transcritor>,
@@ -90,6 +104,7 @@ impl SessaoDitado {
         let (cancel, cont, mem) = (cancelada.clone(), contagem.clone(), memoria.clone());
         let segmentador = Segmentador::new(config.segmentador.clone());
         let limite = config.trechos_em_memoria;
+        let pasta_de_trabalho = config.pasta_de_trabalho.clone();
         let trabalho = thread::spawn(move || {
             let mut r = ResultadoDitado {
                 limpador: "regras".into(),
@@ -206,25 +221,22 @@ impl SessaoDitado {
             memoria,
             contagem,
             limite,
+            pasta_de_trabalho,
         }
     }
     fn enfileirar(&self, mut s: Segmento) -> Result<(), Erro> {
         let tx = self.entrada.as_ref().ok_or("Sessão encerrada")?;
-        let mut arquivo = None;
-        if self.memoria.load(Ordering::Acquire) >= self.limite {
-            let guardar = || -> std::io::Result<std::fs::File> {
-                let mut f = tempfile::tempfile()?;
-                let bytes: Vec<_> = s.amostras.iter().flat_map(|a| a.to_le_bytes()).collect();
-                f.write_all(&bytes)?;
-                f.seek(SeekFrom::Start(0))?;
-                Ok(f)
-            };
-            if let Ok(f) = guardar() {
-                arquivo = Some(f);
-                s.amostras = vec![]
-            }
-        }
-        if arquivo.is_none() {
+        let arquivo = if self.memoria.load(Ordering::Acquire) >= self.limite {
+            self.pasta_de_trabalho
+                .as_deref()
+                .and_then(|pasta| guardar_pcm(pasta, &s.amostras).ok())
+        } else {
+            None
+        };
+        if arquivo.is_some() {
+            s.amostras = Vec::new();
+        } else {
+            // Se o disco falhar, preserve o trecho em RAM para não descartar fala.
             self.memoria.fetch_add(1, Ordering::AcqRel);
         }
         tx.send(Item {
@@ -265,10 +277,89 @@ impl SessaoDitado {
         let mut r = self
             .trabalho
             .take()
-            .unwrap()
+            .ok_or("Sessão encerrada")?
             .join()
             .map_err(|_| "Falha no trabalhador do ditado")?;
         r.duracao_fala = self.segmentador.fala_total;
         Ok(r)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fila_saturada_usa_arquivo_anonimo_ou_preserva_pcm_na_memoria() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pasta = tmp.path().canonicalize().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut sessao = SessaoDitado {
+            segmentador: Segmentador::default(),
+            entrada: Some(tx),
+            trabalho: None,
+            cancelada: Arc::new(AtomicBool::new(false)),
+            memoria: Arc::new(AtomicUsize::new(0)),
+            contagem: Arc::new(AtomicUsize::new(0)),
+            limite: 0,
+            pasta_de_trabalho: Some(pasta.clone()),
+        };
+        let segmento = Segmento {
+            inicio: 0,
+            amostras: vec![0.1, -0.2, 0.],
+            pausa_antes: 0.,
+            cortado_no_meio: false,
+        };
+        sessao.enfileirar(segmento.clone()).unwrap();
+        let Item {
+            segmento: armazenado,
+            arquivo,
+        } = rx.recv().unwrap();
+        assert!(armazenado.amostras.is_empty());
+        let mut bytes = vec![];
+        arquivo.unwrap().read_to_end(&mut bytes).unwrap();
+        assert_eq!(
+            bytes,
+            segmento
+                .amostras
+                .iter()
+                .flat_map(|a| a.to_le_bytes())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(pasta.read_dir().unwrap().count(), 0);
+
+        for pasta in [None, Some(pasta.join("inexistente"))] {
+            sessao.pasta_de_trabalho = pasta;
+            sessao.enfileirar(segmento.clone()).unwrap();
+            let Item {
+                segmento: armazenado,
+                arquivo,
+            } = rx.recv().unwrap();
+            assert!(arquivo.is_none());
+            assert_eq!(armazenado.amostras, segmento.amostras);
+        }
+    }
+    #[test]
+    fn temporario_some_ao_encerrar_processo_sem_fechar_o_handle() {
+        const VAR_PASTA: &str = "DITASE_TESTE_FILA_PASTA";
+        if let Some(pasta) = std::env::var_os(VAR_PASTA) {
+            let arquivo = guardar_pcm(Path::new(&pasta), &[0.1]).unwrap();
+            assert_eq!(arquivo.metadata().unwrap().len(), 4);
+            // Simula término do processo sem executar o Drop do arquivo.
+            std::process::exit(43);
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let pasta = tmp.path().canonicalize().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "sessao::tests::temporario_some_ao_encerrar_processo_sem_fechar_o_handle",
+            ])
+            .env(VAR_PASTA, &pasta)
+            .status()
+            .unwrap();
+        assert_eq!(status.code(), Some(43));
+        assert_eq!(pasta.read_dir().unwrap().count(), 0);
     }
 }

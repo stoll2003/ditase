@@ -17,3 +17,7 @@ O crate `nucleo` expõe os tipos abaixo na raiz. Os quatro traits dos motores e 
 
 Para as assinaturas completas, execute `cargo doc -p nucleo --no-deps`.
 
+
+Em Windows, crie e valide a pasta de trabalho privada antes de passar `ConfigSessao { pasta_de_trabalho: Some(caminho), ..Default::default() }`. O excedente da fila usa arquivo anônimo nessa pasta. Sem pasta, ou em caso de falha de escrita, o PCM segue na fila em memória. `DiscoDeBlocos::preparar_raiz()` valida os componentes do caminho e cria a raiz quando necessário. A casca pode chamá-lo antes de preparar as subpastas.
+
+No fechamento da reunião, som de até 300 ms sem palavras em duas tentativas pode virar pendência retida. A reunião pode ser concluída e o relatório continua indicando a faixa sem texto. O PCM dos blocos que cobrem a faixa fica em disco. `ProcessadorDeReuniao::recuperar()` pode tentar a faixa novamente, e `passada_final()` pode liberar seu áudio após a resolução. Lacunas na faixa, retorno de erro, fala mais longa e áudio órfão adotado continuam sujeitos à recuperação normal.

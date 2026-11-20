@@ -1,21 +1,25 @@
 use crate::{motores::Erro, *};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use std::collections::{HashMap, HashSet};
 impl ArmazemLancamento {
     pub fn documento(&self, id: &str) -> Result<Option<TranscricaoLonga>, Erro> {
         let tx = self.db.unchecked_transaction()?;
-        let d = self.montar(id, false)?;
+        let d = Self::montar_em(&tx, id, false)?;
         tx.commit()?;
         Ok(d)
     }
-    fn montar(&self, id: &str, leve: bool) -> Result<Option<TranscricaoLonga>, Erro> {
-        let Some((tipo,versao,mut d))=self.db.query_row("SELECT tipo,versao_ativa,nome,criado_em,duracao,estado,fonte,falantes,oculto,erro_captura,aviso_captura,aviso,atraso,erro_resumo,resumo_cancelado,resumo,resumo_gerado FROM lt_documentos WHERE id=?",[id],|r|{let duracao=r.get::<_,f64>(4)?;let resumo=r.get::<_,Option<String>>(15)?;Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,TranscricaoLonga{id:id.into(),nome:r.get(2)?,criado_em:r.get(3)?,duracao:(duracao>0.).then_some(duracao),fase:r.get(5)?,fonte:r.get(6)?,falantes:r.get(7)?,oculto:r.get::<_,bool>(8)?.then_some(true),erro_captura:r.get(9)?,aviso_captura:r.get(10)?,aviso:r.get(11)?,atraso:r.get(12)?,erro_resumo:r.get(13)?,resumo_cancelado:r.get::<_,bool>(14)?.then_some(true),resumo:resumo.and_then(|j|serde_json::from_str(&j).ok()),resumo_gerado:r.get::<_,bool>(16)?.then_some(true),..Default::default()}))}).optional()? else{return Ok(None)};
+    fn montar_em(
+        db: &rusqlite::Connection,
+        id: &str,
+        leve: bool,
+    ) -> Result<Option<TranscricaoLonga>, Erro> {
+        let Some((tipo,versao,mut d))=db.query_row("SELECT tipo,versao_ativa,nome,criado_em,duracao,estado,fonte,falantes,oculto,erro_captura,aviso_captura,aviso,atraso,erro_resumo,resumo_cancelado,resumo,resumo_gerado FROM lt_documentos WHERE id=?",[id],|r|{let duracao=r.get::<_,f64>(4)?;let resumo=r.get::<_,Option<String>>(15)?;Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,TranscricaoLonga{id:id.into(),nome:r.get(2)?,criado_em:r.get(3)?,duracao:(duracao>0.).then_some(duracao),fase:r.get(5)?,fonte:r.get(6)?,falantes:r.get(7)?,oculto:r.get::<_,bool>(8)?.then_some(true),erro_captura:r.get(9)?,aviso_captura:r.get(10)?,aviso:r.get(11)?,atraso:r.get(12)?,erro_resumo:r.get(13)?,resumo_cancelado:r.get::<_,bool>(14)?.then_some(true),resumo:resumo.and_then(|j|serde_json::from_str(&j).ok()),resumo_gerado:r.get::<_,bool>(16)?.then_some(true),..Default::default()}))}).optional()? else{return Ok(None)};
         if tipo == "arquivo" {
             if let Some(v) = &versao {
                 d.fase = "pronto".into();
-                (d.duracao,d.bruto,d.processamento,d.baixa_confianca)=self.db.query_row("SELECT duracao,CASE WHEN ? THEN NULL ELSE bruto END,round(processamento,1),baixa_confianca FROM lt_versoes WHERE id=?",params![leve,v],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?
+                (d.duracao,d.bruto,d.processamento,d.baixa_confianca)=db.query_row("SELECT duracao,CASE WHEN ? THEN NULL ELSE bruto END,round(processamento,1),baixa_confianca FROM lt_versoes WHERE id=?",params![leve,v],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?
             } else {
-                let linha=self.db.query_row("SELECT estado,erro FROM lt_versoes WHERE documento=? ORDER BY tentativa DESC LIMIT 1",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).optional()?;
+                let linha=db.query_row("SELECT estado,erro FROM lt_versoes WHERE documento=? ORDER BY tentativa DESC LIMIT 1",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?))).optional()?;
                 let (estado, erro) = linha.unwrap_or_default();
                 d.fase = match estado.as_str() {
                     "vazia" => "semFala",
@@ -41,7 +45,7 @@ impl ArmazemLancamento {
             let mut pendentes = vec![];
             let mut lacunas = vec![];
             let mut segundos = 0.;
-            let mut blocos = self.blocos(id)?;
+            let mut blocos = Self::blocos_em(db, id)?;
             blocos.sort_by_key(|b| (b.id.fonte.nome(), b.inicio));
             for b in blocos {
                 let fim = (b.inicio + b.quantidade) as f64 / 16000.;
@@ -76,7 +80,7 @@ impl ArmazemLancamento {
                     })
                 }
             }
-            let mut s=self.db.prepare("SELECT inicio/16000.0,fim/16000.0,fonte,motivo FROM lt_pendencias WHERE documento=? AND estado='aberta'")?;
+            let mut s=db.prepare("SELECT inicio/16000.0,fim/16000.0,fonte,motivo FROM lt_pendencias WHERE documento=? AND estado IN ('aberta','retida')")?;
             for p in s.query_map([id], |r| {
                 Ok(PeriodoDeAudio {
                     inicio: r.get(0)?,
@@ -93,7 +97,7 @@ impl ArmazemLancamento {
             d.lacunas = (!lacunas.is_empty()).then_some(lacunas)
         }
         let versao = versao.unwrap_or_default();
-        let mut s = self.db.prepare(
+        let mut s = db.prepare(
             "SELECT tipo,alvo,valor FROM lt_edicoes WHERE documento=? AND versao=? ORDER BY id",
         )?;
         let mut nomes = HashMap::new();
@@ -117,7 +121,7 @@ impl ArmazemLancamento {
                 _ => {}
             }
         }
-        let mut s=self.db.prepare("SELECT id,fonte,inicio,fim,CASE WHEN ? THEN '' ELSE texto END,COALESCE(voz_final,voz),divergente FROM lt_trechos WHERE documento=? AND versao=? ORDER BY inicio,fonte,id")?;
+        let mut s=db.prepare("SELECT id,fonte,inicio,fim,CASE WHEN ? THEN '' ELSE texto END,COALESCE(voz_final,voz),divergente FROM lt_trechos WHERE documento=? AND versao=? ORDER BY inicio,fonte,id")?;
         let mut rows = s.query(params![leve, id, versao])?;
         let mut vistos = HashSet::new();
         let mut pessoas = 0;
@@ -166,8 +170,8 @@ impl ArmazemLancamento {
             }
         }
         if leve {
-            d.palavras=Some(self.db.query_row("SELECT COALESCE(SUM(CASE WHEN trim(texto)='' THEN 0 ELSE length(trim(texto))-length(replace(trim(texto),' ',''))+1 END),0) FROM lt_trechos WHERE documento=? AND versao=?",params![id,versao],|r|r.get(0))?);
-            d.previa=self.db.query_row("SELECT substr(texto,1,240) FROM lt_trechos WHERE documento=? AND versao=? ORDER BY inicio LIMIT 1",params![id,versao],|r|r.get(0)).optional()?
+            d.palavras=Some(db.query_row("SELECT COALESCE(SUM(CASE WHEN trim(texto)='' THEN 0 ELSE length(trim(texto))-length(replace(trim(texto),' ',''))+1 END),0) FROM lt_trechos WHERE documento=? AND versao=?",params![id,versao],|r|r.get(0))?);
+            d.previa=db.query_row("SELECT substr(texto,1,240) FROM lt_trechos WHERE documento=? AND versao=? ORDER BY inicio LIMIT 1",params![id,versao],|r|r.get(0)).optional()?
         }
         Ok(Some(d))
     }
@@ -177,7 +181,7 @@ impl ArmazemLancamento {
         {
             let mut s = tx.prepare(sql)?;
             for id in s.query_map([arg], |r| r.get::<_, String>(0))? {
-                if let Some(d) = self.montar(&id?, true)? {
+                if let Some(d) = Self::montar_em(&tx, &id?, true)? {
                     lista.push(d)
                 }
             }
@@ -192,8 +196,10 @@ impl ArmazemLancamento {
         self.listar("SELECT id FROM lt_documentos d WHERE id IS NOT ? AND tipo='reuniao' AND estado<>'descartada' AND (estado<>'finalizada' OR EXISTS(SELECT 1 FROM lt_blocos b WHERE b.documento=d.id AND (b.estado IN ('capturado','pendente') OR (d.falantes IN ('pendente','indisponivel') AND b.audio_liberado=0 AND b.fonte='mac' AND b.estado<>'lacuna')))) ORDER BY criado_em DESC",ativa)
     }
     pub fn renomear(&mut self, doc: &str, voz: &str, nome: &str) -> Result<(), Erro> {
-        let tx = self.db.unchecked_transaction()?;
-        let d = self.montar(doc, true)?.ok_or("Documento inexistente")?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let d = Self::montar_em(&tx, doc, true)?.ok_or("Documento inexistente")?;
         let nome: String = nome.trim().chars().take(120).collect();
         if nome.is_empty() {
             return Err("Nome vazio".into());
@@ -211,12 +217,14 @@ impl ArmazemLancamento {
         trecho: &str,
         nome: &str,
     ) -> Result<(), Erro> {
-        let tx = self.db.unchecked_transaction()?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let nome: String = nome.trim().chars().take(120).collect();
         if nome.is_empty() {
             return Err("Nome vazio".into());
         }
-        let d = self.montar(doc, true)?.ok_or("Documento inexistente")?;
+        let d = Self::montar_em(&tx, doc, true)?.ok_or("Documento inexistente")?;
         let voz = if let Some(v) = d
             .vozes
             .iter()
@@ -230,7 +238,7 @@ impl ArmazemLancamento {
             tx.execute("INSERT INTO lt_edicoes(documento,versao,tipo,alvo,valor,criado_em) SELECT documento,versao,'nomeVoz',?,?,? FROM lt_trechos WHERE documento=? AND id=?",params![voz,nome,armazem_lancamento::agora(),doc,trecho])?;
             voz
         };
-        self.reatribuir(doc, trecho, &voz)?;
+        Self::reatribuir_em(&tx, doc, trecho, &voz)?;
         tx.commit()?;
         Ok(())
     }

@@ -74,6 +74,8 @@ pub enum DesfechoPendencia {
     Resolvida(Vec<TrechoNovo>),
     SemFala,
     Continua(String),
+    /// A reunião pode finalizar, mas o intervalo continua disponível para reconhecimento.
+    Retida(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,23 +103,17 @@ fn existe(c: &Connection, sql: &str, p: impl rusqlite::Params) -> SqlResult<bool
     Ok(c.query_row(sql, p, |_| Ok(())).optional()?.is_some())
 }
 
-fn pendencias_em(c: &Connection, doc: &str) -> SqlResult<Vec<Pendencia>> {
-    let mut s = c.prepare(
-        "SELECT id,fonte,geracao,inicio,fim,motivo,tentativas,estado FROM lt_pendencias WHERE documento=? ORDER BY inicio",
-    )?;
-    let linhas = s.query_map([doc], |r| {
-        Ok(Pendencia {
-            id: r.get(0)?,
-            fonte: fonte(&r.get::<_, String>(1)?).unwrap_or(FonteDeAudio::Mac),
-            geracao: r.get(2)?,
-            inicio: r.get(3)?,
-            fim: r.get(4)?,
-            motivo: r.get(5)?,
-            tentativas: r.get(6)?,
-            estado: r.get(7)?,
-        })
-    })?;
-    linhas.collect()
+fn ler_pendencia(r: &rusqlite::Row<'_>) -> SqlResult<Pendencia> {
+    Ok(Pendencia {
+        id: r.get(0)?,
+        fonte: fonte(&r.get::<_, String>(1)?).ok_or(rusqlite::Error::InvalidQuery)?,
+        geracao: r.get(2)?,
+        inicio: r.get(3)?,
+        fim: r.get(4)?,
+        motivo: r.get(5)?,
+        tentativas: r.get(6)?,
+        estado: r.get(7)?,
+    })
 }
 
 /// Bloco que sai de "pendente" quando nenhuma pendência aberta o cruza mais.
@@ -270,7 +266,7 @@ impl ArmazemLancamento {
         if !existe(&tx, "SELECT 1 FROM lt_documentos WHERE id=? AND estado<>'descartada'", [&p.documento])?
             || !existe(
                 &tx,
-                "SELECT 1 FROM lt_costuras WHERE documento=? AND fonte=? AND geracao=? AND confirmado_ate=? AND dono=?",
+                "SELECT 1 FROM lt_costuras WHERE documento=? AND fonte=? AND geracao=? AND confirmado_ate=? AND dono=? AND fechada=0",
                 params![p.documento, p.fonte.nome(), p.geracao, p.esperado, p.dono],
             )?
         {
@@ -312,37 +308,49 @@ impl ArmazemLancamento {
             )?;
             linhas.collect::<SqlResult<_>>()?
         };
-        for (id, inicio, fim) in abertos {
-            let pendente = existe(
-                &tx,
-                "SELECT 1 FROM lt_pendencias WHERE documento=? AND fonte=? AND geracao=? AND estado='aberta' AND inicio<? AND fim>?",
-                params![p.documento, p.fonte.nome(), p.geracao, fim, inicio],
+        {
+            let mut pendencias = tx.prepare_cached(
+                "SELECT 1 FROM lt_pendencias WHERE documento=? AND fonte=? AND geracao=? AND estado='aberta' AND inicio<? AND fim>? LIMIT 1",
             )?;
-            let tem_fala = existe(
-                &tx,
-                "SELECT 1 FROM lt_trechos WHERE documento=? AND versao='' AND fonte=? AND (inicio+fim)*8000>=? AND (inicio+fim)*8000<?",
-                params![p.documento, p.fonte.nome(), inicio, fim],
+            let mut trechos = tx.prepare_cached(
+                "SELECT 1 FROM lt_trechos WHERE documento=? AND versao='' AND fonte=? AND (inicio+fim)*8000>=? AND (inicio+fim)*8000<? LIMIT 1",
             )?;
-            let estado = if pendente {
-                EstadoBloco::Pendente
-            } else if tem_fala || p.com_atividade.contains(&id) {
-                EstadoBloco::Transcrito
-            } else {
-                EstadoBloco::SemFala
-            };
-            let erro = pendente
-                .then_some("Fala não reconhecida. O áudio continua guardado para nova tentativa.");
-            tx.execute(
+            let mut atualizar = tx.prepare_cached(
                 "UPDATE lt_blocos SET estado=?,erro=? WHERE id=? AND estado='capturado'",
-                params![estado.nome(), erro, id],
             )?;
+            for (id, inicio, fim) in abertos {
+                let pendente = pendencias.exists(params![
+                    p.documento,
+                    p.fonte.nome(),
+                    p.geracao,
+                    fim,
+                    inicio
+                ])?;
+                let estado = if pendente {
+                    EstadoBloco::Pendente
+                } else if p.com_atividade.contains(&id)
+                    || trechos.exists(params![p.documento, p.fonte.nome(), inicio, fim])?
+                {
+                    EstadoBloco::Transcrito
+                } else {
+                    EstadoBloco::SemFala
+                };
+                let erro = pendente.then_some(
+                    "Fala não reconhecida. O áudio continua guardado para nova tentativa.",
+                );
+                atualizar.execute(params![estado.nome(), erro, id])?;
+            }
         }
         tx.commit()?;
         Ok(Some(persistidos))
     }
 
     pub fn pendencias(&self, doc: &str) -> SqlResult<Vec<Pendencia>> {
-        pendencias_em(&self.db, doc)
+        let mut s = self.db.prepare_cached(
+            "SELECT id,fonte,geracao,inicio,fim,motivo,tentativas,estado FROM lt_pendencias WHERE documento=? ORDER BY inicio",
+        )?;
+        let linhas = s.query_map([doc], ler_pendencia)?;
+        linhas.collect()
     }
 
     /// Nova tentativa de uma faixa não reconhecida. Exige a pendência aberta com as tentativas esperadas.
@@ -353,47 +361,58 @@ impl ArmazemLancamento {
         tentativas: u32,
         desfecho: DesfechoPendencia,
     ) -> SqlResult<bool> {
+        Ok(self
+            .resolver_persistindo(id, doc, tentativas, desfecho)?
+            .is_some())
+    }
+
+    pub(crate) fn resolver_persistindo(
+        &mut self,
+        id: &str,
+        doc: &str,
+        tentativas: u32,
+        desfecho: DesfechoPendencia,
+    ) -> SqlResult<Option<Vec<TrechoNovo>>> {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if !existe(
-            &tx,
-            "SELECT 1 FROM lt_documentos WHERE id=? AND estado<>'descartada'",
-            [doc],
-        )? {
-            return Ok(false);
-        }
-        let Some(p) = pendencias_em(&tx, doc)?.into_iter().find(|p| p.id == id) else {
-            return Ok(false);
+        let Some(p) = tx
+            .query_row(
+                "SELECT p.id,p.fonte,p.geracao,p.inicio,p.fim,p.motivo,p.tentativas,p.estado
+             FROM lt_pendencias p JOIN lt_documentos d ON d.id=p.documento
+             WHERE p.id=? AND d.id=? AND d.estado<>'descartada'
+             AND p.estado IN ('aberta','retida') AND p.tentativas=?",
+                params![id, doc, tentativas],
+                ler_pendencia,
+            )
+            .optional()?
+        else {
+            return Ok(None);
         };
-        if p.estado != "aberta" || p.tentativas != tentativas {
-            return Ok(false);
-        }
-        match desfecho {
+
+        let mut persistidos = vec![];
+        let (estado, motivo) = match desfecho {
             DesfechoPendencia::Resolvida(trechos) => {
                 for t in &trechos {
-                    inserir(&tx, doc, "", t)?;
+                    if let Some(t) = inserir(&tx, doc, "", t)? {
+                        persistidos.push(t);
+                    }
                 }
-                tx.execute("UPDATE lt_pendencias SET estado='resolvida',tentativas=tentativas+1 WHERE id=?", [id])?;
+                ("resolvida", None)
             }
-            DesfechoPendencia::SemFala => {
-                tx.execute(
-                    "UPDATE lt_pendencias SET estado='semFala',tentativas=tentativas+1 WHERE id=?",
-                    [id],
-                )?;
-            }
-            DesfechoPendencia::Continua(motivo) => {
-                tx.execute(
-                    "UPDATE lt_pendencias SET motivo=?,tentativas=tentativas+1 WHERE id=?",
-                    params![motivo, id],
-                )?;
-                tx.commit()?;
-                return Ok(true);
-            }
+            DesfechoPendencia::SemFala => ("semFala", None),
+            DesfechoPendencia::Continua(motivo) => (p.estado.as_str(), Some(motivo)),
+            DesfechoPendencia::Retida(motivo) => ("retida", Some(motivo)),
+        };
+        tx.execute(
+            "UPDATE lt_pendencias SET estado=?,motivo=COALESCE(?,motivo),tentativas=tentativas+1 WHERE id=?",
+            params![estado, motivo, id],
+        )?;
+        if estado != "aberta" {
+            liberar_pendentes(&tx, doc, p.fonte, p.geracao, p.inicio, p.fim)?;
         }
-        liberar_pendentes(&tx, doc, p.fonte, p.geracao, p.inicio, p.fim)?;
         tx.commit()?;
-        Ok(true)
+        Ok(Some(persistidos))
     }
 
     pub fn versoes(&self, doc: &str) -> SqlResult<Vec<VersaoDetalhada>> {
@@ -521,7 +540,10 @@ impl ArmazemLancamento {
         for (id, arquivo) in self.arquivos_para_limpar()? {
             // Caminho inválido vindo do banco não é seguido: só a referência sai.
             if DiscoDeBlocos::arquivo_valido(&arquivo, &id.documento) {
-                disco.apagar(&id.documento, &arquivo)?;
+                if let Err(e) = disco.apagar(&id.documento, &arquivo) {
+                    r.falhas.push(format!("limpeza de áudio: {e}"));
+                    continue;
+                }
             }
             self.esquecer_arquivo(&id)?;
         }
@@ -567,7 +589,7 @@ fn proteger_adotado_atrasado(
     let (mut inicio, mut ate) = (b.inicio, b.fim().min(confirmado));
     let sobrepostas: Vec<(String, usize, usize)> = {
         let mut s = c.prepare(
-            "SELECT id,inicio,fim FROM lt_pendencias WHERE documento=? AND fonte=? AND geracao=? AND estado='aberta' AND inicio<? AND fim>?",
+            "SELECT id,inicio,fim FROM lt_pendencias WHERE documento=? AND fonte=? AND geracao=? AND estado IN ('aberta','retida') AND inicio<? AND fim>?",
         )?;
         let linhas = s.query_map(params![doc, f, g, ate, inicio], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
@@ -580,7 +602,7 @@ fn proteger_adotado_atrasado(
     }
     for (id, _, _) in &sobrepostas {
         c.execute(
-            "UPDATE lt_pendencias SET estado='absorvida' WHERE id=? AND estado='aberta'",
+            "UPDATE lt_pendencias SET estado='absorvida' WHERE id=? AND estado IN ('aberta','retida')",
             [id],
         )?;
     }

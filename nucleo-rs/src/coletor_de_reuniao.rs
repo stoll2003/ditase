@@ -1,4 +1,7 @@
-use crate::{motores::Erro, *};
+use crate::{
+    motores::{Erro, TAXA},
+    *,
+};
 use std::collections::HashMap;
 struct Fonte {
     geracao: u64,
@@ -29,7 +32,7 @@ impl ColetorDeReuniao {
             disco,
             linha_do_tempo: LinhaDoTempo::new(inicio),
             fontes: HashMap::new(),
-            tamanho_bloco: 16000,
+            tamanho_bloco: TAXA as usize,
             encerrado: false,
         }
     }
@@ -37,7 +40,7 @@ impl ColetorDeReuniao {
         if self.encerrado {
             return Err("Coletor encerrado".into());
         }
-        let abertura = self
+        let mut abertura = self
             .linha_do_tempo
             .indice(t)
             .unwrap_or_else(|| self.fontes.get(&fonte).map_or(0, |f| f.cursor.proximo));
@@ -46,6 +49,7 @@ impl ColetorDeReuniao {
             self.selar(fonte, None)?;
             let f = &self.fontes[&fonte];
             geracao = f.geracao + 1;
+            abertura = abertura.max(f.cursor.proximo);
             if abertura - f.cursor.proximo > 960 {
                 self.lacuna(fonte, f.cursor.proximo as usize, abertura as usize)?
             }
@@ -89,6 +93,7 @@ impl ColetorDeReuniao {
         }
         f.seq += 1;
         f.inicio = fim;
+        f.cursor.proximo = fim as i64;
         Ok(())
     }
     fn selar(&mut self, fonte: FonteDeAudio, quantidade: Option<usize>) -> Result<(), Erro> {
@@ -124,22 +129,24 @@ impl ColetorDeReuniao {
         let Some(f) = self.fontes.get_mut(&fonte) else {
             return Ok(());
         };
-        let eventos = f
-            .cursor
-            .receber(tempo, amostras.len(), &self.linha_do_tempo);
+        // Calcule primeiro; aplique o cursor só após aceitar cada evento.
+        let mut cursor = CursorDeFonte::new(f.cursor.proximo);
+        let eventos = cursor.receber(tempo, amostras.len(), &self.linha_do_tempo);
         for e in eventos {
             match e {
                 Evento::Lacuna(r) => {
                     self.selar(fonte, None)?;
-                    self.lacuna(fonte, r.start as usize, r.end as usize)?
+                    self.lacuna(fonte, r.start as usize, r.end as usize)?;
                 }
                 Evento::Amostras(p) => {
-                    let f = self.fontes.get_mut(&fonte).unwrap();
+                    let f = self.fontes.get_mut(&fonte).ok_or("Fonte fechada")?;
                     if f.buffer.is_empty() {
                         f.inicio = p.indice as usize
                     }
                     f.buffer
                         .extend_from_slice(&amostras[p.origem..p.origem + p.quantidade]);
+                    // Se selar falhar, as amostras já estão no buffer para nova tentativa.
+                    f.cursor.proximo = p.indice + p.quantidade as i64;
                     while self.fontes[&fonte].buffer.len() >= self.tamanho_bloco {
                         self.selar(fonte, Some(self.tamanho_bloco))?
                     }
