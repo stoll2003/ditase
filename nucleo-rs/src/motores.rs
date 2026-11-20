@@ -6,13 +6,25 @@ use std::path::Path;
 pub const TAXA: u32 = 16_000;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct PalavraReconhecida { pub texto: String, pub inicio: f64, pub fim: f64 }
+pub struct PalavraReconhecida {
+    pub texto: String,
+    pub inicio: f64,
+    pub fim: f64,
+}
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FaixaDeVoz { pub voz: String, pub inicio: f64, pub fim: f64 }
+pub struct FaixaDeVoz {
+    pub voz: String,
+    pub inicio: f64,
+    pub fim: f64,
+}
 
 #[derive(Debug, Clone, Default)]
-pub struct PedidoLimpeza { pub transcricao: String, pub anterior: String, pub vocabulario: Vec<String> }
+pub struct PedidoLimpeza {
+    pub transcricao: String,
+    pub anterior: String,
+    pub vocabulario: Vec<String>,
+}
 
 pub type Erro = Box<dyn std::error::Error + Send + Sync>;
 
@@ -25,7 +37,12 @@ pub trait Transcritor: Send + Sync {
 /// Arquivos e reuniões: palavras com tempo absoluto (Swift `ReconhecedorDeFala`).
 /// `fim_da_fala` fecha a cauda: nenhuma palavra dura além do áudio real.
 pub trait ReconhecedorDeFala: Send + Sync {
-    fn palavras(&self, amostras: &[f32], inicio: f64, fim_da_fala: Option<f64>) -> Result<Vec<PalavraReconhecida>, Erro>;
+    fn palavras(
+        &self,
+        amostras: &[f32],
+        inicio: f64,
+        fim_da_fala: Option<f64>,
+    ) -> Result<Vec<PalavraReconhecida>, Erro>;
 }
 
 /// Separação de falantes sobre um WAV da faixa inteira (Swift `IdentificadorDeFalantes`).

@@ -1,3 +1,5 @@
+mod comum;
+
 use nucleo::{motores::*, *};
 use std::{
     fs,
@@ -89,7 +91,7 @@ struct Ambiente {
 
 impl Ambiente {
     fn new() -> Self {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = comum::tempdir();
         let banco = tmp.path().join("teste.sqlite");
         let armazem = ArmazemLancamento::new(&banco).unwrap();
         let disco = DiscoDeBlocos::new(tmp.path().join("Audio"));
@@ -416,12 +418,23 @@ fn pendencia_normal_recupera_segunda_ocorrencia() {
         rusqlite::params![format!("{doc}|mac|0|6400"), doc],
     )
     .unwrap();
+    let outro = amb.nova_reuniao();
+    let id_em_uso = format!("{doc}|mac|0|9600");
+    inserir_trecho_raw(&c, &outro, &id_em_uso, 0.60, 0.85, "síntese");
     let oraculo = Oraculo::new(rot);
     let mut arm = amb.reabrir();
-    ProcessadorDeReuniao::new(&doc, &mut arm, &amb.disco, &oraculo)
+    let novos = ProcessadorDeReuniao::new(&doc, &mut arm, &amb.disco, &oraculo)
         .repetir_pendencias()
         .unwrap();
     assert_eq!(palavras(&amb.armazem, &doc), vec!["não", "não"]);
+    assert_eq!(novos.len(), 1);
+    assert_eq!(novos[0].id, format!("{id_em_uso}#1"));
+    assert!(amb
+        .armazem
+        .trechos(&doc)
+        .unwrap()
+        .iter()
+        .any(|t| t.id == novos[0].id));
 }
 
 #[test]
@@ -853,7 +866,7 @@ fn banco_e_pasta_de_audio_e_pcm_so_do_usuario() {
 /// precisam abrir, gravar, reabrir e ler pelo mesmo caminho.
 #[test]
 fn banco_e_audio_em_caminho_com_acento() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = comum::tempdir();
     let raiz = tmp.path().join("Usuário Ção").join("Dita.se ñ");
     let banco = raiz.join("lançamento.sqlite");
     let armazem = ArmazemLancamento::new(&banco).unwrap();
@@ -891,4 +904,37 @@ fn banco_e_audio_em_caminho_com_acento() {
         .apagar(&doc, blocos[0].arquivo.as_deref().unwrap())
         .unwrap();
     assert!(!disco.existe(&blocos[0]));
+}
+
+#[test]
+fn abertura_e_limpeza_recusam_juncao_no_ancestral_da_raiz() {
+    let tmp = comum::tempdir();
+    let externa = tmp.path().join("externa");
+    let destino_real = DiscoDeBlocos::new(externa.join("Audio"));
+    fs::create_dir(&externa).unwrap();
+    let doc = novo_uuid();
+    let bloco = destino_real
+        .gravar(
+            IdBloco {
+                documento: doc.clone(),
+                fonte: FonteDeAudio::Mac,
+                geracao: 0,
+                seq: 0,
+            },
+            0,
+            &[0.1; 320],
+        )
+        .unwrap();
+    let pai = tmp.path().join("redirecionada");
+    ligar_pasta(&externa, &pai);
+    let disco = DiscoDeBlocos::new(pai.join("Audio"));
+    let mut a = ArmazemLancamento::new(tmp.path().join("teste.sqlite")).unwrap();
+    let r = a.preparar_abertura(&disco);
+    assert_eq!(r.adotados, 0);
+    assert_eq!(r.falhas.len(), 1);
+    assert!(!a.existe_documento(&doc).unwrap());
+    assert!(disco.pasta(&doc).is_err());
+    disco.remover_pasta(&doc);
+    assert!(destino_real.existe(&bloco));
+    assert_eq!(destino_real.ler(&bloco).unwrap(), vec![0.1; 320]);
 }

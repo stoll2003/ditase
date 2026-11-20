@@ -226,8 +226,12 @@ impl Banco {
     }
     pub fn contar_uso(&mut self, ids: &[i64]) -> SqlResult<()> {
         let tx = self.db.transaction()?;
-        for id in ids {
-            tx.execute("UPDATE dicionario SET usos=usos+1 WHERE id=?", [id])?;
+        {
+            let mut atualizar =
+                tx.prepare_cached("UPDATE dicionario SET usos=usos+1 WHERE id=?")?;
+            for id in ids {
+                atualizar.execute([id])?;
+            }
         }
         tx.commit()
     }

@@ -1,3 +1,5 @@
+mod comum;
+
 use nucleo::{motores::*, *};
 use std::{
     collections::{HashMap, HashSet},
@@ -135,7 +137,7 @@ impl Ambiente {
         Self::com_escrita(None)
     }
     fn com_escrita(escrita: Option<Escrita>) -> Self {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = comum::tempdir();
         let banco = tmp.path().join("teste.sqlite");
         let armazem = ArmazemLancamento::new(&banco).unwrap();
         let audio = tmp.path().join("Audio");
@@ -1505,7 +1507,7 @@ fn cauda_no_fechamento_expande_contexto_quando_janela_curta_falha() {
 
 #[test]
 fn lista_leve_traz_contagem_de_palavras_e_previa() {
-    let tmp = tempfile::tempdir().unwrap();
+    let tmp = comum::tempdir();
     let banco = Banco::new(tmp.path().join("teste.sqlite")).unwrap();
     let textos = ["Vamos revisar o plano.", "Combinado, até quinta-feira."];
     let arquivo = TranscricaoLonga {
@@ -1564,4 +1566,179 @@ fn lista_leve_traz_contagem_de_palavras_e_previa() {
         .unwrap()
         .palavras
         .is_none());
+}
+
+#[test]
+fn ruido_curto_sem_palavras_finaliza_mas_preserva_pcm_e_permite_recuperar() {
+    let amb = Ambiente::new();
+    let som = roteiro(&["sintético"], 0.4, 0.15, 0.);
+    let doc = capturada(&amb, 3., FonteDeAudio::Mic, &som);
+    let vazio = Oraculo::new(vec![]);
+    let mut a = amb.reabrir();
+    {
+        let mut p = ProcessadorDeReuniao::new(&doc, &mut a, &amb.disco, &vazio);
+        p.fechar().unwrap();
+        assert!(p.passada_final(None).unwrap());
+    }
+    assert!(vazio.chamadas() >= 2);
+    assert!(a.preparar_abertura(&amb.disco).falhas.is_empty());
+    let d = a.documento(&doc).unwrap().unwrap();
+    assert_eq!(d.fase, "pronta");
+    assert!(d.trechos.is_empty());
+    assert!(d.pendentes.is_some());
+    assert!(a.recuperaveis(None).unwrap().is_empty());
+    let blocos = a.blocos(&doc).unwrap();
+    assert!(amb.disco.existe(&blocos[0]));
+    assert!(!blocos[0].audio_liberado);
+
+    let bom = Oraculo::new(som);
+    let mut p = ProcessadorDeReuniao::new(&doc, &mut a, &amb.disco, &bom);
+    let recuperados = p.recuperar().unwrap();
+    assert_eq!(recuperados.len(), 1);
+    assert!(p.passada_final(None).unwrap());
+    assert_eq!(amb.palavras(&doc), vec!["sintético"]);
+    assert!(a.documento(&doc).unwrap().unwrap().pendentes.is_none());
+    assert!(!amb.disco.existe(&blocos[0]));
+}
+
+#[test]
+fn falha_ao_selar_antes_de_lacuna_nao_avanca_cursor_nem_desloca_audio() {
+    let tentativas = Arc::new(AtomicUsize::new(0));
+    let amb = Ambiente::com_escrita(Some(Arc::new(move |dados, destino| {
+        if tentativas.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Err(std::io::Error::other("falha sintética de disco"));
+        }
+        DiscoDeBlocos::escrita_duravel(dados, destino)
+    })));
+    let doc = amb.nova_reuniao("mac");
+    let mut c = ColetorDeReuniao::new(doc.clone(), amb.reabrir(), amb.disco.clone(), 0.);
+    c.abrir(FonteDeAudio::Mac, 0.).unwrap();
+    c.receber(FonteDeAudio::Mac, 0., &[0.1; 8000]).unwrap();
+    assert!(c.receber(FonteDeAudio::Mac, 2., &[0.2; 8000]).is_err());
+    assert_eq!(c.fim_atual(), 8000);
+    c.receber(FonteDeAudio::Mac, 2.5, &[0.3; 8000]).unwrap();
+    c.encerrar(3.).unwrap();
+    let b = amb.armazem.blocos(&doc).unwrap();
+    assert_eq!(b.len(), 3);
+    assert_eq!(b[0].inicio, 0);
+    assert_eq!(amb.disco.ler(&b[0]).unwrap(), vec![0.1; 8000]);
+    assert_eq!((b[1].inicio, b[1].fim()), (8000, 40000));
+    assert_eq!(b[1].estado, EstadoBloco::Lacuna);
+    assert_eq!(b[2].inicio, 40000);
+    assert_eq!(amb.disco.ler(&b[2]).unwrap(), vec![0.3; 8000]);
+}
+
+#[test]
+fn saida_atomicamente_recusa_pendencia_aberta_mesmo_sem_bloco_pendente() {
+    let mut amb = Ambiente::new();
+    let doc = amb.nova_reuniao("mac");
+    let sql = rusqlite::Connection::open(&amb.banco).unwrap();
+    sql.execute(
+        "INSERT INTO lt_pendencias(id,documento,fonte,geracao,inicio,fim,motivo,estado) VALUES('p',?,'mac',0,0,16000,'sintético','aberta')",
+        [&doc],
+    ).unwrap();
+    assert!(!amb
+        .armazem
+        .gravar_falantes(&doc, &HashMap::new(), true, true)
+        .unwrap());
+    assert_eq!(
+        amb.armazem.estado_documento(&doc).unwrap().as_deref(),
+        Some("gravando")
+    );
+}
+
+#[test]
+fn fala_sem_palavra_antes_da_margem_nao_perde_pcm_ao_avancar_costura() {
+    let amb = Ambiente::new();
+    let palavras = roteiro(&["antes", "depois"], 0.4, 0.4, 2.2);
+    let doc = capturada(&amb, 4., FonteDeAudio::Mac, &palavras);
+    let depois = Oraculo::new(vec![palavras[1].clone()]);
+    let mut a = amb.reabrir();
+    let mut p = ProcessadorDeReuniao::new(&doc, &mut a, &amb.disco, &depois);
+    assert!(p.bloco_selado().unwrap().is_empty());
+    p.fechar().unwrap();
+    assert!(p.passada_final(None).unwrap_err().is::<FalhaReuniao>());
+    assert!(amb.disco.existe(&a.blocos(&doc).unwrap()[0]));
+    let completo = Oraculo::new(palavras);
+    let mut p = ProcessadorDeReuniao::new(&doc, &mut a, &amb.disco, &completo);
+    p.recuperar().unwrap();
+    assert_eq!(amb.palavras(&doc), vec!["antes", "depois"]);
+}
+
+#[test]
+fn encerrar_nao_trava_costura_que_ainda_tem_blocos_a_transcrever() {
+    let amb = Ambiente::new();
+    let palavras = roteiro(&["uma", "vez"], 0.4, 0.35, 0.1);
+    let doc = capturada(&amb, 3., FonteDeAudio::Mic, &palavras);
+    let bom = Oraculo::new(palavras);
+    let mut a = amb.reabrir();
+    let mut p = ProcessadorDeReuniao::new(&doc, &mut a, &amb.disco, &bom);
+    p.encerrar_costuras().unwrap();
+    assert!(p.passada_final(None).unwrap_err().is::<FalhaReuniao>());
+    assert!(!amb.armazem.costuras(&doc).unwrap()[0].fechada);
+    let sql = rusqlite::Connection::open(&amb.banco).unwrap();
+    sql.execute("UPDATE lt_costuras SET fechada=1 WHERE documento=?", [&doc])
+        .unwrap();
+    assert_eq!(p.recuperar().unwrap().len(), 1);
+    p.encerrar_costuras().unwrap();
+    assert!(p.passada_final(None).unwrap());
+    assert!(a.costuras(&doc).unwrap().iter().all(|c| c.fechada));
+}
+
+#[test]
+fn edicao_de_voz_espera_gravador_sqlite_em_vez_de_falhar_no_upgrade() {
+    use std::{sync::mpsc, time::Duration};
+    let amb = Ambiente::new();
+    let doc = amb.nova_reuniao("mac");
+    let mut a = amb.reabrir();
+    let mut sql = rusqlite::Connection::open(&amb.banco).unwrap();
+    let tx = sql.transaction().unwrap();
+    tx.execute("UPDATE lt_documentos SET duracao=1 WHERE id=?", [&doc])
+        .unwrap();
+    let (iniciou, inicio) = mpsc::channel();
+    let (fechou, fim) = mpsc::channel();
+    let doc2 = doc.clone();
+    let escrever = std::thread::spawn(move || {
+        iniciou.send(()).unwrap();
+        fechou
+            .send(a.renomear(&doc2, "chamada", "Pessoa sintética"))
+            .unwrap()
+    });
+    inicio.recv().unwrap();
+    let cedo = fim.recv_timeout(Duration::from_millis(250));
+    tx.commit().unwrap();
+    escrever.join().unwrap();
+    assert!(
+        matches!(cedo, Err(mpsc::RecvTimeoutError::Timeout)),
+        "{cedo:?}"
+    );
+    fim.recv().unwrap().unwrap();
+    assert_eq!(
+        sql.query_row(
+            "SELECT COUNT(*) FROM lt_edicoes WHERE documento=?",
+            [&doc],
+            |r| r.get::<_, usize>(0)
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn som_curto_continua_bloqueante_quando_ha_lacuna_na_faixa() {
+    let amb = Ambiente::new();
+    let mut a = amb.reabrir();
+    let doc = amb.nova_reuniao("mic");
+    let mut c = ColetorDeReuniao::new(doc.clone(), amb.reabrir(), amb.disco.clone(), 0.);
+    c.abrir(FonteDeAudio::Mic, 0.).unwrap();
+    c.receber(FonteDeAudio::Mic, 0., &[0.1; 2400]).unwrap();
+    c.receber(FonteDeAudio::Mic, 1., &[0.; 4000]).unwrap();
+    c.encerrar(1.25).unwrap();
+    let vazio = Oraculo::new(vec![]);
+    let mut p = ProcessadorDeReuniao::new(&doc, &mut a, &amb.disco, &vazio);
+    p.fechar().unwrap();
+    p.recuperar().unwrap();
+    assert!(p.passada_final(None).unwrap_err().is::<FalhaReuniao>());
+    assert_eq!(a.pendencias(&doc).unwrap()[0].estado, "aberta");
+    assert!(amb.disco.existe(&a.blocos(&doc).unwrap()[0]));
 }

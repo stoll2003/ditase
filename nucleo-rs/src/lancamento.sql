@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS lt_blocos (
     UNIQUE (documento, fonte, geracao, seq)
 );
 CREATE INDEX IF NOT EXISTS lt_blocos_doc ON lt_blocos (documento, fonte, geracao, inicio);
+CREATE INDEX IF NOT EXISTS lt_blocos_fim ON lt_blocos (documento, fonte, geracao, inicio + quantidade);
+CREATE INDEX IF NOT EXISTS lt_blocos_capturados_fim ON lt_blocos (documento, fonte, geracao, inicio + quantidade) WHERE estado='capturado';
 CREATE TABLE IF NOT EXISTS lt_costuras (
     documento TEXT NOT NULL, fonte TEXT NOT NULL, geracao INTEGER NOT NULL,
     confirmado_ate INTEGER NOT NULL, dono TEXT, fechada INTEGER NOT NULL DEFAULT 0,
@@ -23,12 +25,14 @@ CREATE TABLE IF NOT EXISTS lt_pendencias (
     inicio INTEGER NOT NULL, fim INTEGER NOT NULL, motivo TEXT NOT NULL,
     tentativas INTEGER NOT NULL DEFAULT 1, estado TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS lt_pendencias_intervalo ON lt_pendencias (documento, fonte, geracao, estado, inicio);
 CREATE TABLE IF NOT EXISTS lt_trechos (
     id TEXT PRIMARY KEY, documento TEXT NOT NULL, versao TEXT NOT NULL DEFAULT '', fonte TEXT NOT NULL,
     inicio REAL NOT NULL, fim REAL NOT NULL, texto TEXT NOT NULL, voz TEXT NOT NULL, voz_final TEXT,
     divergente INTEGER NOT NULL DEFAULT 0, origem_legado TEXT UNIQUE, criado_em REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS lt_trechos_doc ON lt_trechos (documento, versao, inicio);
+CREATE INDEX IF NOT EXISTS lt_trechos_centro ON lt_trechos (documento, fonte, (inicio + fim) * 8000) WHERE versao='';
 CREATE TABLE IF NOT EXISTS lt_edicoes (
     id INTEGER PRIMARY KEY AUTOINCREMENT, documento TEXT NOT NULL, versao TEXT NOT NULL DEFAULT '',
     tipo TEXT NOT NULL, alvo TEXT NOT NULL, valor TEXT NOT NULL, criado_em REAL NOT NULL, chave TEXT UNIQUE
