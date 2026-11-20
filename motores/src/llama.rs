@@ -5,40 +5,23 @@
 //! `/health`, aquece o cache das instruções e é encerrado por ociosidade, por [`ServidorLlama::parar`]
 //! e no `Drop`. No Windows fica num Job Object com "matar ao fechar": se o app cair, o
 //! Windows encerra o filho junto; e sobe sem janela de console.
+use crate::canal_llama::{escutar_porta, Canal, Identidade};
 use crate::{erro, palavras, Erro, Limpador, PedidoLimpeza};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-/// Prompt de limpeza do app (mesmo arquivo do Mac).
-pub const PROMPT_LIMPEZA: &str = include_str!("../../Recursos/prompt-limpeza.md");
+/// Prompt de limpeza do motor Windows.
+pub const PROMPT_LIMPEZA: &str = include_str!("prompt-limpeza.txt");
 
 // ---------------------------------------------------------------------------------------------
 // Cliente (LimpadorLlama)
 
 /// Limpador que fala com um llama-server já no ar pela API compatível com a da OpenAI.
-pub struct LimpadorLlama {
-    nome: String,
-    url: String,
-    instrucoes: String,
-    agente: ureq::Agent,
-}
+pub struct LimpadorLlama;
 
 impl LimpadorLlama {
-    pub fn novo(porta: u16, modelo: &str, instrucoes: &str) -> Self {
-        Self {
-            nome: modelo.to_string(),
-            url: format!("http://127.0.0.1:{porta}/v1/chat/completions"),
-            instrucoes: instrucoes.to_string(),
-            // Mesmo prazo do Swift (timeoutIntervalForRequest = 120). Sem proxy: só 127.0.0.1.
-            agente: ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(120))
-                .try_proxy_from_env(false)
-                .build(),
-        }
-    }
-
     pub fn montar_mensagem(p: &PedidoLimpeza) -> String {
         let mut m = String::new();
         if !p.vocabulario.is_empty() {
@@ -74,11 +57,11 @@ impl LimpadorLlama {
         t.trim().to_string()
     }
 
-    pub fn corpo(&self, p: &PedidoLimpeza) -> serde_json::Value {
+    pub fn corpo(instrucoes: &str, p: &PedidoLimpeza) -> serde_json::Value {
         let palavras = palavras::contar(&p.transcricao);
         serde_json::json!({
             "messages": [
-                {"role": "system", "content": self.instrucoes},
+                {"role": "system", "content": instrucoes},
                 {"role": "user", "content": Self::montar_mensagem(p)},
             ],
             "temperature": 0,
@@ -87,27 +70,8 @@ impl LimpadorLlama {
             "stream": false,
         })
     }
-}
 
-impl Limpador for LimpadorLlama {
-    fn nome(&self) -> &str {
-        &self.nome
-    }
-
-    fn limpar(&self, p: &PedidoLimpeza) -> Result<String, Erro> {
-        let resp = match self.agente.post(&self.url).send_json(self.corpo(p)) {
-            Ok(r) => r,
-            Err(ureq::Error::Status(s, _)) => {
-                return Err(erro(format!("llama-server respondeu {s}")))
-            }
-            Err(e) => return Err(erro(format!("llama-server: {e}"))),
-        };
-        if resp.status() != 200 {
-            return Err(erro(format!("llama-server respondeu {}", resp.status())));
-        }
-        let json: serde_json::Value = resp
-            .into_json()
-            .map_err(|_| erro("resposta sem conteúdo"))?;
+    fn texto(json: &serde_json::Value) -> Result<String, Erro> {
         let escolha = &json["choices"][0];
         let conteudo = escolha["message"]["content"]
             .as_str()
@@ -151,9 +115,22 @@ impl Default for Ajustes {
         Self {
             ocioso: Duration::from_secs(180),
             prazo_de_subida: Duration::from_secs(90),
-            contexto: 8192,
-            threads: None,
+            contexto: 4096,
+            threads: threads_padrao(),
         }
+    }
+}
+
+/// No Windows (CPU), limita a metade dos núcleos lógicos (entre 2 e 4) para não saturar
+/// hyperthreads nem travar a captura; no Mac (Metal), deixa o llama.cpp decidir.
+fn threads_padrao() -> Option<u32> {
+    if cfg!(windows) {
+        let n = std::thread::available_parallelism()
+            .map(|n| (n.get() / 2).clamp(2, 4) as u32)
+            .unwrap_or(4);
+        Some(n)
+    } else {
+        None
     }
 }
 
@@ -161,10 +138,12 @@ type Observador = Box<dyn Fn(&Estado) + Send + Sync>;
 
 struct Interno {
     processo: Option<Child>,
+    canal: Option<Canal>,
     porta: u16,
     modelo: Option<PathBuf>,
     estado: Estado,
     subindo: bool,
+    parada_pedida: bool,
     ultimo_uso: Instant,
     /// Pedidos de limpeza em andamento: com algum ativo, a ociosidade não desliga o servidor.
     em_uso: usize,
@@ -192,10 +171,12 @@ impl ServidorLlama {
             ajustes,
             interno: Mutex::new(Interno {
                 processo: None,
+                canal: None,
                 porta: 0,
                 modelo: None,
                 estado: Estado::Desligado,
                 subindo: false,
+                parada_pedida: false,
                 ultimo_uso: Instant::now(),
                 em_uso: 0,
                 vigia: false,
@@ -207,30 +188,39 @@ impl ServidorLlama {
         })
     }
 
+    fn interno(&self) -> std::sync::MutexGuard<'_, Interno> {
+        self.interno
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn observar(&self, f: impl Fn(&Estado) + Send + Sync + 'static) {
-        *self.ao_mudar.lock().unwrap() = Some(Box::new(f));
+        *self
+            .ao_mudar
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(f));
     }
 
     pub fn estado(&self) -> Estado {
-        self.interno.lock().unwrap().estado.clone()
+        self.interno().estado.clone()
     }
     pub fn porta(&self) -> u16 {
-        self.interno.lock().unwrap().porta
+        self.interno().porta
     }
     /// PID do processo filho, se estiver no ar.
     pub fn pid(&self) -> Option<u32> {
-        self.interno
-            .lock()
-            .unwrap()
-            .processo
-            .as_ref()
-            .map(|p| p.id())
+        self.interno().processo.as_ref().map(|p| p.id())
     }
 
     fn mudar(&self, i: &mut Interno, novo: Estado) {
         i.estado = novo.clone();
         self.mudou.notify_all();
-        if let Some(f) = self.ao_mudar.lock().unwrap().as_ref() {
+        if let Some(f) = self
+            .ao_mudar
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
             f(&novo);
         }
     }
@@ -243,7 +233,7 @@ impl ServidorLlama {
     /// Garante o servidor no ar com o modelo pedido e devolve a porta.
     /// Chamadas simultâneas esperam a mesma subida.
     pub fn garantir(self: &Arc<Self>, modelo: &Path) -> Result<u16, Erro> {
-        let mut i = self.interno.lock().unwrap();
+        let mut i = self.interno();
         i.ultimo_uso = Instant::now();
         loop {
             let vivo = i
@@ -257,7 +247,10 @@ impl ServidorLlama {
             if !i.subindo {
                 break;
             }
-            i = self.mudou.wait(i).unwrap();
+            i = self
+                .mudou
+                .wait(i)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if !i.subindo && i.modelo.as_deref() == Some(modelo) {
                 return match &i.estado {
                     Estado::Pronto => Ok(i.porta),
@@ -266,12 +259,18 @@ impl ServidorLlama {
             }
         }
         i.subindo = true;
+        i.parada_pedida = false;
         i.modelo = Some(modelo.to_path_buf());
         Self::encerrar(&mut i);
         drop(i);
         let r = self.subir(modelo);
-        let mut i = self.interno.lock().unwrap();
+        let mut i = self.interno();
         i.subindo = false;
+        if i.parada_pedida {
+            Self::encerrar(&mut i);
+            self.mudar(&mut i, Estado::Desligado);
+            return Err(erro("subida interrompida"));
+        }
         match r {
             Ok(porta) => {
                 // O prazo de ociosidade conta a partir de agora, não do começo da subida.
@@ -304,17 +303,23 @@ impl ServidorLlama {
             return Err(Falha::SemModelo(modelo.display().to_string()));
         }
         {
-            let mut i = self.interno.lock().unwrap();
+            let mut i = self.interno();
             self.mudar(&mut i, Estado::Iniciando);
         }
-        let porta = porta_livre().map_err(|e| Falha::Outra(format!("sem porta livre: {e}")))?;
+        let identidade =
+            Identidade::nova().map_err(|e| Falha::Outra(format!("identidade local: {e}")))?;
         // Caminho absoluto: com current_dir, um caminho relativo seria resolvido na pasta nova.
         let binario = absoluto(&self.binario).map_err(|e| Falha::Outra(format!("binário: {e}")))?;
-        let modelo = &absoluto(modelo).map_err(|e| Falha::Outra(format!("modelo: {e}")))?;
+        let modelo = absoluto(modelo).map_err(|e| Falha::Outra(format!("modelo: {e}")))?;
+        let modelo_c = crate::audio::caminho_c(&modelo)
+            .map_err(|e| Falha::Outra(format!("caminho do modelo: {e}")))?;
         let mut cmd = Command::new(&binario);
+        identidade
+            .configurar(&mut cmd)
+            .map_err(|e| Falha::Outra(format!("arquivos TLS: {e}")))?;
         cmd.arg("-m")
-            .arg(modelo)
-            .args(["--host", "127.0.0.1", "--port", &porta.to_string()])
+            .arg(modelo_c)
+            .args(["--host", "127.0.0.1", "--port", "0"])
             .args([
                 "-c",
                 &self.ajustes.contexto.to_string(),
@@ -326,12 +331,19 @@ impl ServidorLlama {
                 "--reasoning-budget",
                 "0",
                 "--no-slots",
+                "--threads-http",
+                "2",
+                "--no-webui",
+                "--no-agent",
+                "--no-ui-mcp-proxy",
+                "--log-colors",
+                "off",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         if let Some(t) = self.ajustes.threads {
-            cmd.args(["-t", &t.to_string()]);
+            cmd.args(["-t", &t.to_string(), "-tb", &t.to_string()]);
         }
         if let Some(pasta) = binario.parent() {
             cmd.current_dir(pasta); // DLLs ao lado do .exe
@@ -342,47 +354,95 @@ impl ServidorLlama {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let filho = cmd
+        let mut filho = cmd
             .spawn()
             .map_err(|e| Falha::Outra(format!("não iniciou: {e}")))?;
+        #[cfg(windows)]
+        let job = janela::Job::prender(&filho).map_err(|e| {
+            encerrar_processo(&mut filho);
+            Falha::Outra(format!(
+                "não foi possível proteger o processo do llama-server: {e}"
+            ))
+        })?;
+        let portas = filho
+            .stderr
+            .take()
+            .ok_or_else(|| std::io::Error::other("sem pipe de inicialização"))
+            .and_then(escutar_porta)
+            .map_err(|e| {
+                encerrar_processo(&mut filho);
+                Falha::Outra(format!("não li a porta do servidor: {e}"))
+            })?;
         {
-            let mut i = self.interno.lock().unwrap();
+            let mut i = self.interno();
+            if i.parada_pedida {
+                encerrar_processo(&mut filho);
+                return Err(Falha::Outra("subida interrompida".into()));
+            }
             #[cfg(windows)]
             {
-                i.job = janela::Job::prender(&filho);
+                i.job = Some(job);
             }
             i.processo = Some(filho);
-            i.porta = porta;
         }
-
-        let saude = format!("http://127.0.0.1:{porta}/health");
-        let agente = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(2))
-            .try_proxy_from_env(false)
-            .build();
+        let mut porta = None;
         let prazo = Instant::now() + self.ajustes.prazo_de_subida;
         while Instant::now() < prazo {
             {
-                let mut i = self.interno.lock().unwrap();
-                let vivo = i
+                let mut i = self.interno();
+                let filho = i
                     .processo
                     .as_mut()
-                    .map(|p| matches!(p.try_wait(), Ok(None)))
-                    .unwrap_or(false);
-                if !vivo {
-                    return Err(Falha::Outra(
-                        "o servidor encerrou ao carregar o modelo".into(),
-                    ));
+                    .ok_or_else(|| Falha::Outra("subida interrompida".into()))?;
+                if let Some(status) = filho.try_wait().map_err(|e| Falha::Outra(e.to_string()))? {
+                    #[cfg(windows)]
+                    if status.code().map(|n| n as u32) == Some(0xc0000135) {
+                        return Err(Falha::Outra("DLL do llama-server ausente. Reinstale o aplicativo com as bibliotecas de CPU e do Visual C++.".into()));
+                    }
+                    return Err(Falha::Outra(format!(
+                        "o servidor encerrou ao carregar o modelo ({status})"
+                    )));
                 }
             }
-            if matches!(agente.get(&saude).call(), Ok(r) if r.status() == 200) {
-                // Primeira chamada deixa as instruções em cache: os ditados só pagam o texto novo.
-                let nome = nome_do_modelo(modelo);
-                let _ =
-                    LimpadorLlama::novo(porta, &nome, &self.instrucoes).limpar(&PedidoLimpeza {
-                        transcricao: "teste de aquecimento do modelo".into(),
-                        ..Default::default()
-                    });
+            if porta.is_none() {
+                porta = portas.try_recv().ok();
+            }
+            let restante = prazo.saturating_duration_since(Instant::now());
+            let Some(porta) = porta else {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            };
+            if !restante.is_zero()
+                && identidade
+                    .canal
+                    .pronto(porta, restante.min(Duration::from_secs(2)))
+            {
+                let restante = prazo.saturating_duration_since(Instant::now());
+                if restante.is_zero() {
+                    break;
+                }
+                if !identidade
+                    .canal
+                    .exige_chave(porta, restante.min(Duration::from_secs(2)))
+                {
+                    return Err(Falha::Outra("o servidor não exigiu autenticação".into()));
+                }
+                let restante = prazo.saturating_duration_since(Instant::now());
+                if restante.is_zero() {
+                    break;
+                }
+                // O carregamento termina quando o filho aceita a credencial. A geração
+                // pertence ao pedido do usuário, que tem seu próprio prazo.
+                identidade
+                    .canal
+                    .validar_chave(porta, restante.min(Duration::from_secs(2)))
+                    .map_err(|e| Falha::Outra(format!("autenticação do modelo: {e}")))?;
+                let mut i = self.interno();
+                if i.processo.is_none() {
+                    return Err(Falha::Outra("subida interrompida".into()));
+                }
+                i.porta = porta;
+                i.canal = Some(identidade.canal);
                 return Ok(porta);
             }
             std::thread::sleep(Duration::from_millis(250));
@@ -390,9 +450,31 @@ impl ServidorLlama {
         Err(Falha::Outra("o modelo demorou demais para carregar".into()))
     }
 
+    /// Limpeza ou resumo no filho autenticado, com proteção contra ociosidade durante o pedido.
+    pub fn completar(
+        self: &Arc<Self>,
+        modelo: &Path,
+        corpo: &serde_json::Value,
+        prazo: Duration,
+    ) -> Result<serde_json::Value, Erro> {
+        self.entrar();
+        let resultado = self.garantir(modelo).and_then(|porta| {
+            let i = self.interno();
+            if i.porta != porta || i.modelo.as_deref() != Some(modelo) {
+                return Err(erro("servidor substituído"));
+            }
+            let canal = i.canal.clone().ok_or_else(|| erro("servidor desligado"))?;
+            drop(i);
+            canal.completar(porta, corpo, prazo)
+        });
+        self.sair();
+        resultado
+    }
+
     /// Para o servidor e devolve a memória.
     pub fn parar(&self) {
-        let mut i = self.interno.lock().unwrap();
+        let mut i = self.interno();
+        i.parada_pedida = i.subindo;
         Self::encerrar(&mut i);
         if !i.subindo {
             self.mudar(&mut i, Estado::Desligado);
@@ -400,6 +482,8 @@ impl ServidorLlama {
     }
 
     fn encerrar(i: &mut Interno) {
+        i.canal = None;
+        i.porta = 0;
         if let Some(mut p) = i.processo.take() {
             encerrar_processo(&mut p);
         }
@@ -416,27 +500,26 @@ impl ServidorLlama {
         std::thread::spawn(move || loop {
             std::thread::sleep(passo);
             let Some(s) = fraco.upgrade() else { return };
-            let ocioso = {
-                let i = s.interno.lock().unwrap();
-                i.processo.is_some()
-                    && !i.subindo
-                    && i.em_uso == 0
-                    && i.ultimo_uso.elapsed() >= s.ajustes.ocioso
-            };
-            if ocioso {
-                s.parar();
+            let mut i = s.interno();
+            if i.processo.is_some()
+                && !i.subindo
+                && i.em_uso == 0
+                && i.ultimo_uso.elapsed() >= s.ajustes.ocioso
+            {
+                Self::encerrar(&mut i);
+                s.mudar(&mut i, Estado::Desligado);
             }
         });
     }
 
     fn entrar(&self) {
-        let mut i = self.interno.lock().unwrap();
+        let mut i = self.interno();
         i.em_uso += 1;
         i.ultimo_uso = Instant::now();
     }
 
     fn sair(&self) {
-        let mut i = self.interno.lock().unwrap();
+        let mut i = self.interno();
         i.em_uso = i.em_uso.saturating_sub(1);
         i.ultimo_uso = Instant::now();
     }
@@ -444,9 +527,11 @@ impl ServidorLlama {
 
 impl Drop for ServidorLlama {
     fn drop(&mut self) {
-        if let Ok(mut i) = self.interno.lock() {
-            Self::encerrar(&mut i);
-        }
+        let i = self
+            .interno
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::encerrar(i);
     }
 }
 
@@ -502,12 +587,6 @@ fn absoluto(p: &Path) -> std::io::Result<PathBuf> {
     }
 }
 
-/// Porta livre em 127.0.0.1 (o sistema escolhe).
-pub fn porta_livre() -> std::io::Result<u16> {
-    let l = std::net::TcpListener::bind(("127.0.0.1", 0))?;
-    Ok(l.local_addr()?.port())
-}
-
 fn nome_do_modelo(modelo: &Path) -> String {
     modelo
         .file_name()
@@ -539,12 +618,11 @@ impl Limpador for LimpadorDoServidor {
     }
 
     fn limpar(&self, p: &PedidoLimpeza) -> Result<String, Erro> {
-        self.servidor.entrar();
-        let r = self.servidor.garantir(&self.modelo).and_then(|porta| {
-            LimpadorLlama::novo(porta, &self.nome, &self.servidor.instrucoes).limpar(p)
-        });
-        self.servidor.sair();
-        r
+        let corpo = LimpadorLlama::corpo(&self.servidor.instrucoes, p);
+        let json = self
+            .servidor
+            .completar(&self.modelo, &corpo, Duration::from_secs(120))?;
+        LimpadorLlama::texto(&json)
     }
 }
 
@@ -560,11 +638,11 @@ mod janela {
     unsafe impl Send for Job {}
 
     impl Job {
-        pub fn prender(filho: &std::process::Child) -> Option<Job> {
+        pub fn prender(filho: &std::process::Child) -> std::io::Result<Job> {
             unsafe {
                 let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
                 if job.is_null() {
-                    return None;
+                    return Err(std::io::Error::last_os_error());
                 }
                 let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
                 info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -576,10 +654,11 @@ mod janela {
                 ) != 0
                     && AssignProcessToJobObject(job, filho.as_raw_handle() as HANDLE) != 0;
                 if ok {
-                    Some(Job(job))
+                    Ok(Job(job))
                 } else {
+                    let erro = std::io::Error::last_os_error();
                     CloseHandle(job);
-                    None
+                    Err(erro)
                 }
             }
         }
@@ -650,21 +729,26 @@ mod testes {
 
     #[test]
     fn corpo_do_pedido() {
-        let l = LimpadorLlama::novo(1, "m", "inst");
-        let c = l.corpo(&PedidoLimpeza {
-            transcricao: "um dois três".into(),
-            ..Default::default()
-        });
+        let c = LimpadorLlama::corpo(
+            "inst",
+            &PedidoLimpeza {
+                transcricao: "um dois três".into(),
+                ..Default::default()
+            },
+        );
         assert_eq!(c["max_tokens"], 108);
         assert_eq!(c["temperature"], 0);
         assert_eq!(c["cache_prompt"], true);
         assert_eq!(c["messages"][0]["content"], "inst");
         let longo = "palavra ".repeat(2000);
         assert_eq!(
-            l.corpo(&PedidoLimpeza {
-                transcricao: longo,
-                ..Default::default()
-            })["max_tokens"],
+            LimpadorLlama::corpo(
+                "inst",
+                &PedidoLimpeza {
+                    transcricao: longo,
+                    ..Default::default()
+                }
+            )["max_tokens"],
             4096
         );
     }
@@ -683,10 +767,5 @@ mod testes {
         let s = ServidorLlama::novo(bin, "x", Ajustes::default());
         assert!(s.garantir(Path::new("/nao/existe.gguf")).is_err());
         assert!(matches!(s.estado(), Estado::SemModelo(_)));
-    }
-
-    #[test]
-    fn porta_livre_responde() {
-        assert!(porta_livre().unwrap() > 0);
     }
 }

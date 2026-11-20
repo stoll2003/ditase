@@ -5,6 +5,7 @@
 //! - [`llama::ServidorLlama`] e [`llama::LimpadorLlama`]: `Limpador` por llama-server local.
 //! - [`catalogo`]: modelos e binários com URL fixada em revisão, tamanho e SHA-256.
 pub mod audio;
+mod canal_llama;
 pub mod catalogo;
 pub mod fala;
 pub mod falantes;

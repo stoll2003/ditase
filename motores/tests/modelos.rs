@@ -57,13 +57,32 @@ fn parakeet_transcreve_pt_br() {
     assert_eq!(parakeet().nome(), "parakeet-tdt-0.6b-v3");
     // Trecho curto (abaixo de 1,1 s) e silêncio não quebram.
     assert!(parakeet().transcrever(&amostras[..8000]).is_ok());
+    assert!(parakeet().transcrever(&[0.0; 100]).unwrap().is_empty());
+}
+
+/// Somente WAVs sintéticos versionados. O catálogo valida downloads por SHA-256.
+#[test]
+#[ignore = "baixa 671 MB na primeira execução; executar no job de qualidade"]
+fn wer_do_corpus_pt_br() {
+    catalogo::baixar_conjunto(&PARAKEET, &motores::pasta_de_teste(), &mut |_, _, _| {})
+        .expect("preparar Parakeet para o teste de WER");
+    let mut erros = 0;
+    let mut palavras = 0;
+    for (prefixo, quantidade) in [("luciana", 12), ("luciana-rapida", 6)] {
+        for i in 1..=quantidade {
+            let wav = corpus(&format!("{prefixo}-{i:02}.wav"));
+            let referencia = std::fs::read_to_string(wav.with_extension("txt")).unwrap();
+            let texto = parakeet()
+                .transcrever(&audio::ler_wav(&wav).unwrap())
+                .unwrap();
+            let (e, n) = erros_de_palavras(&referencia, &texto);
+            erros += e;
+            palavras += n;
+        }
+    }
     assert!(
-        parakeet()
-            .transcrever(&[0.0; 100])
-            .unwrap()
-            .split_whitespace()
-            .count()
-            <= 1
+        palavras > 200 && erros * 100 <= palavras * 4,
+        "WER acima de 4%: {erros} erros em {palavras} palavras"
     );
 }
 

@@ -30,6 +30,11 @@ struct Token {
 impl Parakeet {
     /// `pasta` com os arquivos de [`PARAKEET`]. `threads` 0 escolhe pela máquina (até 4).
     pub fn carregar(pasta: &Path, threads: usize) -> Result<Self, Erro> {
+        Self::carregar_com_busca(pasta, threads, false)
+    }
+
+    /// Comparação das buscas no corpus, usando os mesmos pesos e amostras.
+    pub fn carregar_com_busca(pasta: &Path, threads: usize, beam: bool) -> Result<Self, Erro> {
         for a in PARAKEET.arquivos {
             if !pasta.join(a.arquivo).is_file() {
                 return Err(erro(format!(
@@ -60,7 +65,14 @@ impl Parakeet {
                 provider: Some("cpu".into()),
                 ..Default::default()
             },
-            decoding_method: Some("greedy_search".into()),
+            decoding_method: Some(
+                if beam {
+                    "modified_beam_search"
+                } else {
+                    "greedy_search"
+                }
+                .into(),
+            ),
             ..Default::default()
         };
         let reconhecedor = OfflineRecognizer::create(&config)
@@ -134,10 +146,14 @@ impl Transcritor for Parakeet {
     }
 
     fn transcrever(&self, amostras: &[f32]) -> Result<String, Erro> {
-        let mut entrada = amostras.to_vec();
-        if entrada.len() < MINIMO {
-            entrada.resize(MINIMO, 0.0);
+        if amostras.iter().all(|&a| a == 0.0) {
+            return Ok(String::new());
         }
+        if amostras.len() >= MINIMO {
+            return Ok(self.decodificar(amostras)?.0);
+        }
+        let mut entrada = vec![0.0; MINIMO];
+        entrada[..amostras.len()].copy_from_slice(amostras);
         Ok(self.decodificar(&entrada)?.0)
     }
 }
@@ -152,15 +168,19 @@ impl ReconhecedorDeFala for Parakeet {
         if amostras.is_empty() || !tem_som(amostras) {
             return Ok(Vec::new());
         }
-        let mut entrada = amostras.to_vec();
         let silencio = if fim_da_fala.is_some() {
             SILENCIO_DA_CAUDA
         } else {
             0
         };
-        let completar = silencio.max(MINIMO.saturating_sub(entrada.len()));
-        entrada.resize(entrada.len() + completar, 0.0);
-        let (texto, tokens) = self.decodificar(&entrada)?;
+        let completar = silencio.max(MINIMO.saturating_sub(amostras.len()));
+        let (texto, tokens) = if completar == 0 {
+            self.decodificar(amostras)?
+        } else {
+            let mut entrada = vec![0.0; amostras.len() + completar];
+            entrada[..amostras.len()].copy_from_slice(amostras);
+            self.decodificar(&entrada)?
+        };
         let duracao =
             (amostras.len() as f64 / TAXA as f64).min(fim_da_fala.unwrap_or(f64::INFINITY));
         Ok(montar(texto, &tokens, inicio, duracao))
