@@ -222,9 +222,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if cargo test --locked --release -p motores --test modelos -- --list --ignored | grep -F 'wer_do_corpus_pt_br: test'; then
-            cargo test --locked --release -p motores --test modelos wer_do_corpus_pt_br -- --ignored --nocapture
+          exe="$(cargo test --locked --release -p motores --test modelos --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "modelos") | .executable' \
+            | tail -n 1)"
+          if [ -z "$exe" ] || [ ! -f "$exe" ]; then
+            echo "Executável de teste modelos não encontrado." >&2
+            exit 1
+          fi
+          # No Windows, System32\onnxruntime.dll (1.17.1) vence o PATH; colocar as DLLs
+          # verificadas ao lado do .exe garante a versão do sherpa-onnx.
+          dir_exe="$(dirname "$exe")"
+          cp -f \
+            "$SHERPA_ONNX_LIB_DIR/sherpa-onnx-c-api.dll" \
+            "$SHERPA_ONNX_LIB_DIR/onnxruntime.dll" \
+            "$SHERPA_ONNX_LIB_DIR/onnxruntime_providers_shared.dll" \
+            "$dir_exe/"
+          if "$exe" --list --ignored | grep -F 'wer_do_corpus_pt_br: test'; then
+            "$exe" wer_do_corpus_pt_br --ignored --nocapture
           else
             echo "::notice::Teste wer_do_corpus_pt_br ainda ausente nesta branch; validando Parakeet com parakeet_transcreve_pt_br."
-            DITASE_TESTES_MODELOS=1 cargo test --locked --release -p motores --test modelos parakeet_transcreve_pt_br -- --nocapture
+            DITASE_TESTES_MODELOS=1 "$exe" parakeet_transcreve_pt_br --nocapture
           fi
