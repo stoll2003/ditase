@@ -2,14 +2,51 @@
 //! ocupante não recebe o cabeçalho de autorização nem o corpo de uma requisição.
 use crate::{erro, Erro};
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{ChildStderr, Command};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 pub(crate) struct Identidade {
-    chave_tls: tempfile::NamedTempFile,
-    certificado: tempfile::NamedTempFile,
+    chave_tls: ArquivoEfemero,
+    certificado: ArquivoEfemero,
     pub canal: Canal,
+}
+
+/// Arquivo criado com nome aleatório na pasta privada do app e apagado no `Drop`. O handle
+/// fecha logo depois da escrita: no Windows, o filho abre o arquivo sem disputar modo de
+/// compartilhamento com um handle nosso ainda aberto.
+struct ArquivoEfemero(PathBuf);
+
+impl ArquivoEfemero {
+    fn criar(pasta: &Path, sufixo: &str, conteudo: &[u8]) -> std::io::Result<Self> {
+        let mut opcoes = std::fs::OpenOptions::new();
+        opcoes.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opcoes.mode(0o600);
+        }
+        let mut bytes = [0u8; 12];
+        getrandom::fill(&mut bytes).map_err(|_| std::io::Error::other("sem aleatoriedade"))?;
+        let nome: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        let caminho = pasta.join(format!(".llama-{nome}.{sufixo}"));
+        let mut arquivo = opcoes.open(&caminho)?;
+        let efemero = Self(caminho);
+        arquivo.write_all(conteudo)?;
+        arquivo.sync_all()?;
+        Ok(efemero)
+    }
+
+    fn caminho(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ArquivoEfemero {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 #[derive(Clone)]
@@ -19,12 +56,14 @@ pub(crate) struct Canal {
 }
 
 impl Identidade {
-    pub fn nova() -> Result<Self, Erro> {
+    /// `pasta`: pasta de trabalho privada do app, onde a chave e o certificado ficam só
+    /// durante a partida do filho.
+    pub fn nova(pasta: &Path) -> Result<Self, Erro> {
         let par = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])?;
-        let mut certificado = tempfile::NamedTempFile::new()?;
-        certificado.write_all(par.cert.pem().as_bytes())?;
-        let mut chave_tls = tempfile::NamedTempFile::new()?;
-        chave_tls.write_all(par.key_pair.serialize_pem().as_bytes())?;
+        std::fs::create_dir_all(pasta)?;
+        let certificado = ArquivoEfemero::criar(pasta, "crt", par.cert.pem().as_bytes())?;
+        let chave_tls =
+            ArquivoEfemero::criar(pasta, "key", par.key_pair.serialize_pem().as_bytes())?;
         let mut raizes = rustls::RootCertStore::empty();
         raizes.add(par.cert.der().clone())?;
         let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
@@ -55,9 +94,9 @@ impl Identidade {
             .env_remove("LLAMA_ARG_ENDPOINT_PROPS")
             .env("LLAMA_API_KEY", &self.canal.segredo)
             .arg("--ssl-key-file")
-            .arg(crate::audio::caminho_c(self.chave_tls.path())?)
+            .arg(crate::audio::caminho_c(self.chave_tls.caminho())?)
             .arg("--ssl-cert-file")
-            .arg(crate::audio::caminho_c(self.certificado.path())?);
+            .arg(crate::audio::caminho_c(self.certificado.caminho())?);
         Ok(())
     }
 }
@@ -151,8 +190,8 @@ mod testes {
         resposta: impl Into<String>,
     ) -> (u16, std::thread::JoinHandle<bool>) {
         let resposta = resposta.into();
-        let cert = CertificateDer::from_pem_file(id.certificado.path()).unwrap();
-        let chave = PrivateKeyDer::from_pem_file(id.chave_tls.path()).unwrap();
+        let cert = CertificateDer::from_pem_file(id.certificado.caminho()).unwrap();
+        let chave = PrivateKeyDer::from_pem_file(id.chave_tls.caminho()).unwrap();
         let config = rustls::ServerConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
@@ -190,8 +229,9 @@ mod testes {
 
     #[test]
     fn so_envia_autorizacao_para_o_certificado_da_partida() {
-        let cert = Identidade::nova().unwrap();
-        let outra = Identidade::nova().unwrap();
+        let pasta = tempfile::tempdir().unwrap();
+        let cert = Identidade::nova(pasta.path()).unwrap();
+        let outra = Identidade::nova(pasta.path()).unwrap();
         let resposta = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
         let (porta, servidor_atual) = servidor(&cert, resposta);
         let prazo = Duration::from_secs(3);
@@ -210,7 +250,8 @@ mod testes {
 
     #[test]
     fn recusa_redirecionamento_de_saude() {
-        let cert = Identidade::nova().unwrap();
+        let pasta = tempfile::tempdir().unwrap();
+        let cert = Identidade::nova(pasta.path()).unwrap();
         let destino = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         destino.set_nonblocking(true).unwrap();
         let redir = format!("HTTP/1.1 302 Found\r\nLocation: http://{}/\r\nContent-Length: 0\r\nConnection: close\r\n\r\n", destino.local_addr().unwrap());
@@ -221,5 +262,33 @@ mod testes {
             destino.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    #[test]
+    fn chave_fica_na_pasta_recebida_fechada_e_some_no_fim() {
+        let pasta = tempfile::tempdir().unwrap();
+        let sub = pasta.path().join("Configurações do usuário");
+        let id = Identidade::nova(&sub).unwrap();
+        let (chave, cert) = (
+            id.chave_tls.caminho().to_path_buf(),
+            id.certificado.caminho().to_path_buf(),
+        );
+        assert_eq!(chave.parent(), Some(sub.as_path()));
+        assert_eq!(cert.parent(), Some(sub.as_path()));
+        // Outro processo consegue abrir e até renomear: não há handle nosso aberto.
+        assert!(std::fs::read_to_string(&chave)
+            .unwrap()
+            .contains("PRIVATE KEY"));
+        let movido = sub.join("movido");
+        std::fs::rename(&chave, &movido).unwrap();
+        std::fs::rename(&movido, &chave).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let modo = std::fs::metadata(&chave).unwrap().permissions().mode();
+            assert_eq!(modo & 0o077, 0, "chave legível por outros usuários");
+        }
+        drop(id);
+        assert!(!chave.exists() && !cert.exists());
     }
 }

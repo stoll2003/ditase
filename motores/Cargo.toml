@@ -11,7 +11,6 @@ serde_json = "1"
 rcgen = "0.13"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 getrandom = "0.3"
-tempfile = "3"
 sha2 = "0.10"
 # HTTP só para 127.0.0.1 (llama-server) e para o download dos modelos (HTTPS).
 # TLS: rustls no Mac/Linux; no Windows, SChannel do sistema (native-tls), que usa o repositório
@@ -32,6 +31,9 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Securit
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [[bin]]
 name = "medir"

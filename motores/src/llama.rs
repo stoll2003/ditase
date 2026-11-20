@@ -108,6 +108,9 @@ pub struct Ajustes {
     pub contexto: u32,
     /// Threads da CPU; `None` deixa o llama.cpp decidir.
     pub threads: Option<u32>,
+    /// Pasta privada onde a chave e o certificado TLS da partida existem só enquanto o filho
+    /// sobe. `None` usa a pasta do modelo, que já fica nos dados privados do app.
+    pub pasta_de_trabalho: Option<PathBuf>,
 }
 
 impl Default for Ajustes {
@@ -117,6 +120,7 @@ impl Default for Ajustes {
             prazo_de_subida: Duration::from_secs(90),
             contexto: 4096,
             threads: threads_padrao(),
+            pasta_de_trabalho: None,
         }
     }
 }
@@ -306,11 +310,21 @@ impl ServidorLlama {
             let mut i = self.interno();
             self.mudar(&mut i, Estado::Iniciando);
         }
-        let identidade =
-            Identidade::nova().map_err(|e| Falha::Outra(format!("identidade local: {e}")))?;
         // Caminho absoluto: com current_dir, um caminho relativo seria resolvido na pasta nova.
         let binario = absoluto(&self.binario).map_err(|e| Falha::Outra(format!("binário: {e}")))?;
         let modelo = absoluto(modelo).map_err(|e| Falha::Outra(format!("modelo: {e}")))?;
+        let pasta = match &self.ajustes.pasta_de_trabalho {
+            Some(p) => p.clone(),
+            None => modelo
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| Falha::Outra("modelo sem pasta".into()))?,
+        };
+        let identidade = Identidade::nova(&pasta).map_err(|e| {
+            Falha::Outra(format!(
+                "identidade local: {e}. Confira a permissão de escrita da pasta dos modelos."
+            ))
+        })?;
         let modelo_c = crate::audio::caminho_c(&modelo)
             .map_err(|e| Falha::Outra(format!("caminho do modelo: {e}")))?;
         let mut cmd = Command::new(&binario);

@@ -3,6 +3,10 @@
 //! Uso:
 //!   medir --corpus motores/corpus [--modelos DIR] [--baixar] [--threads N]
 //!         [--falantes] [--limiar N] [--llama BIN --gguf ARQ --llama-threads N --contexto N] [--json SAIDA.json]
+//!   medir --diagnostico-llama --llama BIN --gguf ARQ [--sha256 HEX]
+//!
+//! `--diagnostico-llama` sobe o `llama-server` do pacote com um GGUF público minúsculo e faz uma
+//! completação pelo canal TLS autenticado de produção. Termina com código 0 só se tudo passar.
 //!
 //! Corpus: `<nome>.wav` (qualquer taxa, mono ou estéreo) com `<nome>.txt` ao lado (referência).
 //! Falantes: `falantes/<nome>.wav` com `falantes/<nome>.json` = [{"voz","inicio","fim"}, ...].
@@ -37,6 +41,8 @@ struct Args {
     gguf: Option<PathBuf>,
     json: Option<PathBuf>,
     fala_json: Option<PathBuf>,
+    diagnostico: bool,
+    sha256: Option<String>,
 }
 
 fn args() -> Args {
@@ -53,6 +59,8 @@ fn args() -> Args {
         gguf: None,
         json: None,
         fala_json: None,
+        diagnostico: false,
+        sha256: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(x) = it.next() {
@@ -71,6 +79,8 @@ fn args() -> Args {
             "--beam" => a.beam = true,
             "--baixar" => a.baixar = true,
             "--falantes" => a.falantes = true,
+            "--diagnostico-llama" => a.diagnostico = true,
+            "--sha256" => a.sha256 = Some(v().to_ascii_lowercase()),
             outro => panic!("opção desconhecida: {outro}"),
         }
     }
@@ -142,6 +152,20 @@ fn permutar(v: &mut Vec<usize>, k: usize, f: &mut dyn FnMut(&[usize])) {
 
 fn main() {
     let a = args();
+    if a.diagnostico {
+        let (Some(bin), Some(gguf)) = (&a.llama, &a.gguf) else {
+            eprintln!("--diagnostico-llama precisa de --llama BIN e --gguf ARQ");
+            std::process::exit(2);
+        };
+        match diagnosticar_llama(bin, gguf, a.sha256.as_deref()) {
+            Ok(()) => println!("DIAGNOSTICO LLAMA OK"),
+            Err(e) => {
+                println!("DIAGNOSTICO LLAMA FALHOU: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let mut rel = serde_json::Map::new();
     rel.insert(
         "plataforma".into(),
@@ -306,6 +330,101 @@ fn main() {
 
     medir_limpeza(&a, &frases, &mut rel);
     salvar(&a, rel);
+}
+
+/// Prova, no binário que vai no instalador, que o desenho TLS + chave funciona: o servidor
+/// conhece as opções, sobe com a identidade da partida numa pasta com acento, exige a chave,
+/// completa um pedido e não deixa a chave privada no disco.
+fn diagnosticar_llama(bin: &Path, gguf: &Path, sha256: Option<&str>) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    let etapa = |nome: &str| println!("ok  {nome}");
+    if let Some(esperado) = sha256 {
+        let bytes = std::fs::read(gguf).map_err(|e| format!("ler GGUF: {e}"))?;
+        let obtido: String = Sha256::digest(&bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        if obtido != esperado {
+            return Err(format!("SHA-256 do GGUF {obtido}, esperado {esperado}"));
+        }
+        etapa("SHA-256 do GGUF");
+    }
+    let mut ajuda = std::process::Command::new(bin);
+    ajuda.arg("--help");
+    if let Some(pasta) = bin.parent().filter(|p| !p.as_os_str().is_empty()) {
+        ajuda.current_dir(pasta);
+    }
+    let saida = ajuda
+        .output()
+        .map_err(|e| format!("executar {} --help: {e}", bin.display()))?;
+    let texto = format!(
+        "{}{}",
+        String::from_utf8_lossy(&saida.stdout),
+        String::from_utf8_lossy(&saida.stderr)
+    );
+    for opcao in ["--ssl-key-file", "--ssl-cert-file", "--api-key"] {
+        if !texto.contains(opcao) {
+            return Err(format!(
+                "--help sem {opcao} (status {}): binário sem suporte",
+                saida.status
+            ));
+        }
+    }
+    etapa("--help lista --ssl-key-file, --ssl-cert-file e --api-key");
+
+    let raiz = std::env::temp_dir().join(format!("ditase-diagnóstico-{}", std::process::id()));
+    let pasta = raiz.join("Configurações çã");
+    std::fs::create_dir_all(&pasta).map_err(|e| format!("pasta de trabalho: {e}"))?;
+    let resultado = (|| {
+        let ajustes = Ajustes {
+            contexto: 256,
+            prazo_de_subida: std::time::Duration::from_secs(60),
+            threads: Some(2),
+            pasta_de_trabalho: Some(pasta.clone()),
+            ..Ajustes::default()
+        };
+        let servidor = ServidorLlama::novo(bin, PROMPT_LIMPEZA, ajustes);
+        let t = Instant::now();
+        let porta = servidor
+            .garantir(gguf)
+            .map_err(|e| format!("subida: {e}"))?;
+        etapa(&format!(
+            "subida TLS em 127.0.0.1:{porta}, 401 sem chave, 200 com chave ({:.2} s)",
+            t.elapsed().as_secs_f64()
+        ));
+        let restos = std::fs::read_dir(&pasta)
+            .map_err(|e| format!("listar pasta: {e}"))?
+            .count();
+        if restos != 0 {
+            return Err(format!(
+                "{restos} arquivo(s) TLS ficaram na pasta de trabalho"
+            ));
+        }
+        etapa("chave e certificado apagados depois da subida");
+        let corpo = serde_json::json!({
+            "messages": [{"role": "user", "content": "Once upon a time"}],
+            "max_tokens": 16,
+            "temperature": 0,
+        });
+        let t = Instant::now();
+        let json = servidor
+            .completar(gguf, &corpo, std::time::Duration::from_secs(60))
+            .map_err(|e| format!("completação: {e}"))?;
+        let tokens = json["usage"]["completion_tokens"].as_u64().unwrap_or(0);
+        if json["choices"][0]["message"].is_null() || tokens == 0 {
+            return Err("completação sem choices[0].message ou sem tokens".into());
+        }
+        etapa(&format!(
+            "completação pelo canal autenticado: {tokens} token(s) em {:.2} s",
+            t.elapsed().as_secs_f64()
+        ));
+        let pid = servidor.pid();
+        servidor.parar();
+        etapa(&format!("servidor parado (pid {pid:?})"));
+        Ok(())
+    })();
+    let _ = std::fs::remove_dir_all(&raiz);
+    resultado
 }
 
 fn medir_limpeza(
