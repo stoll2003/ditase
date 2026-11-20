@@ -78,7 +78,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: ui/package-lock.json
+          cache-dependency-path: |
+            ui/package-lock.json
+            scripts/windows/tauri-cli/package-lock.json
 
       - name: Build da UI
         if: steps.modo.outputs.tauri == 'true'
@@ -87,9 +89,9 @@ jobs:
           npm ci
           npm run build
 
-      - name: cargo test (workspace)
+      - name: Instalar CLI do Tauri pelo lockfile
         if: steps.modo.outputs.tauri == 'true'
-        run: cargo test --locked --workspace --all-targets
+        run: npm ci --prefix scripts/windows/tauri-cli --ignore-scripts --no-audit --no-fund
 
       - name: Build Tauri (NSIS por usuário, sem assinatura do atualizador)
         if: steps.modo.outputs.tauri == 'true'
@@ -99,7 +101,16 @@ jobs:
           VERSAO: ${{ steps.modo.outputs.versao }}
         run: |
           config=$(printf '{"version":"%s","bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' "$VERSAO")
-          npx --yes @tauri-apps/cli@2.12.6 build --bundles nsis --ci --config src-tauri/tauri.distribuicao.conf.json --config "$config" -- --locked
+          node ../scripts/windows/tauri-cli/node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --ci --config src-tauri/tauri.distribuicao.conf.json --config "$config" -- --locked
+
+      - name: Conferir a versão publicada pelo instalador
+        if: steps.modo.outputs.tauri == 'true'
+        shell: pwsh
+        env:
+          VERSAO: ${{ steps.modo.outputs.versao }}
+        run: |
+          $exe = Get-ChildItem target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
+          .\scripts\windows\testar-install.ps1 -Modo instalacao -Instalador $exe.FullName -VersaoEsperada $env:VERSAO
 
       - name: Montar artefato
         if: steps.modo.outputs.tauri == 'true'

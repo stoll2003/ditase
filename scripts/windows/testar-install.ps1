@@ -60,14 +60,12 @@ $env:DITASE_NAO_ABRIR = '1'
 $env:TEMP = $pasta
 $env:TMP = $pasta
 $exeFixture = Join-Path $pasta 'Dita.se-windows-x64-setup.exe'
-$somas = Join-Path $pasta 'SHA256SUMS.txt'
 
 try {
     if ($Modo -eq 'sintaxe') {
         Set-Content -LiteralPath $exeFixture -Value 'arquivo de teste'
-        Set-Content -LiteralPath $somas -Value ("0" * 64 + "  Dita.se-windows-x64-setup.exe")
         try {
-            Invoke-Expression $fonte
+            & $script -Sha256 ("0" * 64)
         } catch {
             if ($_.Exception.Message -notlike '*Falha na conferência do SHA-256*') { throw }
             Write-Host "Recusou o hash incorreto: $($_.Exception.Message)"
@@ -83,7 +81,6 @@ try {
 
     Copy-Item -LiteralPath $Instalador -Destination $exeFixture
     $hash = (Get-FileHash -LiteralPath $exeFixture -Algorithm SHA256).Hash.ToLowerInvariant()
-    Set-Content -LiteralPath $somas -Value "$hash  Dita.se-windows-x64-setup.exe" -Encoding Ascii
 
     # /D= fica por último e sem aspas por exigência do NSIS. A reinstalação pelo
     # script, sem /D=, precisa conservar essa pasta registrada.
@@ -94,7 +91,7 @@ try {
     $exe = Conferir-Instalacao
     if ((Split-Path -Parent $exe) -ine $destino) { throw "NSIS ignorou a pasta de teste: $exe" }
 
-    Invoke-Expression $fonte
+    & $script -Sha256 $hash
     if ((Conferir-Instalacao) -ine $exe) { throw 'A reinstalação mudou o caminho do aplicativo.' }
     Write-Host 'Reinstalação manteve a pasta com acento e espaço.'
 } finally {
