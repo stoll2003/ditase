@@ -174,3 +174,57 @@ jobs:
       - name: Clippy Windows
         if: success() || failure()
         run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  wer:
+    name: Windows (WER Parakeet)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-x64-wer-v1
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vendor-cache
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows/preparar-vendor.ps1') }}
+
+      - name: Preparar sherpa-onnx verificado
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1 -SomenteSherpa
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: parakeet-cache
+        with:
+          path: ${{ runner.temp }}/ditase-modelos-cache
+          key: ditase-modelos-parakeet-${{ hashFiles('motores/src/catalogo.rs') }}
+
+      - name: Preparar Parakeet verificado por SHA-256
+        shell: powershell
+        run: .\scripts\windows\preparar-parakeet.ps1
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name != 'pull_request' && steps.parakeet-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ditase-modelos-cache
+          key: ${{ steps.parakeet-cache.outputs.cache-primary-key }}
+
+      - name: Regressão de WER (Parakeet PT-BR)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo test --locked --release -p motores --test modelos -- --list --ignored | grep -F 'wer_do_corpus_pt_br: test'; then
+            cargo test --locked --release -p motores --test modelos wer_do_corpus_pt_br -- --ignored --nocapture
+          else
+            echo "::notice::Teste wer_do_corpus_pt_br ainda ausente nesta branch; validando Parakeet com parakeet_transcreve_pt_br."
+            DITASE_TESTES_MODELOS=1 cargo test --locked --release -p motores --test modelos parakeet_transcreve_pt_br -- --nocapture
+          fi
