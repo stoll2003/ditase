@@ -638,7 +638,44 @@ fn orfao_atrasado_com_pendencia_curta_aberta_ou_resolvida_nao_perde_fala() {
     }
 }
 
-#[cfg(unix)]
+/// Link para pasta. No Windows usa junção (`mklink /J`), que não exige privilégio e é o
+/// ponto de reparse que um programa comum consegue criar.
+fn ligar_pasta(alvo: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(alvo, link).unwrap();
+    #[cfg(windows)]
+    {
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(alvo)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "mklink /J falhou");
+    }
+}
+
+/// Link simbólico para arquivo. No Windows exige privilégio ou modo de desenvolvedor;
+/// sem eles devolve `false` e o teste avisa que não rodou essa parte.
+fn ligar_arquivo(alvo: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    let r = std::os::unix::fs::symlink(alvo, link);
+    #[cfg(windows)]
+    let r = std::os::windows::fs::symlink_file(alvo, link);
+    match r {
+        Ok(()) => true,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::PermissionDenied
+                || e.raw_os_error() == Some(1314) =>
+        {
+            eprintln!("link simbólico de arquivo sem privilégio neste sistema: {e}");
+            false
+        }
+        Err(e) => panic!("{e}"),
+    }
+}
+
 #[test]
 fn limpeza_nao_segue_link_no_lugar_da_pasta_da_reuniao() {
     let amb = Ambiente::new();
@@ -648,7 +685,7 @@ fn limpeza_nao_segue_link_no_lugar_da_pasta_da_reuniao() {
     let alvo = externa.join("mac_0_0_0_1_x.f32");
     fs::write(&alvo, vec![0u8; 4]).unwrap();
     fs::create_dir_all(&amb.disco.raiz).unwrap();
-    std::os::unix::fs::symlink(&externa, amb.disco.raiz.join(&doc)).unwrap();
+    ligar_pasta(&externa, &amb.disco.raiz.join(&doc));
     assert!(amb
         .disco
         .apagar(&doc, &format!("{doc}/mac_0_0_0_1_x.f32"))
@@ -761,7 +798,6 @@ fn limpeza_de_abertura_ignora_caminho_invalido_no_banco() {
     assert!(amb.disco.raiz.exists());
 }
 
-#[cfg(unix)]
 #[test]
 fn adocao_ignora_link_simbolico_e_remove_wav_de_identificacao_esquecido() {
     let amb = Ambiente::new();
@@ -771,7 +807,7 @@ fn adocao_ignora_link_simbolico_e_remove_wav_de_identificacao_esquecido() {
     fs::write(&externo, vec![0u8; 8]).unwrap();
     let nome_link = format!("mac_0_0_0_2_{}.f32", disco_de_blocos::soma(&[0u8; 8]));
     let link = pasta.join(&nome_link);
-    std::os::unix::fs::symlink(&externo, &link).unwrap();
+    let tem_link = ligar_arquivo(&externo, &link);
     let wav = pasta.join(format!(
         "{}{}.wav",
         disco_de_blocos::PREFIXO_WAV,
@@ -781,7 +817,9 @@ fn adocao_ignora_link_simbolico_e_remove_wav_de_identificacao_esquecido() {
     let mut reaberto = amb.reabrir();
     let r = reaberto.preparar_abertura(&amb.disco);
     assert_eq!(r.adotados, 0);
-    assert!(r.invalidos.contains(&format!("{doc}/{nome_link}")));
+    if tem_link {
+        assert!(r.invalidos.contains(&format!("{doc}/{nome_link}")));
+    }
     assert!(!wav.exists());
     assert!(externo.exists());
 }
@@ -809,4 +847,48 @@ fn banco_e_pasta_de_audio_e_pcm_so_do_usuario() {
     assert_eq!(modo(&amb.banco), 0o600);
     assert_eq!(modo(&amb.disco.raiz), 0o700);
     assert_eq!(modo(&amb.disco.raiz.join(b.arquivo.unwrap())), 0o600);
+}
+
+/// Pasta do usuário com acento (por exemplo `C:\\Users\\Vinícius\\AppData`): o banco e o PCM
+/// precisam abrir, gravar, reabrir e ler pelo mesmo caminho.
+#[test]
+fn banco_e_audio_em_caminho_com_acento() {
+    let tmp = tempfile::tempdir().unwrap();
+    let raiz = tmp.path().join("Usuário Ção").join("Dita.se ñ");
+    let banco = raiz.join("lançamento.sqlite");
+    let armazem = ArmazemLancamento::new(&banco).unwrap();
+    let disco = DiscoDeBlocos::new(raiz.join("Áudio"));
+    let doc = novo_uuid();
+    armazem
+        .criar_documento(&doc, "reuniao", "Reunião", Some("mac"), "gravando")
+        .unwrap();
+    let b = disco
+        .gravar(
+            IdBloco {
+                documento: doc.clone(),
+                fonte: FonteDeAudio::Mac,
+                geracao: 0,
+                seq: 0,
+            },
+            0,
+            &[0.25, -0.5],
+        )
+        .unwrap();
+    assert!(armazem.registrar(&b).unwrap());
+    drop(armazem);
+    let reaberto = ArmazemLancamento::new(&banco).unwrap();
+    let blocos = reaberto.blocos(&doc).unwrap();
+    assert_eq!(blocos.len(), 1);
+    assert_eq!(disco.ler(&blocos[0]).unwrap(), vec![0.25, -0.5]);
+    let wav = raiz
+        .join("Áudio")
+        .join(&doc)
+        .join(format!("{}ç.wav", disco_de_blocos::PREFIXO_WAV));
+    disco.escrever_wav(&[&blocos[0]], &wav).unwrap();
+    assert_eq!(fs::metadata(&wav).unwrap().len(), 44 + 8);
+    fs::remove_file(&wav).unwrap();
+    disco
+        .apagar(&doc, blocos[0].arquivo.as_deref().unwrap())
+        .unwrap();
+    assert!(!disco.existe(&blocos[0]));
 }

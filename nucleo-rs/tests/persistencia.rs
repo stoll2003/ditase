@@ -4,11 +4,9 @@ use std::{
     fs,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
-    thread,
-    time::{Duration, Instant},
 };
 
 const TAXA_USIZE: usize = TAXA as usize;
@@ -867,84 +865,7 @@ fn edicoes_feitas_antes_da_recuperacao_continuam_depois() {
 
 // MARK: Teto de saída e estados
 
-#[test]
-fn saida_com_escrita_lenta_responde_em_dois_segundos() {
-    for custo in [1.2_f64, 3.0_f64] {
-        let ligada = Arc::new(AtomicBool::new(false));
-        let l2 = ligada.clone();
-        let amb = Ambiente::com_escrita(Some(Arc::new(move |dados, destino| {
-            if l2.load(Ordering::Acquire) {
-                thread::sleep(Duration::from_secs_f64(custo));
-            }
-            DiscoDeBlocos::escrita_duravel(dados, destino)
-        })));
-        let doc = amb.nova_reuniao("mac");
-        let mut coletor = ColetorDeReuniao::new(doc.clone(), amb.reabrir(), amb.disco.clone(), 0.);
-        coletor.abrir(FonteDeAudio::Mac, 0.).unwrap();
-        let pcm = pcm_sintetico(&roteiro_padrao(), 4.);
-        amb.capturar(
-            &mut coletor,
-            FonteDeAudio::Mac,
-            &pcm[..2 * TAXA_USIZE + 8000],
-            0.,
-            None,
-        );
-        let duraveis = amb.armazem.blocos(&doc).unwrap().len();
-        ligada.store(true, Ordering::Release);
-
-        let saida = SaidaComPrazo::default();
-        let inicio = Instant::now();
-        let resposta = Arc::new(Mutex::new(None::<Duration>));
-        let r2 = resposta.clone();
-        assert!(saida.iniciar(
-            Duration::from_secs(2),
-            move || {
-                let _ = coletor.encerrar(4.);
-            },
-            move || {
-                *r2.lock().unwrap() = Some(inicio.elapsed());
-            },
-        ));
-        assert!(!saida.iniciar(Duration::from_secs(2), || {}, || {}));
-        while resposta.lock().unwrap().is_none() {
-            thread::sleep(Duration::from_millis(10));
-        }
-        let tempo = resposta.lock().unwrap().unwrap();
-        assert!(
-            tempo < Duration::from_millis(2250),
-            "custo {custo}: {tempo:?}"
-        );
-        assert!(amb.armazem.blocos(&doc).unwrap()[..duraveis]
-            .iter()
-            .all(|b| amb.disco.existe(b)));
-        let registrados = amb.armazem.blocos(&doc).unwrap().len();
-        if custo < 2.0 {
-            assert!(registrados > duraveis, "custo {custo}");
-        } else {
-            assert_eq!(registrados, duraveis, "custo {custo}");
-        }
-        ligada.store(false, Ordering::Release);
-        thread::sleep(Duration::from_secs_f64(custo.min(1.5)));
-    }
-}
-
-#[test]
-fn saida_rapida_responde_ao_terminar() {
-    let saida = SaidaComPrazo::default();
-    let inicio = Instant::now();
-    let resposta = Arc::new(Mutex::new(None::<Duration>));
-    let r2 = resposta.clone();
-    assert!(saida.iniciar(
-        Duration::from_secs(2),
-        || thread::sleep(Duration::from_millis(20)),
-        move || *r2.lock().unwrap() = Some(inicio.elapsed()),
-    ));
-    while resposta.lock().unwrap().is_none() {
-        thread::sleep(Duration::from_millis(5));
-    }
-    assert!(resposta.lock().unwrap().unwrap() < Duration::from_millis(500));
-    assert!(!saida.em_curso());
-}
+// Os testes de tempo da SaidaComPrazo ficam em tests/saida_prazo.rs, num binário só deles.
 
 #[test]
 fn saida_durante_gravacao_pausa_e_passada_final_reabre_recuperavel() {

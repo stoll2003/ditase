@@ -113,6 +113,40 @@ fn sincronizar(p: &Path) -> io::Result<()> {
     let _ = p;
     Ok(())
 }
+/// Renomeação que só retorna depois de gravada em disco. No Unix, `rename` seguido da
+/// sincronização da pasta. No Windows não há como sincronizar a pasta, e `fs::rename`
+/// (MoveFileExW sem MOVEFILE_WRITE_THROUGH) pode voltar antes de a entrada nova chegar ao
+/// disco: uma queda de energia deixaria o banco apontando para um arquivo que ainda se chama
+/// `.tmp`, e a abertura apagaria esse temporário.
+#[cfg(not(windows))]
+fn renomear_duravel(de: &Path, para: &Path) -> io::Result<()> {
+    fs::rename(de, para)
+}
+#[cfg(windows)]
+fn renomear_duravel(de: &Path, para: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileExW(existente: *const u16, novo: *const u16, opcoes: u32) -> i32;
+    }
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+    let largo = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain([0]).collect() };
+    let (a, b) = (largo(de), largo(para));
+    // SAFETY: os dois buffers são UTF-16 terminados em zero e vivem até o fim da chamada.
+    let ok = unsafe {
+        MoveFileExW(
+            a.as_ptr(),
+            b.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
 fn criar_pasta(p: &Path) -> io::Result<()> {
     let mut b = fs::DirBuilder::new();
     #[cfg(unix)]
@@ -171,7 +205,7 @@ impl DiscoDeBlocos {
         let mut f = o.open(&tmp)?;
         let escrito = f.write_all(dados).and_then(|_| f.sync_all());
         drop(f);
-        if let Err(e) = escrito.and_then(|_| fs::rename(&tmp, destino)) {
+        if let Err(e) = escrito.and_then(|_| renomear_duravel(&tmp, destino)) {
             let _ = fs::remove_file(tmp);
             return Err(e);
         }
@@ -358,9 +392,8 @@ impl DiscoDeBlocos {
                 let a = a?;
                 let nome = a.file_name().to_string_lossy().into_owned();
                 let rel = format!("{doc}/{nome}");
-                if fs::symlink_metadata(a.path())
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false)
+                // Link simbólico ou ponto de reparse do Windows (junção): nunca seguido.
+                if matches!(metadados(&a.path()), Err(e) if e.kind() == io::ErrorKind::InvalidData)
                 {
                     invalidos.push(rel);
                     continue;
