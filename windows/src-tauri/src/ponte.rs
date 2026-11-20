@@ -337,18 +337,24 @@ mod testes {
 
         use crate::{integracao::{dubles::{voz, MotoresDuble}, Integracao}, lancamento::{dubles::CapturaDuble, Lancamento}, ponte::{atender_dados, METODOS, Situacao}};
 
-        struct Ponte { _tmp: tempfile::TempDir, banco: Integracao, lance: Arc<Lancamento>, eventos: Arc<Mutex<Vec<String>>> }
+        /// A ordem dos campos é a ordem de soltura: a pasta temporária sai por último.
+        struct Ponte { banco: Integracao, lance: Arc<Lancamento>, eventos: Arc<Mutex<Vec<String>>>, _tmp: Arc<tempfile::TempDir> }
+
+        impl Drop for Ponte {
+            fn drop(&mut self) { self.lance.desligar(Duration::from_secs(20)); }
+        }
 
         impl Ponte {
-            fn nova() -> Self {
-                let tmp = tempfile::tempdir().unwrap();
+            fn nova() -> Self { Self::na(Arc::new(tempfile::tempdir().unwrap())) }
+            /// Outra ponte na mesma pasta: o app reaberto.
+            fn na(tmp: Arc<tempfile::TempDir>) -> Self {
                 let motores = MotoresDuble::novo();
                 let banco = Integracao::abrir(&tmp.path().join("d.sqlite"), motores.clone()).unwrap();
                 let eventos = Arc::new(Mutex::new(Vec::new()));
                 let e = eventos.clone();
                 let lance = Lancamento::new(&tmp.path().join("d.sqlite"), &tmp.path().join("Audio"), motores, Arc::new(CapturaDuble { segundos: 3.0 }),
                     Arc::new(|t: &str| t.to_string()), Arc::new(move |a, _| e.lock().unwrap().push(a.to_string()))).unwrap();
-                Self { _tmp: tmp, banco, lance, eventos }
+                Self { banco, lance, eventos, _tmp: tmp }
             }
             /// Chama como a interface: nome do método e parâmetros JSON; devolve o JSON lido da resposta em texto.
             fn chamar(&self, metodo: &str, params: Value) -> Result<Value, String> {
@@ -404,6 +410,49 @@ mod testes {
             assert_eq!(p.chamar("lancamento.desfazer", json!({"id": id})).unwrap(), true);
             assert_eq!(p.chamar("arquivo.listar", json!({})).unwrap().as_array().unwrap().len(), 1);
             assert!(p.eventos.lock().unwrap().iter().any(|e| e == "ditado:progresso"));
+        }
+
+        /// Sequência que caía no CI Windows: arquivo e reunião pela mesma ponte, com `lancamento.estado`
+        /// (consulta de microfone) chamado de threads diferentes que terminam.
+        #[test]
+        fn reuniao_depois_de_arquivo_na_mesma_ponte_com_estado_em_outras_threads() {
+            let p = Arc::new(Ponte::nova());
+            let arq = p._tmp.path().join("aula.wav");
+            crate::audio::EscritorWav::criar(&arq).unwrap().gravar(&voz(2.0, 0.5)).unwrap();
+            p.lance.adicionar(&[arq]).unwrap();
+            let em_thread = |p: &Arc<Ponte>, metodo: &'static str, params: Value| { let p = p.clone(); thread::spawn(move || p.chamar(metodo, params)).join().unwrap() };
+            p.esperar("arquivo pronto", |p| p.chamar("arquivo.listar", json!({})).unwrap()[0]["fase"] == "pronto");
+            assert_eq!(em_thread(&p, "lancamento.estado", json!({})).unwrap()["disponivel"], true);
+            em_thread(&p, "reuniao.iniciar", json!({"fonte": "macEMicrofone"})).unwrap();
+            let id = em_thread(&p, "lancamento.estado", json!({})).unwrap()["reuniao"]["id"].as_str().unwrap().to_string();
+            assert_eq!(em_thread(&p, "reuniao.pausar", json!({"id": id})).unwrap(), true);
+            assert_eq!(em_thread(&p, "reuniao.pausar", json!({"id": id})).unwrap(), true);
+            assert_eq!(em_thread(&p, "reuniao.encerrar", json!({"id": id})).unwrap(), true);
+            p.esperar("reunião arquivada", |p| p.chamar("reuniao.listar", json!({})).unwrap().as_array().unwrap().iter().any(|r| r["id"] == json!(id)));
+        }
+
+        /// Ponte solta com a reunião gravando: as threads de captura e processamento terminam e
+        /// soltam o serviço (antes ficavam vivas para sempre com a pasta aberta), e o app reaberto
+        /// na mesma pasta encontra a reunião sem perder fala.
+        #[test]
+        fn ponte_solta_com_reuniao_em_andamento_encerra_threads_e_reabre() {
+            let tmp = Arc::new(tempfile::tempdir().unwrap());
+            let id;
+            {
+                let p = Ponte::na(tmp.clone());
+                p.chamar("reuniao.iniciar", json!({"fonte": "mac"})).unwrap();
+                id = p.chamar("lancamento.estado", json!({})).unwrap()["reuniao"]["id"].as_str().unwrap().to_string();
+                thread::sleep(Duration::from_millis(300));
+                let lance = p.lance.clone();
+                drop(p);
+                let inicio = Instant::now();
+                while Arc::strong_count(&lance) > 1 { assert!(inicio.elapsed() < Duration::from_secs(10), "threads da reunião não soltaram o serviço"); thread::sleep(Duration::from_millis(20)); }
+            }
+            let p = Ponte::na(tmp);
+            let doc = p.chamar("lancamento.documento", json!({"id": id})).unwrap();
+            let recuperavel = p.chamar("lancamento.estado", json!({})).unwrap()["recuperaveis"].as_array().unwrap().iter().any(|r| r["id"] == json!(id));
+            assert!(doc["fase"] == "pronta" || recuperavel, "reunião perdida: {doc}");
+            assert!(p.chamar("reuniao.iniciar", json!({"fonte": "mac"})).is_ok(), "app reaberto inicia outra reunião");
         }
 
         #[test]

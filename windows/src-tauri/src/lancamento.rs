@@ -109,6 +109,8 @@ pub struct Lancamento {
     /// Reunião encerrada ou em recuperação que ainda está na passada final ou no resumo.
     finalizando: Arc<Mutex<Option<String>>>,
     resumo_cancelado: Arc<AtomicBool>,
+    /// App saindo: a reunião em curso fecha sem resumo e nada novo começa.
+    desligando: AtomicBool,
 }
 
 fn uuid() -> String {
@@ -147,7 +149,7 @@ impl Lancamento {
             banco: banco.to_path_buf(), disco, trabalho, motores, capturador, preparar, avisar,
             leitor: Mutex::new(leitor), fila: Arc::new(Mutex::new(Vec::new())), caminhos: Mutex::new(HashMap::new()),
             envio: Mutex::new(tx), reuniao: Mutex::new(None), finalizando: Arc::new(Mutex::new(None)),
-            resumo_cancelado: Arc::new(AtomicBool::new(false)),
+            resumo_cancelado: Arc::new(AtomicBool::new(false)), desligando: AtomicBool::new(false),
         });
         let fraco = Arc::downgrade(&servico);
         thread::Builder::new().name("ditase.arquivos".into()).spawn(move || {
@@ -428,6 +430,7 @@ impl Lancamento {
     /// `fonte`: "mac"/"sistema" (só o áudio do computador) ou "macEMicrofone"/"sistemaEMicrofone".
     pub fn iniciar_reuniao(self: &Arc<Self>, fonte: &str) -> Res<String> {
         let mut atual = self.reuniao.lock().unwrap();
+        if self.desligando.load(Ordering::Acquire) { return Err("O Dita.se está fechando.".into()); }
         if atual.is_some() { return Err("Já há uma reunião em andamento.".into()); }
         if self.finalizando.lock().unwrap().is_some() { return Err("Espere a reunião anterior terminar de processar.".into()); }
         let fala = self.motores.fala(false).map_err(|e| format!("Não dá para começar agora: {e}"))?;
@@ -553,7 +556,7 @@ impl Lancamento {
             Ok(id) => { nota(format!("reunião {doc}: finalizada, falantes {}", if *id { "identificados" } else { "indisponíveis" })); None }
             Err(e) => { nota(format!("reunião {doc}: processamento incompleto ({e}); áudio mantido para recuperar")); Some("O processamento não terminou. O áudio continua guardado para nova tentativa.".to_string()) }
         };
-        if resultado.is_ok() && self.motores.resumo_disponivel() { self.gerar_resumo(doc); }
+        if resultado.is_ok() && self.motores.resumo_disponivel() && !self.desligando.load(Ordering::Acquire) { self.gerar_resumo(doc); }
         *self.finalizando.lock().unwrap() = None;
         (self.avisar)("ditado:resultado", Some(json!({"id": doc, "resultado": if motivo.is_some() { "erro" } else { "concluido" }, "motivo": motivo})));
         self.mudou();
@@ -685,14 +688,27 @@ impl Lancamento {
         if self.finalizando.lock().unwrap().as_deref() == Some(id) { self.resumo_cancelado.store(true, Ordering::Release); }
     }
 
-    /// Fecha as fontes ao sair do app. A reunião em andamento fica em disco para recuperar.
-    pub fn desligar(&self) {
-        if let Some(a) = self.reuniao.lock().unwrap().take() {
+    /// Fecha as fontes e espera, até `prazo`, a reunião em curso e a fila terminarem.
+    ///
+    /// A reunião em andamento guarda o canal do coletor dentro do serviço, e a thread de
+    /// processamento guarda o serviço: sem isto, soltar o serviço deixava coletor e processador
+    /// vivos para sempre, com as conexões SQLite e a pasta de áudio abertas. O que não terminar no
+    /// prazo continua em disco e volta em `recuperaveis` na próxima abertura.
+    pub fn desligar(&self, prazo: Duration) {
+        self.desligando.store(true, Ordering::Release);
+        self.resumo_cancelado.store(true, Ordering::Release);
+        let ativa = self.reuniao.lock().unwrap().take();
+        if let Some(a) = ativa {
+            *self.finalizando.lock().unwrap() = Some(a.doc.clone());
             let t = a.vivo.relogio.elapsed().as_secs_f64();
             drop(a.capturas);
             let _ = a.envio.send(Captado::Encerrar(t));
         }
         self.cancelar_fila().ok();
+        let limite = Instant::now() + prazo;
+        while (self.finalizando.lock().unwrap().is_some() || !self.fila.lock().unwrap().is_empty()) && Instant::now() < limite {
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 

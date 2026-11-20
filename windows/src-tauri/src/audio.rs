@@ -6,7 +6,7 @@ use std::{
     fs::File,
     io::{self, Seek, SeekFrom, Write},
     path::Path,
-    sync::mpsc,
+    sync::{mpsc, Mutex, OnceLock},
     thread,
 };
 
@@ -21,12 +21,45 @@ pub type Erro = Box<dyn std::error::Error + Send + Sync>;
 
 /// Microfones disponíveis, com o nome servindo de identificador (o WASAPI não expõe o ID pelo cpal).
 pub fn microfones() -> Vec<(String, String)> {
-    let host = cpal::default_host();
-    host.input_devices().map(|lista| lista.filter_map(|d| d.name().ok()).map(|n| (n.clone(), n)).collect()).unwrap_or_default()
+    no_fio_de_audio(|| {
+        let host = cpal::default_host();
+        host.input_devices().map(|lista| lista.filter_map(|d| d.name().ok()).map(|n| (n.clone(), n)).collect()).unwrap_or_default()
+    })
 }
 
 /// Há microfone utilizável? Sem dispositivo ou com acesso negado em Privacidade, não.
-pub fn microfone_disponivel() -> bool { cpal::default_host().default_input_device().is_some() }
+pub fn microfone_disponivel() -> bool { no_fio_de_audio(|| cpal::default_host().default_input_device().is_some()) }
+
+type TarefaDeAudio = Box<dyn FnOnce() + Send>;
+
+/// Todo uso do cpal roda nesta thread, que vive até o processo acabar.
+///
+/// No Windows o cpal guarda um `IMMDeviceEnumerator` global, criado no apartamento COM da primeira
+/// thread que consulta áudio, e cada thread desfaz o próprio COM (`CoUninitialize`) ao terminar.
+/// Se a thread que criou o enumerador termina e era a última com COM, o COM do processo é
+/// descarregado e o ponteiro global fica pendurado: a consulta seguinte, em outra thread, cai com
+/// STATUS_ACCESS_VIOLATION. Aqui o enumerador nasce nesta thread e o COM dela nunca é desfeito.
+fn no_fio_de_audio<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    static FIO: OnceLock<Mutex<mpsc::Sender<TarefaDeAudio>>> = OnceLock::new();
+    let envio = FIO.get_or_init(|| {
+        let (tx, rx) = mpsc::channel::<TarefaDeAudio>();
+        thread::Builder::new().name("ditase.com-audio".into()).spawn(move || {
+            // Primeira consulta do processo: COM e enumerador ficam presos a esta thread.
+            let _ = cpal::default_host().default_input_device();
+            for tarefa in rx { tarefa(); }
+        }).expect("thread de áudio");
+        Mutex::new(tx)
+    });
+    let (tx, rx) = mpsc::channel();
+    let tarefa: TarefaDeAudio = Box::new(move || { let _ = tx.send(f()); });
+    envio.lock().unwrap_or_else(|e| e.into_inner()).send(tarefa).expect("thread de áudio encerrada");
+    rx.recv().expect("thread de áudio não respondeu")
+}
+
+thread_local! {
+    /// Fluxos abertos (o `Stream` do cpal não é `Send`): ficam na thread de áudio, por id.
+    static FLUXOS: std::cell::RefCell<std::collections::HashMap<u64, cpal::Stream>> = Default::default();
+}
 
 /// Passa-baixa Butterworth de 4ª ordem (duas biquads RBJ) seguido de interpolação linear:
 /// tira o que passa de 7 kHz antes de reduzir para 16 kHz, para não dobrar em ruído audível.
@@ -83,31 +116,21 @@ pub fn nivel(amostras: &[f32]) -> f32 {
     ((20.0 * rms.max(1e-6).log10() + 50.0) / 50.0).clamp(0.0, 1.0)
 }
 
-/// Fluxo aberto numa thread própria (o `Stream` do cpal não é `Send`). Soltar para fechar.
-pub struct Captura { parar: Option<mpsc::Sender<()>>, fio: Option<thread::JoinHandle<()>> }
+/// Fluxo aberto na thread de áudio. Soltar para fechar.
+pub struct Captura { id: Option<u64> }
 
 impl Captura {
     /// `ao_bloco` recebe PCM 16 kHz mono e o nível (0..1) do bloco.
     pub fn iniciar(fonte: Fonte, microfone: &str, ao_bloco: impl FnMut(Vec<f32>, f32) + Send + 'static) -> Result<Self, Erro> {
-        let (pronto_tx, pronto_rx) = mpsc::channel::<Result<(), String>>();
-        let (parar_tx, parar_rx) = mpsc::channel::<()>();
+        static PROXIMO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let id = PROXIMO.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nome = microfone.to_string();
-        let fio = thread::Builder::new().name("ditase.audio".into()).spawn(move || {
-            match abrir(fonte, &nome, ao_bloco) {
-                Ok(fluxo) => { let _ = pronto_tx.send(Ok(())); let _ = parar_rx.recv(); drop(fluxo); }
-                Err(e) => { let _ = pronto_tx.send(Err(e.to_string())); }
-            }
-        })?;
-        match pronto_rx.recv() {
-            Ok(Ok(())) => Ok(Self { parar: Some(parar_tx), fio: Some(fio) }),
-            Ok(Err(e)) => Err(e.into()),
-            Err(_) => Err("a captura de áudio parou ao abrir".into()),
-        }
+        no_fio_de_audio(move || abrir(fonte, &nome, ao_bloco).map(|fluxo| FLUXOS.with(|f| { f.borrow_mut().insert(id, fluxo); })).map_err(|e| e.to_string()))?;
+        Ok(Self { id: Some(id) })
     }
 
     pub fn parar(&mut self) {
-        if let Some(p) = self.parar.take() { let _ = p.send(()); }
-        if let Some(f) = self.fio.take() { let _ = f.join(); }
+        if let Some(id) = self.id.take() { no_fio_de_audio(move || FLUXOS.with(|f| { f.borrow_mut().remove(&id); })); }
     }
 }
 
@@ -192,6 +215,20 @@ impl EscritorWav {
 #[cfg(test)]
 mod testes {
     use super::*;
+
+    /// Sequência do crash no CI Windows (STATUS_ACCESS_VIOLATION): a primeira consulta de áudio
+    /// numa thread que termina, e a seguinte em outra thread. No Windows, antes da thread de áudio
+    /// própria, a segunda consulta usava o enumerador COM pendurado.
+    #[test]
+    fn consultas_de_audio_em_threads_que_terminam() {
+        for _ in 0..3 {
+            std::thread::spawn(|| { let _ = microfone_disponivel(); let _ = microfones(); }).join().unwrap();
+        }
+        let _ = microfone_disponivel();
+        // Abrir e fechar captura também passa pela mesma thread (pode não haver microfone na máquina de testes).
+        if let Ok(mut c) = Captura::iniciar(Fonte::Microfone, "", |_, _| {}) { c.parar(); }
+        let _ = microfones();
+    }
 
     #[test]
     fn reamostra_48k_para_16k_mantem_duracao() {

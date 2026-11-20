@@ -142,7 +142,7 @@ fn bandeja(app: &AppHandle, iniciar: bool) -> tauri::Result<()> {
                     casca.pilula.avisar(aviso, 3.0);
                 }
                 "atualizar" => { let a = app.clone(); tauri::async_runtime::spawn(async move { procurar_atualizacao(a, true).await }); }
-                "sair" => { casca.controlador.desligar(); casca.lancamento.desligar(); app.exit(0); }
+                "sair" => { casca.controlador.desligar(); casca.lancamento.desligar(Duration::from_secs(2)); app.exit(0); }
                 _ => {}
             }
         })
