@@ -64,8 +64,10 @@ $AvisoOrt = Get-ChildItem -Path $TmpSherpa -Recurse -Filter "ThirdPartyNotices.t
 if ($AvisoOrt) {
   Copy-Item -Path $AvisoOrt.FullName -Destination (Join-Path $DirAvisos "ThirdPartyNotices.txt") -Force
 } else {
-  $AvisoDestino = Join-Path $DirAvisos "ThirdPartyNotices.txt"
-  Invoke-WebRequest -Uri "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.17.1/ThirdPartyNotices.txt" -OutFile $AvisoDestino -UseBasicParsing
+  # O pacote do sherpa-onnx não traz os avisos do ONNX Runtime (1.28.2). Cópia versionada,
+  # extraída do pacote NuGet oficial Microsoft.ML.OnnxRuntime 1.28.0
+  # (SHA-256 do .nupkg 769d1d3ea8ab6cd69f737c9dd4d4462aa4ad0ccfa106eaf506efc40d7bead5db).
+  Copy-Item -Path (Join-Path $Raiz "windows\avisos\onnxruntime-ThirdPartyNotices.txt") -Destination (Join-Path $DirAvisos "ThirdPartyNotices.txt") -Force
 }
 
 # 2. llama.cpp b12359 CPU x64 (limpeza e resumo local)
