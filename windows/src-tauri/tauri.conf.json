@@ -25,6 +25,7 @@
     "updater": {
       "endpoints": ["https://github.com/stoll2003/ditase/releases/download/windows-teste/latest.json"],
       "pubkey": "",
+      "requireSignedVersion": true,
       "windows": { "installMode": "passive" }
     }
   }

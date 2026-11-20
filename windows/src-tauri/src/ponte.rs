@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, EventTarget};
 use tauri_plugin_dialog::DialogExt;
 
 use std::sync::Arc;
@@ -88,18 +88,18 @@ fn inteiro(p: &Value, chave: &str) -> Result<i64, String> {
 fn prefixo(s: &str, n: usize) -> String { s.chars().take(n).collect() }
 
 /// Avisa a interface de que um assunto mudou (`window` recebe `CustomEvent('ditado', {detail})`).
-pub fn emitir(app: &AppHandle, assunto: &str) {
-    if let Some(j) = app.get_webview_window("principal") {
-        let _ = j.eval(format!("window.dispatchEvent(new CustomEvent('ditado', {{ detail: {} }}))", json!(assunto)));
-    }
-}
+pub fn emitir(app: &AppHandle, assunto: &str) { emitir_evento(app, "ditado", &json!(assunto)); }
 
 /// Eventos com dados (`ditado:progresso`, `ditado:trechos`, `ditado:resultado`, `ditado:arquivos-soltos`).
+/// Evento estruturado só para a janela principal (sem avaliar JavaScript): o adaptador de
+/// `ui/src/lib/ponte.ts` repassa como o mesmo `CustomEvent` do Mac. Nomes fora de `EVENTOS` não saem.
 pub fn emitir_evento(app: &AppHandle, evento: &str, detalhe: &Value) {
-    if let Some(j) = app.get_webview_window("principal") {
-        let _ = j.eval(format!("window.dispatchEvent(new CustomEvent({}, {{ detail: {} }}))", json!(evento), detalhe));
-    }
+    if !EVENTOS.contains(&evento) { return; }
+    let _ = app.emit_to(EventTarget::WebviewWindow { label: "principal".into() }, evento, detalhe);
 }
+
+/// Eventos que a interface escuta (mesma lista em `ui/src/lib/ponte.ts`).
+pub const EVENTOS: &[&str] = &["ditado", "ditado:progresso", "ditado:trechos", "ditado:resultado", "ditado:intervalos", "ditado:arquivos-soltos"];
 
 fn escolher_arquivos(app: &AppHandle, varios: bool) -> Vec<PathBuf> {
     let dialogo = app.dialog().file().set_title("Escolher áudio ou vídeo").add_filter("Áudio e vídeo", decodificacao::SUPORTADOS);
@@ -156,6 +156,7 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
                 _ => return Err("falta chave ou valor".into()),
             };
             if chave == "atalho" && Tecla::de_id(valor).is_none() { return Err("tecla desconhecida".into()); }
+            if chave == "modelo" && !crate::motores_locais::modelos_do_catalogo().contains(&valor) { return Err("modelo fora do catálogo".into()); }
             if casca.prefs.definir(chave, valor) {
                 if chave == "iniciarComWindows" { crate::iniciar_com_windows(app, valor == "1"); }
                 c.preferencia_mudou(chave);
@@ -271,7 +272,7 @@ fn estado(casca: &Casca) -> Value {
         "fase": c.fase().id(),
         "maosLivres": c.maos_livres(),
         "reconhecedor": {"estado": rec, "detalhe": detalhe, "nome": "Parakeet"},
-        "limpador": {"estado": limpador, "detalhe": detalhe_limpador, "ligado": casca.prefs.limpeza_ia(), "modelo": casca.prefs.modelo().trim_end_matches(".gguf")},
+        "limpador": {"estado": limpador, "detalhe": detalhe_limpador, "ligado": casca.prefs.limpeza_ia(), "modelo": crate::motores_locais::modelos_do_catalogo()[0].trim_end_matches(".gguf")},
         "modeloIA": modelo,
         "permissoes": {"microfone": if audio::microfone_disponivel() { "concedida" } else { "negada" }, "acessibilidade": "concedida"},
         "atalho": {"tecla": tecla.id(), "nome": tecla.nome(), "simbolo": tecla.simbolo(), "instalado": *c.atalho_instalado.lock().unwrap()},
@@ -282,8 +283,7 @@ fn estado(casca: &Casca) -> Value {
 }
 
 fn ajustes(casca: &Casca) -> Value {
-    let mut modelos: Vec<String> = std::fs::read_dir(caminhos::modelos()).map(|l| l.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.ends_with(".gguf")).collect()).unwrap_or_default();
-    modelos.sort();
+    let modelos = crate::motores_locais::modelos_instalados(&caminhos::modelos());
     json!({
         "valores": casca.prefs.todas(),
         "teclas": Tecla::TODAS.iter().map(|t| json!({"id": t.id(), "nome": t.nome()})).collect::<Vec<_>>(),
@@ -470,6 +470,30 @@ mod testes {
             assert!(p.chamar("lancamento.resumir", json!({"id": id})).is_err(), "sem IA local, resumo recusa com motivo");
             assert_eq!(p.chamar("lancamento.cancelarResumo", json!({"id": id})).unwrap(), true);
         }
+    }
+
+    /// M1 e M3: atualização exige versão assinada; a pílula não tem a ponte; eventos iguais aos da interface.
+    #[test]
+    fn configuracao_de_seguranca() {
+        let conf: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(conf["plugins"]["updater"]["requireSignedVersion"], true);
+        let pilula: Value = serde_json::from_str(include_str!("../capabilities/pilula.json")).unwrap();
+        assert_eq!(pilula["windows"], serde_json::json!(["pilula"]));
+        let permissoes: Vec<&str> = pilula["permissions"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+        assert!(!permissoes.contains(&"allow-ponte") && !permissoes.contains(&"core:default"), "{permissoes:?}");
+        let principal: Value = serde_json::from_str(include_str!("../capabilities/principal.json")).unwrap();
+        assert_eq!(principal["windows"], serde_json::json!(["principal"]));
+        let ts = include_str!("../../../ui/src/lib/ponte.ts");
+        for e in EVENTOS { assert!(ts.contains(&format!("\"{e}\"")), "{e} não está na lista da interface"); }
+        assert!(!include_str!("pilula.rs").contains(".eval("), "pílula ainda avalia JavaScript");
+        assert!(!include_str!("ponte.rs").contains(&["j.ev", "al("].concat()), "ponte ainda avalia JavaScript");
+    }
+
+    #[test]
+    fn navegacao_so_para_a_interface_empacotada() {
+        let ok = |u: &str| crate::navegacao_permitida(&tauri::Url::parse(u).unwrap());
+        assert!(ok("http://tauri.localhost/index.html") && ok("tauri://localhost/pilula.html"));
+        assert!(!ok("https://exemplo.com/") && !ok("http://tauri.localhost.exemplo.com/") && !ok("file:///C:/x.html"));
     }
 
     #[test]

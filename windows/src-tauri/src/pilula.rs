@@ -7,7 +7,7 @@ use std::{
 };
 
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, EventTarget, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
 pub const ROTULO: &str = "pilula";
 const LARGURA: f64 = 260.0;
@@ -22,7 +22,7 @@ impl Fase {
     }
 }
 
-struct Interno { fase: Fase, sempre_visivel: bool, ultimo_nivel: Instant }
+struct Interno { fase: Fase, sempre_visivel: bool, ultimo_nivel: Instant, atalho: String }
 
 pub struct Pilula { app: AppHandle, interno: Mutex<Interno> }
 
@@ -39,6 +39,8 @@ impl Pilula {
             .skip_taskbar(true)
             .focused(false)
             .visible(false)
+            .on_navigation(crate::navegacao_permitida)
+            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
             .build();
         match janela {
             Ok(j) => {
@@ -48,7 +50,7 @@ impl Pilula {
             }
             Err(e) => crate::caminhos::nota(format!("pílula: não abriu ({e})")),
         }
-        let p = Self { app: app.clone(), interno: Mutex::new(Interno { fase: Fase::Ociosa, sempre_visivel, ultimo_nivel: Instant::now() }) };
+        let p = Self { app: app.clone(), interno: Mutex::new(Interno { fase: Fase::Ociosa, sempre_visivel, ultimo_nivel: Instant::now(), atalho: atalho.to_string() }) };
         p.enviar(json!({"tipo": "atalho", "simbolo": atalho}));
         p.mostrar(Fase::Ociosa);
         p
@@ -56,10 +58,16 @@ impl Pilula {
 
     fn janela(&self) -> Option<WebviewWindow> { self.app.get_webview_window(ROTULO) }
 
+    /// Evento estruturado só para a janela da pílula (sem avaliar JavaScript).
     fn enviar(&self, mensagem: Value) {
-        if let Some(j) = self.janela() {
-            let _ = j.eval(format!("window.pilula && window.pilula({mensagem})"));
-        }
+        let _ = self.app.emit_to(EventTarget::WebviewWindow { label: ROTULO.into() }, "pilula", mensagem);
+    }
+
+    /// A página da pílula carregou: reenvia atalho e fase (o que foi mandado antes do carregamento se perdeu).
+    pub fn reenviar(&self) {
+        let (fase, atalho) = { let i = self.interno.lock().unwrap(); (i.fase, i.atalho.clone()) };
+        self.enviar(json!({"tipo": "atalho", "simbolo": atalho}));
+        self.enviar(json!({"tipo": "fase", "fase": fase.id()}));
     }
 
     fn visibilidade(&self, fase: Fase) {
@@ -105,7 +113,10 @@ impl Pilula {
     }
 
     pub fn segundos(&self, s: u64) { self.enviar(json!({"tipo": "segundos", "segundos": s})); }
-    pub fn atalho(&self, simbolo: &str) { self.enviar(json!({"tipo": "atalho", "simbolo": simbolo})); }
+    pub fn atalho(&self, simbolo: &str) {
+        self.interno.lock().unwrap().atalho = simbolo.to_string();
+        self.enviar(json!({"tipo": "atalho", "simbolo": simbolo}));
+    }
 
     pub fn sempre_visivel(&self, sim: bool) {
         let fase = { let mut i = self.interno.lock().unwrap(); i.sempre_visivel = sim; i.fase };

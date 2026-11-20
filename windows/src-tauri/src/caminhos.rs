@@ -1,23 +1,82 @@
-//! Onde o app guarda as coisas no Windows: `%APPDATA%\Dita.se` (porta de `Caminhos.swift`).
-//! O áudio fica em `%LOCALAPPDATA%\Dita.se\Audio`: fora do perfil móvel e longe do que o OneDrive
-//! costuma sincronizar (Documentos, Área de Trabalho). Fora do Windows (testes no Mac) usa a pasta
-//! temporária, para nunca tocar nos dados do app do Mac.
+//! Onde o app guarda as coisas no Windows: tudo em `%LOCALAPPDATA%\Dita.se` (porta de
+//! `Caminhos.swift`). Banco, registro e áudio ficam fora do perfil móvel: em rede corporativa o
+//! `%APPDATA%` pode ir para um servidor, e o OneDrive não sincroniza `%LOCALAPPDATA%`.
+//! Versões anteriores guardavam banco e registro em `%APPDATA%\Dita.se`: [`preparar`] migra uma vez,
+//! com o SQLite ainda fechado e junto com os arquivos do WAL.
+//! Fora do Windows (testes no Mac) usa a pasta temporária, para nunca tocar nos dados do app do Mac.
+//! No Windows não há volta para a pasta temporária: sem pasta do perfil, o app não abre.
 use std::{
     fs::{self, OpenOptions},
-    io::Write,
-    path::PathBuf,
-    sync::Mutex,
+    io::{self, Write},
+    path::{Path, PathBuf},
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 const PASTA: &str = "Dita.se";
+/// Arquivos que mudam de `%APPDATA%` para `%LOCALAPPDATA%`. Os três do SQLite vão juntos.
+const MIGRADOS: &[&str] = &["ditado.sqlite", "ditado.sqlite-wal", "ditado.sqlite-shm", "preferencias.json", "ditado.log"];
 
-fn base(variavel: &str) -> PathBuf {
-    if let Ok(outra) = std::env::var("DITASE_RAIZ") { if !outra.is_empty() { return PathBuf::from(outra); } }
-    if cfg!(windows) {
-        if let Some(p) = std::env::var_os(variavel) { return PathBuf::from(p).join(PASTA); }
+static RAIZ: OnceLock<PathBuf> = OnceLock::new();
+
+/// Pasta local do perfil. `DITASE_RAIZ` substitui (testes e diagnóstico).
+fn local() -> Option<PathBuf> {
+    if let Some(outra) = std::env::var_os("DITASE_RAIZ").filter(|v| !v.is_empty()) { return Some(PathBuf::from(outra)); }
+    if !cfg!(windows) { return Some(std::env::temp_dir().join("ditase-dev")); }
+    std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|v| !v.is_empty()).map(|p| PathBuf::from(p).join("AppData").join("Local")))
+        .map(|p| p.join(PASTA))
+}
+
+/// Onde as versões anteriores guardavam banco e registro.
+fn antiga() -> Option<PathBuf> {
+    if !cfg!(windows) || std::env::var_os("DITASE_RAIZ").is_some() { return None; }
+    std::env::var_os("APPDATA").filter(|v| !v.is_empty()).map(|p| PathBuf::from(p).join(PASTA))
+}
+
+/// Chamar uma vez, antes de abrir banco ou registro. Cria a pasta e migra os dados antigos.
+/// Erro: não há pasta do perfil utilizável (o app avisa e fecha).
+pub fn preparar() -> Result<(), String> {
+    let nova = local().ok_or("O Windows não informou a pasta do perfil (LOCALAPPDATA).")?;
+    fs::create_dir_all(&nova).map_err(|e| format!("Não consegui criar a pasta do Dita.se: {e}"))?;
+    let mut raiz = nova.clone();
+    if let Some(velha) = antiga().filter(|v| v != &nova) {
+        match migrar(&velha, &nova) {
+            Ok(n) if n > 0 => { let _ = RAIZ.set(nova); nota(format!("dados migrados para a pasta local ({n} arquivo(s))")); return Ok(()); }
+            Ok(_) => {}
+            // Falhou no meio: nada foi apagado na origem; esta sessão usa a pasta antiga.
+            Err(e) => { raiz = velha; let _ = RAIZ.set(raiz); nota(format!("migração da pasta adiada ({e}); usando a pasta anterior")); return Ok(()); }
+        }
     }
-    std::env::temp_dir().join("ditase-dev")
+    let _ = RAIZ.set(raiz);
+    Ok(())
+}
+
+/// Move `MIGRADOS` de `velha` para `nova` só se o banco ainda não existir no destino. Copia para
+/// nomes temporários, grava em disco, troca os nomes e só então apaga a origem: uma queda no meio
+/// deixa a origem intacta. Devolve quantos arquivos mudaram.
+pub fn migrar(velha: &Path, nova: &Path) -> io::Result<usize> {
+    if !velha.join(MIGRADOS[0]).is_file() || nova.join(MIGRADOS[0]).exists() { return Ok(0); }
+    let presentes: Vec<&str> = MIGRADOS.iter().copied().filter(|n| velha.join(n).is_file() && !nova.join(n).exists()).collect();
+    fs::create_dir_all(nova)?;
+    let temporario = |n: &str| nova.join(format!("{n}.migrando"));
+    let copiar = || -> io::Result<()> {
+        for n in &presentes {
+            fs::copy(velha.join(n), temporario(n))?;
+            fs::File::open(temporario(n))?.sync_all()?;
+        }
+        for n in &presentes { fs::rename(temporario(n), nova.join(n))?; }
+        Ok(())
+    };
+    if let Err(e) = copiar() {
+        for n in &presentes { let _ = fs::remove_file(temporario(n)); }
+        // Um banco copiado sem o WAL seria pior que nenhum: desfaz o que já foi trocado.
+        for n in &presentes { if velha.join(n).is_file() { let _ = fs::remove_file(nova.join(n)); } }
+        return Err(e);
+    }
+    for n in &presentes { let _ = fs::remove_file(velha.join(n)); }
+    let _ = fs::remove_dir(velha);
+    Ok(presentes.len())
 }
 
 fn pasta(raiz: PathBuf, nome: &str) -> PathBuf {
@@ -26,17 +85,24 @@ fn pasta(raiz: PathBuf, nome: &str) -> PathBuf {
     p
 }
 
-/// Banco, preferências, registro, diários de reunião.
-pub fn raiz() -> PathBuf { let r = base("APPDATA"); let _ = fs::create_dir_all(&r); r }
+/// Banco, preferências e registro. Antes de [`preparar`] (testes), a pasta local.
+pub fn raiz() -> PathBuf {
+    let r = RAIZ.get().cloned().or_else(local).expect("pasta do perfil indisponível; chame caminhos::preparar na abertura");
+    let _ = fs::create_dir_all(&r);
+    r
+}
+fn raiz_local() -> PathBuf { local().expect("pasta do perfil indisponível; chame caminhos::preparar na abertura") }
 /// Áudio guardado dos ditados (reserva para retranscrever) e PCM das reuniões.
-pub fn audios() -> PathBuf { pasta(base("LOCALAPPDATA"), "Audio") }
-pub fn audio_de_reuniao() -> PathBuf { pasta(base("LOCALAPPDATA"), "ReunioesAudio") }
+pub fn audios() -> PathBuf { pasta(raiz_local(), "Audio") }
+pub fn audio_de_reuniao() -> PathBuf { pasta(raiz_local(), "ReunioesAudio") }
+/// Pasta privada de trabalho (temporários do app, nunca a pasta temporária do sistema).
+pub fn trabalho() -> PathBuf { pasta(raiz_local(), "Trabalho") }
 /// Modelos de fala e de IA. `DITASE_PASTA_MODELOS` aponta para outro lugar, como no Mac.
 pub fn modelos() -> PathBuf {
     if let Ok(outra) = std::env::var("DITASE_PASTA_MODELOS") {
         if !outra.is_empty() { let p = PathBuf::from(outra); let _ = fs::create_dir_all(&p); return p; }
     }
-    pasta(base("LOCALAPPDATA"), "Models")
+    pasta(raiz_local(), "Models")
 }
 pub fn banco() -> PathBuf { raiz().join("ditado.sqlite") }
 pub fn preferencias() -> PathBuf { raiz().join("preferencias.json") }
@@ -69,3 +135,48 @@ pub fn pasta_do_app() -> PathBuf {
 
 /// `llama\llama-server.exe` ao lado do app (instalado pelo NSIS, ver `tauri.distribuicao.conf.json`).
 pub fn llama_server() -> PathBuf { pasta_do_app().join("llama").join(if cfg!(windows) { "llama-server.exe" } else { "llama-server" }) }
+
+#[cfg(test)]
+mod testes {
+    use super::*;
+
+    #[test]
+    fn migra_banco_com_wal_e_shm_e_apaga_a_origem() {
+        let t = tempfile::tempdir().unwrap();
+        let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
+        fs::create_dir_all(&velha).unwrap();
+        for (n, c) in [("ditado.sqlite", "db"), ("ditado.sqlite-wal", "wal"), ("ditado.sqlite-shm", "shm"), ("preferencias.json", "{}")] { fs::write(velha.join(n), c).unwrap(); }
+        assert_eq!(migrar(&velha, &nova).unwrap(), 4);
+        assert_eq!(fs::read_to_string(nova.join("ditado.sqlite-wal")).unwrap(), "wal");
+        assert!(!velha.exists(), "origem deveria ter saído");
+        // Segunda abertura: nada a fazer.
+        assert_eq!(migrar(&velha, &nova).unwrap(), 0);
+    }
+
+    #[test]
+    fn com_banco_no_destino_nao_mexe_em_nada() {
+        let t = tempfile::tempdir().unwrap();
+        let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
+        fs::create_dir_all(&velha).unwrap();
+        fs::create_dir_all(&nova).unwrap();
+        fs::write(velha.join("ditado.sqlite"), "antigo").unwrap();
+        fs::write(nova.join("ditado.sqlite"), "novo").unwrap();
+        assert_eq!(migrar(&velha, &nova).unwrap(), 0);
+        assert_eq!(fs::read_to_string(velha.join("ditado.sqlite")).unwrap(), "antigo");
+        assert_eq!(fs::read_to_string(nova.join("ditado.sqlite")).unwrap(), "novo");
+    }
+
+    #[test]
+    fn falha_no_meio_deixa_a_origem_intacta() {
+        let t = tempfile::tempdir().unwrap();
+        let velha = t.path().join("Roaming");
+        fs::create_dir_all(&velha).unwrap();
+        fs::write(velha.join("ditado.sqlite"), "db").unwrap();
+        fs::write(velha.join("ditado.sqlite-wal"), "wal").unwrap();
+        // Destino é um arquivo: não dá para criar a pasta.
+        let nova = t.path().join("arquivo");
+        fs::write(&nova, "x").unwrap();
+        assert!(migrar(&velha, &nova).is_err());
+        assert_eq!(fs::read_to_string(velha.join("ditado.sqlite-wal")).unwrap(), "wal");
+    }
+}

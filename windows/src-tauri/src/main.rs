@@ -55,6 +55,7 @@ async fn ponte(casca: State<'_, Arc<Casca>>, metodo: String, params: Option<Valu
 
 #[tauri::command]
 fn pilula_acao(casca: State<'_, Arc<Casca>>, acao: String) {
+    if acao == "pronta" { casca.pilula.reenviar(); return; }
     let c = casca.controlador.clone();
     std::thread::spawn(move || match acao.as_str() {
         "alternar" => c.alternar(),
@@ -62,6 +63,16 @@ fn pilula_acao(casca: State<'_, Arc<Casca>>, acao: String) {
         "cancelar" => { if let Some(a) = c.atalho.get() { a.enviar(atalho::Entrada::EncerradoPorFora); } c.cancelar() }
         _ => {}
     });
+}
+
+/// As janelas só mostram a interface empacotada: qualquer navegação para fora é negada (links
+/// abrem no navegador do sistema pela ponte, nunca dentro do app).
+pub fn navegacao_permitida(url: &tauri::Url) -> bool {
+    match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "http" | "https" => url.host_str() == Some("tauri.localhost"),
+        _ => false,
+    }
 }
 
 pub fn iniciar_com_windows(app: &AppHandle, ligar: bool) {
@@ -96,6 +107,8 @@ fn abrir_principal(app: &AppHandle) -> tauri::Result<()> {
         .title("Dita.se")
         .inner_size(1120.0, 760.0)
         .min_inner_size(820.0, 560.0)
+        .on_navigation(navegacao_permitida)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .build()?;
     #[cfg(windows)]
     if let Ok(h) = janela.hwnd() { nativo::colagem::definir_dono(h.0 as isize); }
@@ -200,6 +213,10 @@ async fn procurar_atualizacao(app: AppHandle, manual: bool) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if let Err(e) = caminhos::preparar() {
+        nativo::sistema::alerta("Dita.se", &e);
+        std::process::exit(1);
+    }
     if teste::rodar(&args) { return; }
     caminhos::nota(format!("abrindo Dita.se {}", env!("CARGO_PKG_VERSION")));
     tauri::Builder::default()
@@ -217,7 +234,7 @@ fn main() {
             let integracao = Arc::new(Integracao::abrir(&caminhos::banco(), motores.clone()).map_err(|e| format!("banco: {e}"))?);
             let pilula = Arc::new(Pilula::criar(&handle, prefs.pilula_sempre_visivel(), prefs.atalho().simbolo()));
             let avisar = handle.clone();
-            let controlador = Controlador::new(prefs.clone(), integracao.clone(), pilula.clone(), move |assunto| ponte::emitir(&avisar, assunto));
+            let controlador = Controlador::new(prefs.clone(), integracao.clone(), pilula.clone(), Arc::new(controlador::SistemaReal), move |assunto| ponte::emitir(&avisar, assunto));
             let (eventos, pilula_eventos) = (handle.clone(), pilula.clone());
             let avisar_lancamento: lancamento::Avisar = Arc::new(move |assunto, detalhe| match detalhe {
                 None => ponte::emitir(&eventos, assunto),
@@ -234,6 +251,7 @@ fn main() {
             let capturador = Arc::new(CapturaDoSistema { microfone: Arc::new(move || microfone.microfone()) });
             let lancamento = Lancamento::new(&caminhos::banco(), &caminhos::audio_de_reuniao(), motores.clone(), capturador, preparar, avisar_lancamento)
                 .map_err(|e| format!("arquivos e reuniões: {e}"))?;
+            controlador.compartilhar_microfone(lancamento.clone());
             let casca = Arc::new(Casca { app: handle.clone(), prefs: prefs.clone(), integracao, lancamento, pilula, controlador: controlador.clone() });
             motores.preparar_fala();
             app.manage(casca);

@@ -63,3 +63,9 @@ pub fn espaco_livre(pasta: &std::path::Path) -> Option<u64> {
     unsafe { GetDiskFreeSpaceExW(&HSTRING::from(pasta.as_os_str()), Some(&mut livre), None, None) }.ok()?;
     Some(livre)
 }
+
+/// Caixa de mensagem antes de haver janela (falha na abertura).
+pub fn alerta(titulo: &str, texto: &str) {
+    use windows::{core::HSTRING, Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK}};
+    unsafe { MessageBoxW(None, &HSTRING::from(texto), &HSTRING::from(titulo), MB_OK | MB_ICONERROR); }
+}

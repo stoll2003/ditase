@@ -191,13 +191,21 @@ impl MotoresLocais {
         });
     }
 
-    fn modelo_ia_caminho(&self) -> PathBuf {
-        let escolhido = self.pasta.join(self.prefs.modelo());
-        if escolhido.is_file() { escolhido } else { QWEN.caminho(&self.pasta).join(QWEN.arquivos[0].arquivo) }
-    }
+    /// Sempre o arquivo do catálogo: nenhum caminho vindo das preferências chega ao llama-server.
+    fn modelo_ia_caminho(&self) -> PathBuf { QWEN.caminho(&self.pasta).join(QWEN.arquivos[0].arquivo) }
 
-    fn qwen_instalado(&self) -> bool { instalado(&self.pasta, &QWEN) || self.pasta.join(self.prefs.modelo()).is_file() && self.prefs.modelo() != QWEN.arquivos[0].arquivo }
+    /// Só o modelo do catálogo com o SHA-256 conferido conta.
+    fn qwen_instalado(&self) -> bool { instalado(&self.pasta, &QWEN) }
 
+}
+
+/// Modelos de IA aceitos (M7): só identificadores do catálogo, conferidos por SHA-256 no download.
+/// Arquivo .gguf avulso na pasta de modelos é ignorado.
+pub fn modelos_do_catalogo() -> Vec<&'static str> { vec![QWEN.arquivos[0].arquivo] }
+
+/// Modelos do catálogo já instalados e conferidos, para a lista dos Ajustes.
+pub fn modelos_instalados(pasta: &Path) -> Vec<String> {
+    if instalado(pasta, &QWEN) { vec![QWEN.arquivos[0].arquivo.to_string()] } else { Vec::new() }
 }
 
 /// Cliente HTTP só para o llama-server em 127.0.0.1. Nunca segue `HTTP_PROXY`/`ALL_PROXY` do
@@ -322,7 +330,7 @@ impl Motores for MotoresLocais {
 
     fn estado_limpador(&self) -> (String, String) {
         if !self.llama_instalado() { return ("semBinario".into(), String::new()); }
-        if !self.qwen_instalado() { return ("semModelo".into(), self.prefs.modelo()); }
+        if !self.qwen_instalado() { return ("semModelo".into(), QWEN.arquivos[0].arquivo.into()); }
         match self.servidor.estado() {
             EstadoLlama::Desligado => ("desligado".into(), String::new()),
             EstadoLlama::Iniciando => ("iniciando".into(), String::new()),
@@ -503,6 +511,20 @@ mod testes {
         let m = MotoresLocais::novo(tmp.path().to_path_buf(), prefs, Arc::new(|| {}));
         assert!(!m.fala_disponivel(), "fala sem conferência contou como disponível");
         assert!(m.falantes().is_none(), "falantes sem conferência foram carregados");
+    }
+
+    /// M7: um .gguf avulso na pasta, mesmo escolhido nas preferências, não é usado nem listado.
+    #[test]
+    fn modelo_avulso_nao_e_usado() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("avulso.gguf"), b"GGUF").unwrap();
+        let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
+        prefs.definir("modelo", "avulso.gguf");
+        let m = MotoresLocais::novo(tmp.path().to_path_buf(), prefs, Arc::new(|| {}));
+        assert!(!m.qwen_instalado());
+        assert_eq!(m.modelo_ia_caminho().file_name().unwrap(), QWEN.arquivos[0].arquivo);
+        assert!(modelos_instalados(tmp.path()).is_empty());
+        assert!(!modelos_do_catalogo().contains(&"avulso.gguf"));
     }
 
     #[test]

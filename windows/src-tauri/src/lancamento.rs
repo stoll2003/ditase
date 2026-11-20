@@ -45,15 +45,41 @@ pub trait Capturador: Send + Sync {
     fn abrir(&self, fonte: Fonte, relogio: Instant, ao_bloco: AoBloco) -> Result<Box<dyn Send>, String>;
 }
 
-/// Capturador real: `audio::Captura`. O tempo do bloco é o relógio menos a duração do próprio bloco.
+/// Tempo de cada bloco de uma fonte, pela contagem de amostras entregues desde o primeiro bloco.
+/// O relógio de parede na hora da chamada oscila com o agendamento do sistema; usado direto, um
+/// atraso de 60 ms vira lacuna no coletor (tolerância de 960 amostras do núcleo). Só ressincroniza
+/// quando a diferença passa de `RESSINCRONIA` (o dispositivo realmente parou ou pulou).
+#[derive(Default)]
+pub struct RelogioDeFonte { inicio: Option<f64>, amostras: u64 }
+
+pub const RESSINCRONIA: f64 = 0.3;
+
+impl RelogioDeFonte {
+    /// `agora`: segundos do relógio da reunião no fim do bloco; devolve o início do bloco.
+    pub fn tempo(&mut self, agora: f64, n: usize) -> f64 {
+        let duracao = n as f64 / crate::audio::TAXA as f64;
+        let pelo_relogio = (agora - duracao).max(0.0);
+        let inicio = *self.inicio.get_or_insert(pelo_relogio);
+        let mut t = inicio + self.amostras as f64 / crate::audio::TAXA as f64;
+        if (pelo_relogio - t).abs() > RESSINCRONIA {
+            self.inicio = Some(pelo_relogio - self.amostras as f64 / crate::audio::TAXA as f64);
+            t = pelo_relogio;
+        }
+        self.amostras += n as u64;
+        t
+    }
+}
+
+/// Capturador real: `audio::Captura`. O tempo do bloco vem do [`RelogioDeFonte`].
 pub struct CapturaDoSistema { pub microfone: Arc<dyn Fn() -> String + Send + Sync> }
 
 impl Capturador for CapturaDoSistema {
     fn abrir(&self, fonte: Fonte, relogio: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
         let nome = if fonte == Fonte::Microfone { (self.microfone)() } else { String::new() };
+        let mut tempo = RelogioDeFonte::default();
         let c = crate::audio::Captura::iniciar(fonte, &nome, move |bloco, nivel| {
-            let t = relogio.elapsed().as_secs_f64() - bloco.len() as f64 / crate::audio::TAXA as f64;
-            ao_bloco(t.max(0.0), bloco, nivel);
+            let t = tempo.tempo(relogio.elapsed().as_secs_f64(), bloco.len());
+            ao_bloco(t, bloco, nivel);
         }).map_err(|e| e.to_string())?;
         Ok(Box::new(c))
     }
@@ -91,9 +117,18 @@ impl Vivo {
     }
 }
 
-struct Ativa { doc: String, vivo: Arc<Vivo>, capturas: Vec<Box<dyn Send>>, envio: mpsc::Sender<Captado>, coletor_fim: Arc<AtomicBool> }
+struct Ativa { doc: String, vivo: Arc<Vivo>, capturas: Vec<Box<dyn Send>>, envio: mpsc::Sender<Captado>, coletor_fim: Arc<AtomicBool>, microfone: bool }
+
+/// Destino da derivação do microfone da reunião para um ditado (I5). Vazio sem ditado.
+type Derivacao = Arc<Mutex<Option<crate::controlador::AoBlocoDeAudio>>>;
+
+/// Fonte do ditado derivada da reunião: soltar ou parar fecha a derivação.
+struct FonteDerivada(Derivacao);
+impl crate::controlador::FonteAberta for FonteDerivada { fn parar(&mut self) { self.0.lock().unwrap().take(); } }
+impl Drop for FonteDerivada { fn drop(&mut self) { self.0.lock().unwrap().take(); } }
 
 pub struct Lancamento {
+    derivacao: Derivacao,
     banco: PathBuf,
     disco: DiscoDeBlocos,
     trabalho: PathBuf,
@@ -175,7 +210,7 @@ impl Lancamento {
         let (tx, rx) = mpsc::channel::<Tarefa>();
         let servico = Arc::new(Self {
             banco: banco.to_path_buf(), disco, trabalho, motores, capturador, preparar, avisar,
-            leitor: Mutex::new(leitor), fila: Arc::new(Mutex::new(Vec::new())), caminhos: Mutex::new(HashMap::new()),
+            derivacao: Arc::new(Mutex::new(None)), leitor: Mutex::new(leitor), fila: Arc::new(Mutex::new(Vec::new())), caminhos: Mutex::new(HashMap::new()),
             envio: Mutex::new(tx), reuniao: Mutex::new(None), finalizando: Arc::new(Mutex::new(None)),
             resumo_cancelado: Arc::new(AtomicBool::new(false)), desligando: AtomicBool::new(false), resumindo: AtomicBool::new(false),
         });
@@ -492,16 +527,24 @@ impl Lancamento {
         let (fim_tx, fim_rx) = mpsc::channel::<()>();
         let mut capturas = Vec::new();
         let mut aviso = None;
+        let mut microfone_aberto = false;
         for (fonte_casca, fonte_nucleo) in &fontes {
             let (tx, v, f) = (envio.clone(), vivo.clone(), *fonte_nucleo);
+            let derivacao = (*fonte_casca == Fonte::Microfone).then(|| self.derivacao.clone());
             let ao_bloco: AoBloco = Box::new(move |t, bloco, nivel| {
-                if v.pausada.load(Ordering::Acquire) { return; }
-                { let mut n = v.nivel.lock().unwrap(); *n = n.max(nivel); }
-                if nivel > 0.05 { *v.ultimo_audio.lock().unwrap() = Instant::now(); }
+                // Ditado durante a reunião: recebe o microfone mesmo com a reunião pausada.
+                if let Some(d) = &derivacao { if let Some(ditado) = d.lock().unwrap().as_mut() { ditado(bloco.clone(), nivel); } }
+                // Todo bloco vai ao coletor, inclusive com a reunião pausada: a linha do tempo do
+                // núcleo recorta a parte pausada pelo tempo. Descartar aqui perdia o trecho de antes
+                // da pausa no bloco que a atravessa (lacuna de até 100 ms a cada pausa).
+                if !v.pausada.load(Ordering::Acquire) {
+                    { let mut n = v.nivel.lock().unwrap(); *n = n.max(nivel); }
+                    if nivel > 0.05 { *v.ultimo_audio.lock().unwrap() = Instant::now(); }
+                }
                 let _ = tx.send(Captado::Audio(f, t, bloco));
             });
             match self.capturador.abrir(*fonte_casca, relogio, ao_bloco) {
-                Ok(g) => capturas.push(g),
+                Ok(g) => { capturas.push(g); if *fonte_casca == Fonte::Microfone { microfone_aberto = true; } }
                 Err(e) => {
                     nota(format!("reunião: fonte {} indisponível ({e})", fonte_nucleo.nome()));
                     aviso = Some(if *fonte_casca == Fonte::Microfone { "O microfone não abriu; só o áudio do computador está sendo gravado." } else { "O áudio do computador não abriu; só o microfone está sendo gravado." });
@@ -547,7 +590,7 @@ impl Lancamento {
         thread::Builder::new().name("ditase.reuniao".into()).spawn(move || servico.processar_reuniao(&doc_p, fala, Some((vivo_p, fim_rx))))?;
 
         self.resumo_cancelado.store(false, Ordering::Release);
-        *atual = Some(Ativa { doc: doc.clone(), vivo, capturas, envio, coletor_fim });
+        *atual = Some(Ativa { doc: doc.clone(), vivo, capturas, envio, coletor_fim, microfone: microfone_aberto });
         drop(atual);
         nota(format!("reunião {doc} iniciada ({})", if com_microfone { "sistema e microfone" } else { "sistema" }));
         self.mudou();
@@ -812,6 +855,27 @@ pub mod dubles {
     use crate::{audio::Fonte, integracao::dubles::voz};
 
     /// Dublê de captura: entrega `segundos` de voz em blocos de 100 ms, com o tempo pela contagem de amostras.
+    /// Voz em tempo real: um bloco de 100 ms a cada 100 ms, com o tempo pelo relógio da reunião
+    /// (mesmo cálculo da captura real), até ser solta.
+    pub struct CapturaEmTempoReal;
+    impl Capturador for CapturaEmTempoReal {
+        fn abrir(&self, _f: Fonte, relogio: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
+            let fim = Arc::new(AtomicBool::new(false));
+            let p = fim.clone();
+            let fio = thread::spawn(move || {
+                let bloco = voz(0.1, 0.0);
+                let mut tempo = super::RelogioDeFonte::default();
+                while !p.load(Ordering::Acquire) {
+                    thread::sleep(std::time::Duration::from_millis(100));
+                    ao_bloco(tempo.tempo(relogio.elapsed().as_secs_f64(), bloco.len()), bloco.clone(), 0.3);
+                }
+            });
+            struct Guarda(Arc<AtomicBool>, Option<thread::JoinHandle<()>>);
+            impl Drop for Guarda { fn drop(&mut self) { self.0.store(true, Ordering::Release); if let Some(f) = self.1.take() { let _ = f.join(); } } }
+            Ok(Box::new(Guarda(fim, Some(fio))))
+        }
+    }
+
     pub struct CapturaDuble { pub segundos: f64 }
     impl Capturador for CapturaDuble {
         fn abrir(&self, fonte: Fonte, _relogio: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
@@ -866,6 +930,19 @@ mod testes {
         p
     }
 
+    #[test]
+    fn relogio_de_fonte_ignora_oscilacao_e_ressincroniza_em_parada() {
+        let mut r = RelogioDeFonte::default();
+        assert_eq!(r.tempo(0.1, 1600), 0.0);
+        // Chamada atrasada 80 ms: o tempo segue a contagem (0,1), não o relógio (0,18).
+        assert!((r.tempo(0.28, 1600) - 0.1).abs() < 1e-9);
+        // A seguinte chega adiantada: continua contínua.
+        assert!((r.tempo(0.30, 1600) - 0.2).abs() < 1e-9);
+        // Parada real de 1 s: ressincroniza.
+        assert!((r.tempo(1.5, 1600) - 1.4).abs() < 1e-9);
+        assert!((r.tempo(1.6, 1600) - 1.5).abs() < 1e-9);
+    }
+
     /// I2: na retomada o `Retomar` entra no canal enquanto a captura ainda está pausada (nenhum
     /// bloco de depois chega antes dele); na pausa, a captura já parou quando o `Pausar` entra.
     #[test]
@@ -885,9 +962,17 @@ mod testes {
     /// I2 de ponta a ponta: retomadas seguidas com áudio chegando não geram lacuna.
     #[test]
     fn pausas_seguidas_nao_geram_lacuna() {
-        let (_tmp, s, _) = servico(6.0);
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(dubles::CapturaEmTempoReal),
+            Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
         let id = s.iniciar_reuniao("mac").unwrap();
-        for _ in 0..20 { s.pausar(&id).unwrap(); s.pausar(&id).unwrap(); }
+        for _ in 0..8 {
+            thread::sleep(Duration::from_millis(130));
+            s.pausar(&id).unwrap();
+            thread::sleep(Duration::from_millis(70));
+            s.pausar(&id).unwrap();
+        }
+        thread::sleep(Duration::from_millis(300));
         s.encerrar(&id).unwrap();
         esperar(|| s.documento(&id).unwrap()["fase"] == "pronta", "fim");
         let doc = s.documento(&id).unwrap();
@@ -917,7 +1002,8 @@ mod testes {
         thread::sleep(Duration::from_millis(300));
         s.encerrar(&id).unwrap();
         esperar(|| s.estado(true).unwrap()["reuniao"]["etapa"] == "resumindo", "etapa resumindo");
-        assert!(reg.0.lock().unwrap().iter().any(|(a, v)| a == "ditado:progresso" && v.as_ref().unwrap()["etapa"]["id"] == "resumindo"));
+        // O estado muda um instante antes de o evento sair: espera os dois.
+        esperar(|| reg.0.lock().unwrap().iter().any(|(a, v)| a == "ditado:progresso" && v.as_ref().unwrap()["etapa"]["id"] == "resumindo"), "evento resumindo");
         s.cancelar_resumo(&id);
         esperar(|| s.esperar_ocioso(Duration::from_millis(10)), "fim do resumo");
         assert_eq!(s.documento(&id).unwrap()["resumoCancelado"], true);
@@ -1101,5 +1187,64 @@ mod testes {
         assert_eq!(s.documento(&id).unwrap()["fase"], "gravando");
         s.encerrar(&id).unwrap();
         esperar(|| s.documento(&id).unwrap()["fase"] == "pronta", "fim");
+    }
+}
+
+impl crate::controlador::MicrofoneCompartilhado for Lancamento {
+    fn derivar(&self, ao_bloco: crate::controlador::AoBlocoDeAudio) -> Option<Box<dyn crate::controlador::FonteAberta>> {
+        let r = self.reuniao.lock().unwrap();
+        if !r.as_ref().is_some_and(|a| a.microfone) { return None; }
+        *self.derivacao.lock().unwrap() = Some(ao_bloco);
+        Some(Box::new(FonteDerivada(self.derivacao.clone())))
+    }
+}
+
+#[cfg(test)]
+mod testes_derivacao {
+    use super::{dubles::CapturaDuble, *};
+    use crate::{controlador::MicrofoneCompartilhado, integracao::dubles::MotoresDuble};
+
+    /// Captura contínua: um bloco de 100 ms de silêncio a cada 10 ms até ser solta.
+    struct CapturaContinua;
+    impl Capturador for CapturaContinua {
+        fn abrir(&self, _f: Fonte, _r: Instant, mut ao_bloco: AoBloco) -> Result<Box<dyn Send>, String> {
+            let fim = Arc::new(AtomicBool::new(false));
+            let p = fim.clone();
+            let fio = thread::spawn(move || { let mut i = 0; while !p.load(Ordering::Acquire) { ao_bloco(i as f64 * 0.1, vec![0.0; 1600], 0.0); i += 1; thread::sleep(Duration::from_millis(10)); } });
+            struct Guarda(Arc<AtomicBool>, Option<thread::JoinHandle<()>>);
+            impl Drop for Guarda { fn drop(&mut self) { self.0.store(true, Ordering::Release); if let Some(f) = self.1.take() { let _ = f.join(); } } }
+            Ok(Box::new(Guarda(fim, Some(fio))))
+        }
+    }
+
+    /// I5 no serviço: com reunião gravando o microfone, a derivação recebe blocos, inclusive com a
+    /// reunião pausada; sem microfone na reunião, não há derivação; ao parar, deixa de receber.
+    #[test]
+    fn derivacao_do_microfone_da_reuniao() {
+        let tmp = tempfile::tempdir().unwrap();
+        let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(CapturaContinua),
+            Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
+        assert!(s.derivar(Box::new(|_, _| {})).is_none(), "sem reunião não há derivação");
+        let id = s.iniciar_reuniao("macEMicrofone").unwrap();
+        s.pausar(&id).unwrap();
+        let recebido = Arc::new(Mutex::new(0usize));
+        let r = recebido.clone();
+        let mut fonte = s.derivar(Box::new(move |b, _| *r.lock().unwrap() += b.len())).expect("derivação");
+        thread::sleep(Duration::from_millis(300));
+        let antes = *recebido.lock().unwrap();
+        assert!(antes > 0, "a derivação não recebeu nada com a reunião pausada");
+        fonte.parar();
+        thread::sleep(Duration::from_millis(200));
+        let depois = *recebido.lock().unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(*recebido.lock().unwrap(), depois, "continuou recebendo depois de parar");
+        s.encerrar(&id).unwrap();
+        s.desligar(Duration::from_secs(2));
+        let id2 = { let s2 = Lancamento::new(&tmp.path().join("u.sqlite"), &tmp.path().join("Audio2"), MotoresDuble::novo(), Arc::new(CapturaDuble { segundos: 3.0 }), Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
+            let id = s2.iniciar_reuniao("mac").unwrap();
+            assert!(s2.derivar(Box::new(|_, _| {})).is_none(), "reunião sem microfone não deriva");
+            s2.desligar(Duration::from_secs(2));
+            id };
+        assert!(!id2.is_empty());
     }
 }

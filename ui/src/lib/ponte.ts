@@ -114,6 +114,27 @@ function tauri(): Nativo | undefined {
   };
 }
 
+type Escutar = (evento: string, f: (e: { payload: unknown }) => void) => Promise<unknown>;
+
+/** Eventos do app (mesma lista de `EVENTOS` em `windows/src-tauri/src/ponte.rs`). */
+const EVENTOS = ["ditado", "ditado:progresso", "ditado:trechos", "ditado:resultado", "ditado:intervalos", "ditado:arquivos-soltos"];
+let eventosLigados = false;
+
+/**
+ * No Windows o app manda eventos estruturados do Tauri, só para a janela principal, em vez de
+ * avaliar JavaScript na página. Aqui eles viram o mesmo `CustomEvent` que o Mac dispara, então o
+ * resto da interface não muda.
+ */
+function ligarEventosDoTauri() {
+  if (eventosLigados) return;
+  const escutar = (window as unknown as { __TAURI__?: { event?: { listen?: Escutar } } }).__TAURI__?.event?.listen;
+  if (!escutar) return;
+  eventosLigados = true;
+  for (const nome of EVENTOS) {
+    void escutar(nome, (e) => window.dispatchEvent(new CustomEvent(nome, { detail: e.payload })));
+  }
+}
+
 function nativo(): Nativo | undefined {
   return (window as unknown as { webkit?: { messageHandlers?: { ditado?: Nativo } } }).webkit?.messageHandlers
     ?.ditado ?? tauri();
@@ -135,9 +156,13 @@ export async function chamar<T>(metodo: string, params: Record<string, unknown> 
 
 /** Chama `aoMudar` quando o app avisa que o assunto mudou. Devolve a função que cancela. */
 export function ouvir(assuntos: string[], aoMudar: () => void): () => void {
+  if (tauri()) ligarEventosDoTauri();
   const tratar = (evento: Event) => {
     if (assuntos.includes((evento as CustomEvent<string>).detail)) aoMudar();
   };
   window.addEventListener("ditado", tratar);
   return () => window.removeEventListener("ditado", tratar);
 }
+
+// App.tsx escuta alguns eventos direto na janela: liga a ponte de eventos já ao carregar.
+if (typeof window !== "undefined" && tauri()) ligarEventosDoTauri();

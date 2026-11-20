@@ -39,7 +39,9 @@ const GDI: &[u32] = &[2, 3, 9, 14, 0x80, 0x82, 0x83, 0x8E];
 
 static DONO: AtomicIsize = AtomicIsize::new(0);
 /// Reserva do conteúdo do usuário e o número de sequência do nosso texto (duas colagens seguidas).
-static RESERVA: Mutex<Option<(Vec<(u32, Vec<u8>)>, u32)>> = Mutex::new(None);
+/// Formatos guardados da área de transferência: (formato, bytes).
+type Conteudo = Vec<(u32, Vec<u8>)>;
+static RESERVA: Mutex<Option<(Conteudo, u32)>> = Mutex::new(None);
 
 /// A área de transferência precisa de uma janela dona: a principal do app.
 pub fn definir_dono(hwnd: isize) { DONO.store(hwnd, Ordering::SeqCst); }
@@ -77,37 +79,55 @@ fn guardar() -> Vec<(u32, Vec<u8>)> {
     itens
 }
 
-fn por(formato: u32, bytes: &[u8]) {
+/// Põe um formato na área de transferência aberta. Devolve se o Windows aceitou.
+fn por(formato: u32, bytes: &[u8]) -> bool {
+    if formato == 0 { return false; }
     unsafe {
-        let Ok(g) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else { return };
+        let Ok(g) = GlobalAlloc(GMEM_MOVEABLE, bytes.len().max(1)) else { return false };
         let p = GlobalLock(g) as *mut u8;
-        if p.is_null() { return; }
+        if p.is_null() { return false; }
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), p, bytes.len());
         let _ = GlobalUnlock(g);
-        let _ = SetClipboardData(formato, Some(HANDLE(g.0)));
+        // Sucesso: o Windows passa a ser dono da memória.
+        SetClipboardData(formato, Some(HANDLE(g.0))).is_ok()
     }
+}
+
+fn restaurar_aberta(itens: &[(u32, Vec<u8>)]) {
+    unsafe { let _ = EmptyClipboard(); }
+    for (formato, bytes) in itens { por(*formato, bytes); }
 }
 
 fn texto_utf16(texto: &str) -> Vec<u8> {
     texto.encode_utf16().chain(std::iter::once(0)).flat_map(u16::to_le_bytes).collect()
 }
 
-fn escrever(texto: &str, transitorio: bool) -> Result<u32, String> {
+/// Cópia pedida pela pessoa (botão Copiar): comportamento comum do Windows.
+pub fn copiar(texto: &str) -> Result<(), String> {
     let _a = abrir()?;
     unsafe { EmptyClipboard().map_err(|e| e.to_string())?; }
-    por(CF_UNICODETEXT, &texto_utf16(texto));
-    if transitorio {
-        unsafe {
-            por(RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")), &[]);
-            por(RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")), &0u32.to_le_bytes());
-            por(RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")), &0u32.to_le_bytes());
-        }
+    if !por(CF_UNICODETEXT, &texto_utf16(texto)) { return Err("a área de transferência recusou o texto".into()); }
+    Ok(())
+}
+
+/// Texto do ditado, marcado para o histórico do Windows (Win+V) e a nuvem não guardarem.
+/// As marcas entram antes do texto, e o texto só entra se as três forem aceitas; senão a área
+/// volta ao que era (`anterior`) e nada do ditado fica nela. Devolve a sequência do nosso conteúdo.
+fn escrever_transitorio(texto: &str, anterior: &[(u32, Vec<u8>)]) -> Result<u32, String> {
+    let _a = abrir()?;
+    unsafe { EmptyClipboard().map_err(|e| e.to_string())?; }
+    let marcas = unsafe {
+        por(RegisterClipboardFormatW(w!("ExcludeClipboardContentFromMonitorProcessing")), &[])
+            & por(RegisterClipboardFormatW(w!("CanIncludeInClipboardHistory")), &0u32.to_le_bytes())
+            & por(RegisterClipboardFormatW(w!("CanUploadToCloudClipboard")), &0u32.to_le_bytes())
+    };
+    if !marcas || !por(CF_UNICODETEXT, &texto_utf16(texto)) {
+        restaurar_aberta(anterior);
+        return Err("as marcas de exclusão do histórico não foram aceitas".into());
     }
     let _ = PCWSTR::null();
     Ok(unsafe { GetClipboardSequenceNumber() })
 }
-
-pub fn copiar(texto: &str) -> Result<(), String> { escrever(texto, false).map(|_| ()) }
 
 fn elevado(processo: HANDLE) -> Option<bool> {
     unsafe {
@@ -144,10 +164,14 @@ fn tecla(vk: VIRTUAL_KEY, solta: bool) -> INPUT {
 }
 
 pub fn inserir(texto: &str) -> Insercao {
+    // App como administrador: o Ctrl+V seria descartado. O texto fica copiado, marcado fora do
+    // histórico e da nuvem, e a pílula avisa; sem as marcas, não copia.
     if destino_bloqueado() {
-        let _ = copiar(texto);
-        crate::caminhos::nota("colagem: app de destino como administrador; texto só copiado");
-        return Insercao::SoCopiado;
+        crate::caminhos::nota("colagem: app de destino como administrador");
+        return match escrever_transitorio(texto, &guardar()) {
+            Ok(_) => Insercao::SoCopiado,
+            Err(e) => { crate::caminhos::nota(format!("colagem: não copiei ({e})")); Insercao::Recusado }
+        };
     }
     // Duas colagens seguidas: a área ainda tem o nosso texto anterior; vale a reserva da primeira.
     let guardado = {
@@ -157,16 +181,16 @@ pub fn inserir(texto: &str) -> Insercao {
             _ => guardar(),
         }
     };
-    let Ok(sequencia) = escrever(texto, true) else {
-        crate::caminhos::nota("colagem: área de transferência ocupada");
-        return Insercao::SoCopiado;
+    let sequencia = match escrever_transitorio(texto, &guardado) {
+        Ok(s) => s,
+        Err(e) => { crate::caminhos::nota(format!("colagem: não colei ({e})")); return Insercao::Recusado; }
     };
     *RESERVA.lock().unwrap() = Some((guardado, sequencia));
     let entradas = [tecla(VK_CONTROL, false), tecla(VK_V, false), tecla(VK_V, true), tecla(VK_CONTROL, true)];
     let enviadas = unsafe { SendInput(&entradas, std::mem::size_of::<INPUT>() as i32) };
     if enviadas != entradas.len() as u32 {
-        crate::caminhos::nota("colagem: SendInput bloqueado");
-        let _ = copiar(texto);
+        // O texto já está copiado com as marcas: fica para a pessoa colar, e a pílula avisa.
+        crate::caminhos::nota("colagem: SendInput bloqueado; texto só copiado");
         RESERVA.lock().unwrap().take();
         return Insercao::SoCopiado;
     }
@@ -180,12 +204,18 @@ pub fn inserir(texto: &str) -> Insercao {
         let itens = itens.clone();
         *reserva = None;
         drop(reserva);
-        // O usuário copiou outra coisa nesse meio tempo: fica a dele.
-        if unsafe { GetClipboardSequenceNumber() } != sequencia { return; }
-        if let Ok(_a) = abrir() {
-            unsafe { let _ = EmptyClipboard(); }
-            for (formato, bytes) in &itens { por(*formato, bytes); }
+        // Abre primeiro e só então compara: entre comparar e abrir outro app poderia copiar.
+        for tentativa in 0..5 {
+            match abrir() {
+                Ok(_a) => {
+                    // O usuário copiou outra coisa nesse meio tempo: fica a dele.
+                    if unsafe { GetClipboardSequenceNumber() } == sequencia { restaurar_aberta(&itens); }
+                    return;
+                }
+                Err(_) => thread::sleep(Duration::from_millis(200 * (tentativa + 1))),
+            }
         }
+        crate::caminhos::nota("colagem: não consegui devolver a área de transferência");
     });
     Insercao::Colado
 }

@@ -22,12 +22,26 @@ pub fn montar(casca: &Casca) -> String {
     r.push_str("\nÚltimas linhas do registro:\n");
     for linha in caminhos::ultimas_linhas(60) {
         // Defesa extra: nada entre aspas sai no relatório.
-        let limpa = if linha.contains('"') { format!("{} [trecho entre aspas omitido]", linha.split('"').next().unwrap_or("")) } else { linha };
-        let limpa = anonimizar(&limpa);
+        let limpa = linha_aprovada(&linha);
         r.push_str(&limpa);
         r.push('\n');
     }
     r
+}
+
+/// Começos de linha do registro que podem ir para o relatório (B1). Qualquer outra vira um
+/// marcador, sem o conteúdo. Mesmo nas aprovadas, nada entre aspas sai e caminhos perdem a conta.
+pub const LINHAS_APROVADAS: &[&str] = &[
+    "abrindo", "saída", "atalho", "áudio", "ditado ", "ditado recusado", "reunião ", "arquivo ", "abertura das reuniões",
+    "modelos", "modelo de IA", "reconhecedor", "falantes", "limpeza por IA", "colagem", "atualização", "recuperação",
+    "preferências", "teste", "dados migrados", "migração", "pílula", "iniciar com o Windows", "microfone", "arraste",
+];
+
+pub fn linha_aprovada(linha: &str) -> String {
+    let (hora, resto) = linha.split_once(' ').unwrap_or(("", linha));
+    if !LINHAS_APROVADAS.iter().any(|p| resto.starts_with(p)) { return format!("{hora} [linha fora da lista aprovada]"); }
+    let resto = if resto.contains('"') { format!("{} [trecho entre aspas omitido]", resto.split('"').next().unwrap_or("")) } else { resto.to_string() };
+    format!("{hora} {}", anonimizar(&resto))
 }
 
 /// Tira o nome da conta dos caminhos (no Windows ele costuma ser o nome da pessoa): as pastas do
@@ -60,6 +74,14 @@ pub fn anonimizar(linha: &str) -> String {
 #[cfg(test)]
 mod testes {
     use super::anonimizar;
+
+    #[test]
+    fn so_linhas_aprovadas_vao_para_o_relatorio() {
+        use super::linha_aprovada;
+        assert_eq!(linha_aprovada("1.0 ditado 7: 12 palavras, 3.0 s"), "1.0 ditado 7: 12 palavras, 3.0 s");
+        assert_eq!(linha_aprovada("2.0 texto qualquer de outra origem"), "2.0 [linha fora da lista aprovada]");
+        assert_eq!(linha_aprovada(r#"3.0 arquivo x: falhou ("C:\Users\ana\a.mp3")"#), "3.0 arquivo x: falhou ( [trecho entre aspas omitido]");
+    }
 
     #[test]
     fn caminhos_do_perfil_perdem_o_nome_da_conta() {

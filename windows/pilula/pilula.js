@@ -58,3 +58,10 @@ window.pilula = (m) => {
   }
 };
 mostrar("ociosa");
+
+// O estado chega por evento do app só para esta janela (sem avaliar JavaScript). Depois de
+// escutar, pede ao app que reenvie atalho e fase, que podem ter saído antes do carregamento.
+const eventos = window.__TAURI__?.event;
+if (eventos) {
+  eventos.listen("pilula", (e) => window.pilula(e.payload)).then(() => invocar("pronta"));
+}

@@ -3,7 +3,13 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(windows), allow(dead_code))]
-pub enum Insercao { Colado, SoCopiado }
+pub enum Insercao {
+    Colado,
+    /// Não deu para colar: o texto ficou copiado (fora do histórico do Windows) e a pílula avisa.
+    SoCopiado,
+    /// Nem colou nem copiou (marcas de exclusão recusadas): o texto só está no histórico do Dita.se.
+    Recusado,
+}
 
 #[cfg(windows)] #[path = "win_gancho.rs"] pub mod gancho;
 #[cfg(windows)] #[path = "win_colagem.rs"] pub mod colagem;
@@ -44,5 +50,6 @@ pub mod sistema {
     pub fn app_em_foco() -> (String, String) { (String::new(), String::new()) }
     pub fn abrir(alvo: &str) -> std::io::Result<()> { std::process::Command::new("open").arg(alvo).spawn().map(|_| ()) }
     /// Espaço livre no volume; fora do Windows o baixador segue sem a conferência.
+    pub fn alerta(titulo: &str, texto: &str) { eprintln!("{titulo}: {texto}"); }
     pub fn espaco_livre(_pasta: &std::path::Path) -> Option<u64> { None }
 }
