@@ -16,7 +16,9 @@ App Tauri 2 (WebView2) que serve a mesma interface do Mac (`ui/`) e fala com ela
 | `src-tauri/src/decodificacao.rs`, `nativo/win_midia.rs` | Media Foundation (mp4, mov, m4a) e Symphonia (wav, flac, mp3) | `AudioLancamento` |
 | `src-tauri/src/pilula.rs`, `pilula/pilula.html` | pílula: janela transparente, no topo, sem roubar foco | `Pilula`, `PilulaProgresso` |
 | `src-tauri/src/preferencias.rs`, `caminhos.rs` | ajustes em JSON em `%APPDATA%\Dita.se`; áudio e modelos em `%LOCALAPPDATA%\Dita.se` | `Preferencias`, `Caminhos` |
-| `src-tauri/src/integracao.rs` | **único ponto de contato com `nucleo` e `motores`**; lista `PENDENCIAS` | |
+| `src-tauri/src/integracao.rs` | ditado e histórico sobre `nucleo` (Banco, SessaoDitado, dicionário, estatísticas, recuperação de interrompidos); trait `Motores` e dublês de teste | `Controlador` |
+| `src-tauri/src/lancamento.rs` | arquivos e reuniões: fila com `ProcessadorDeArquivo`, captura em `ColetorDeReuniao`, `ProcessadorDeReuniao` ao vivo, passada final de falantes, recuperação, resumo | `ServicoLancamento` |
+| `src-tauri/src/motores_locais.rs` | Parakeet, diarização e llama-server; download dos modelos com retomada, SHA-256 e cancelamento | `TranscritorParakeet`, `ServidorLLM`, `ModeloIA` |
 | `src-tauri/src/relatorio.rs` | "Copiar relatório de teste" (bandeja e método `relatorio.copiar`) | |
 | `src-tauri/src/teste.rs` | modos de teste por linha de comando | |
 
@@ -52,4 +54,9 @@ Dita.se.exe --testar-arquivo C:\video.mp4    decodifica e mede
 
 O resultado (só números) vai para `%APPDATA%\Dita.se\teste-*.json` e para o registro.
 
-Enquanto o motor de fala não está integrado, o ditado grava o WAV e cola `[Dita.se teste: N s de áudio gravado; transcrição na próxima versão]`, para conferir atalho, microfone, pílula e colagem no Bloco de Notas, Word e navegador.
+## Modelos
+
+- Fala (Parakeet) e falantes (pyannote + CAM++), cerca de 706 MB: baixam sozinhos na primeira abertura; o progresso aparece no estado do reconhecedor ("Baixando o modelo de fala: N%"). Até terminar, o ditado avisa na pílula e Arquivos/Reunião ficam indisponíveis.
+- IA local (Qwen, 1,28 GB): só pelo botão do Início, com progresso e cancelamento. Ao terminar, a limpeza liga.
+- Limpeza por IA desligada por padrão no Windows (llama.cpp de CPU). Se o servidor não subir em 60 s ou falhar, ela desliga sozinha e o ditado segue com regras e dicionário.
+- Arquivos em `%LOCALAPPDATA%\Dita.se\Models`; todo download confere o SHA-256 antes de renomear.

@@ -7,15 +7,19 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
-use crate::{audio, caminhos, decodificacao, nativo, preferencias::Tecla, Casca};
+use std::sync::Arc;
+
+use crate::{audio, caminhos, decodificacao, integracao::Integracao, lancamento::Lancamento, nativo, preferencias::Tecla, Casca};
 
 /// Situação de cada método do contrato no Windows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Situacao {
-    /// Implementado na casca, sem depender do núcleo.
+    /// Implementado só na casca.
     Pronto,
-    /// A casca faz a parte nativa; o resultado depende do núcleo ou dos motores (ver `integracao`).
-    DependeDoNucleo,
+    /// Ligado ao núcleo e aos motores (`integracao`, `lancamento`, `motores_locais`).
+    Nucleo,
+    /// Sem equivalente no Windows: devolve erro claro.
+    Indisponivel,
 }
 
 /// Todos os métodos atendidos, com aliases. Os 41 do contrato aparecem aqui, mais `relatorio.copiar`.
@@ -30,43 +34,43 @@ pub const METODOS: &[(&str, Situacao)] = &[
     ("lancamento.exportar", Situacao::Pronto),
     ("lancamento.permissao", Situacao::Pronto),
     ("relatorio.copiar", Situacao::Pronto),
-    ("historico", Situacao::DependeDoNucleo),
-    ("estatisticas", Situacao::DependeDoNucleo),
-    ("dicionario.listar", Situacao::DependeDoNucleo),
-    ("dicionario.salvar", Situacao::DependeDoNucleo),
-    ("dicionario.apagar", Situacao::DependeDoNucleo),
-    ("ditado.apagar", Situacao::DependeDoNucleo),
-    ("ditado.retranscrever", Situacao::DependeDoNucleo),
-    ("wispr.importar", Situacao::DependeDoNucleo),
-    ("modelo.baixar", Situacao::DependeDoNucleo),
-    ("modelo.cancelar", Situacao::DependeDoNucleo),
-    ("lancamento.estado", Situacao::DependeDoNucleo),
-    ("lancamento.documento", Situacao::DependeDoNucleo),
-    ("lancamento.buscarArquivos", Situacao::DependeDoNucleo),
-    ("lancamento.recuperar", Situacao::DependeDoNucleo),
-    ("lancamento.descartar", Situacao::DependeDoNucleo),
-    ("lancamento.escolher", Situacao::DependeDoNucleo),
-    ("lancamento.adicionar", Situacao::DependeDoNucleo),
-    ("arquivo.transcrever", Situacao::DependeDoNucleo),
-    ("lancamento.repetir", Situacao::DependeDoNucleo),
-    ("arquivo.listar", Situacao::DependeDoNucleo),
-    ("reuniao.listar", Situacao::DependeDoNucleo),
-    ("arquivo.cancelar", Situacao::DependeDoNucleo),
-    ("lancamento.remover", Situacao::DependeDoNucleo),
-    ("lancamento.desfazer", Situacao::DependeDoNucleo),
-    ("lancamento.cancelarFila", Situacao::DependeDoNucleo),
-    ("lancamento.iniciar", Situacao::DependeDoNucleo),
-    ("reuniao.iniciar", Situacao::DependeDoNucleo),
-    ("lancamento.pausar", Situacao::DependeDoNucleo),
-    ("reuniao.pausar", Situacao::DependeDoNucleo),
-    ("lancamento.encerrar", Situacao::DependeDoNucleo),
-    ("reuniao.encerrar", Situacao::DependeDoNucleo),
-    ("lancamento.resumir", Situacao::DependeDoNucleo),
-    ("lancamento.cancelarResumo", Situacao::DependeDoNucleo),
-    ("lancamento.titulo", Situacao::DependeDoNucleo),
-    ("lancamento.voz", Situacao::DependeDoNucleo),
-    ("falante.renomear", Situacao::DependeDoNucleo),
-    ("lancamento.trecho", Situacao::DependeDoNucleo),
+    ("historico", Situacao::Nucleo),
+    ("estatisticas", Situacao::Nucleo),
+    ("dicionario.listar", Situacao::Nucleo),
+    ("dicionario.salvar", Situacao::Nucleo),
+    ("dicionario.apagar", Situacao::Nucleo),
+    ("ditado.apagar", Situacao::Nucleo),
+    ("ditado.retranscrever", Situacao::Nucleo),
+    ("wispr.importar", Situacao::Indisponivel),
+    ("modelo.baixar", Situacao::Nucleo),
+    ("modelo.cancelar", Situacao::Nucleo),
+    ("lancamento.estado", Situacao::Nucleo),
+    ("lancamento.documento", Situacao::Nucleo),
+    ("lancamento.buscarArquivos", Situacao::Nucleo),
+    ("lancamento.recuperar", Situacao::Nucleo),
+    ("lancamento.descartar", Situacao::Nucleo),
+    ("lancamento.escolher", Situacao::Nucleo),
+    ("lancamento.adicionar", Situacao::Nucleo),
+    ("arquivo.transcrever", Situacao::Nucleo),
+    ("lancamento.repetir", Situacao::Nucleo),
+    ("arquivo.listar", Situacao::Nucleo),
+    ("reuniao.listar", Situacao::Nucleo),
+    ("arquivo.cancelar", Situacao::Nucleo),
+    ("lancamento.remover", Situacao::Nucleo),
+    ("lancamento.desfazer", Situacao::Nucleo),
+    ("lancamento.cancelarFila", Situacao::Nucleo),
+    ("lancamento.iniciar", Situacao::Nucleo),
+    ("reuniao.iniciar", Situacao::Nucleo),
+    ("lancamento.pausar", Situacao::Nucleo),
+    ("reuniao.pausar", Situacao::Nucleo),
+    ("lancamento.encerrar", Situacao::Nucleo),
+    ("reuniao.encerrar", Situacao::Nucleo),
+    ("lancamento.resumir", Situacao::Nucleo),
+    ("lancamento.cancelarResumo", Situacao::Nucleo),
+    ("lancamento.titulo", Situacao::Nucleo),
+    ("lancamento.voz", Situacao::Nucleo),
+    ("falante.renomear", Situacao::Nucleo),
+    ("lancamento.trecho", Situacao::Nucleo),
 ];
 
 type R = Result<String, String>;
@@ -86,14 +90,14 @@ fn prefixo(s: &str, n: usize) -> String { s.chars().take(n).collect() }
 /// Avisa a interface de que um assunto mudou (`window` recebe `CustomEvent('ditado', {detail})`).
 pub fn emitir(app: &AppHandle, assunto: &str) {
     if let Some(j) = app.get_webview_window("principal") {
-        let _ = j.eval(&format!("window.dispatchEvent(new CustomEvent('ditado', {{ detail: {} }}))", json!(assunto)));
+        let _ = j.eval(format!("window.dispatchEvent(new CustomEvent('ditado', {{ detail: {} }}))", json!(assunto)));
     }
 }
 
 /// Eventos com dados (`ditado:progresso`, `ditado:trechos`, `ditado:resultado`, `ditado:arquivos-soltos`).
 pub fn emitir_evento(app: &AppHandle, evento: &str, detalhe: &Value) {
     if let Some(j) = app.get_webview_window("principal") {
-        let _ = j.eval(&format!("window.dispatchEvent(new CustomEvent({}, {{ detail: {} }}))", json!(evento), detalhe));
+        let _ = j.eval(format!("window.dispatchEvent(new CustomEvent({}, {{ detail: {} }}))", json!(evento), detalhe));
     }
 }
 
@@ -109,16 +113,9 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
     let banco = &casca.integracao;
     let lance = &casca.lancamento;
     let c = &casca.controlador;
+    if let Some(r) = atender_dados(banco, lance, metodo, p) { return r; }
     match metodo {
-        // MARK: Arquivos e reuniões
-        "lancamento.estado" => json_de(lance.estado(audio::microfone_disponivel())),
-        "lancamento.documento" => lance.documento(&texto(p, "id")?).map_err(erro).and_then(json_de),
-        "lancamento.buscarArquivos" => {
-            let termo = p.get("termo").and_then(Value::as_str).unwrap_or("").trim();
-            if termo.is_empty() { Ok("[]".into()) } else { lance.procurar_arquivos(termo).map_err(erro).and_then(json_de) }
-        }
-        "lancamento.recuperar" => lance.recuperar_reuniao(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
-        "lancamento.descartar" => lance.descartar_reuniao(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        // MARK: Arquivos e reuniões (os que precisam da janela ou do sistema)
         "lancamento.escolher" | "lancamento.adicionar" | "arquivo.transcrever" => {
             let arquivos = escolher_arquivos(app, true);
             if arquivos.is_empty() { return Ok("null".into()); }
@@ -141,22 +138,6 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
             std::fs::write(destino, conteudo).map_err(erro)?;
             ok()
         }
-        "arquivo.listar" => json_de(lance.estado(true)["arquivos"].clone()),
-        "reuniao.listar" => json_de(lance.estado(true)["anteriores"].clone()),
-        "arquivo.cancelar" => { lance.cancelar(&texto(p, "id")?); ok() }
-        "lancamento.remover" => lance.remover(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
-        "lancamento.desfazer" => lance.desfazer(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
-        "lancamento.cancelarFila" => { lance.cancelar_fila(); ok() }
-        "reuniao.iniciar" | "lancamento.iniciar" => {
-            // A interface manda `mac`/`macEMicrofone`; no Windows a fonte é o áudio do sistema (loopback).
-            let fonte = texto(p, "fonte")?;
-            if !["mac", "macEMicrofone", "sistema", "sistemaEMicrofone"].contains(&fonte.as_str()) { return Err("fonte desconhecida".into()); }
-            lance.iniciar_reuniao(&fonte).map_err(erro).and_then(|_| ok())
-        }
-        "reuniao.pausar" | "lancamento.pausar" => lance.pausar(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
-        "reuniao.encerrar" | "lancamento.encerrar" => lance.encerrar(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
-        "lancamento.resumir" => lance.resumir(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
-        "lancamento.cancelarResumo" => { lance.cancelar_resumo(&texto(p, "id")?); ok() }
         "lancamento.permissao" => {
             // Áudio do sistema não pede permissão no Windows; o microfone abre a tela de Privacidade.
             match texto(p, "qual")?.as_str() {
@@ -165,33 +146,9 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
                 _ => Err("permissão desconhecida".into()),
             }
         }
-        "lancamento.titulo" => lance.alterar_titulo(&texto(p, "id")?, &prefixo(&texto(p, "nome")?, 160)).map_err(erro).and_then(|_| ok()),
-        "falante.renomear" | "lancamento.voz" => lance.renomear_voz(&texto(p, "id")?, &texto(p, "voz")?, &texto(p, "nome")?).map_err(erro).and_then(|_| ok()),
-        "lancamento.trecho" => {
-            let voz = p.get("voz").and_then(Value::as_str).map(String::from);
-            let nome = if voz.is_none() { Some(prefixo(&texto(p, "nome")?, 120)) } else { None };
-            lance.reatribuir(&texto(p, "id")?, &texto(p, "trecho")?, voz.as_deref(), nome.as_deref()).map_err(erro).and_then(|_| ok())
-        }
 
         // MARK: Ditado
         "estado" => json_de(estado(casca)),
-        "historico" => {
-            let busca = p.get("busca").and_then(Value::as_str).unwrap_or("");
-            let limite = p.get("limite").and_then(Value::as_f64).unwrap_or(200.0).clamp(1.0, 1000.0) as usize;
-            banco.historico(limite, busca).map_err(erro).and_then(json_de)
-        }
-        "estatisticas" => {
-            let dias = p.get("dias").and_then(Value::as_f64).unwrap_or(30.0).clamp(7.0, 365.0) as u32;
-            banco.estatisticas(dias).map_err(erro).and_then(json_de)
-        }
-        "dicionario.listar" => banco.termos().map_err(erro).and_then(json_de),
-        "dicionario.salvar" => {
-            let termo = p.get("termo").and_then(Value::as_str).ok_or("falta termo")?;
-            let formas: Vec<String> = p.get("ouvidoComo").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
-            let id = p.get("id").and_then(Value::as_f64).unwrap_or(0.0) as i64;
-            banco.salvar_termo(id, termo, formas).map_err(erro).and_then(json_de)
-        }
-        "dicionario.apagar" => { banco.apagar_termo(inteiro(p, "id")?).map_err(erro)?; ok() }
         "ajustes.ler" => json_de(ajustes(casca)),
         "ajustes.definir" => {
             let (chave, valor) = match (p.get("chave").and_then(Value::as_str), p.get("valor").and_then(Value::as_str)) {
@@ -221,7 +178,7 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
             ok()
         }
         "ditado.retranscrever" => { c.retranscrever(inteiro(p, "id")?)?; ok() }
-        "copiar" => { nativo::colagem::copiar(&p.get("texto").and_then(Value::as_str).ok_or("falta texto")?.to_string())?; ok() }
+        "copiar" => { nativo::colagem::copiar(p.get("texto").and_then(Value::as_str).ok_or("falta texto")?)?; ok() }
         "gravacao.alternar" => { c.alternar(); ok() }
         "wispr.importar" => {
             let resumo = banco.importar_wispr().map_err(erro)?;
@@ -229,8 +186,8 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
             emitir(app, "dicionario");
             json_de(resumo)
         }
-        "modelo.baixar" => { banco.baixar_modelo().map_err(erro)?; ok() }
-        "modelo.cancelar" => { banco.cancelar_modelo().map_err(erro)?; ok() }
+        "modelo.baixar" => { banco.motores.baixar_modelo()?; emitir(app, "estado"); ok() }
+        "modelo.cancelar" => { banco.motores.cancelar_modelo(); ok() }
         "abrir.pastaDeModelos" => { nativo::sistema::abrir(&caminhos::modelos().to_string_lossy()).map_err(erro)?; ok() }
         "relatorio.copiar" => {
             let texto = crate::relatorio::montar(casca);
@@ -241,17 +198,80 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
     }
 }
 
+/// Métodos que só dependem do núcleo e dos motores, sem janela nem diálogo: testáveis com dublês.
+pub fn atender_dados(banco: &Integracao, lance: &Arc<Lancamento>, metodo: &str, p: &Value) -> Option<R> {
+    const OUTRO: &str = "\u{0}outro";
+    let r = dados(banco, lance, metodo, p, OUTRO);
+    if matches!(&r, Err(e) if e == OUTRO) { None } else { Some(r) }
+}
+
+fn dados(banco: &Integracao, lance: &Arc<Lancamento>, metodo: &str, p: &Value, outro: &str) -> R {
+    match metodo {
+        "lancamento.estado" => lance.estado(audio::microfone_disponivel()).map_err(erro).and_then(json_de),
+        "lancamento.documento" => lance.documento(&texto(p, "id")?).map_err(erro).and_then(json_de),
+        "lancamento.buscarArquivos" => {
+            let termo = p.get("termo").and_then(Value::as_str).unwrap_or("").trim();
+            if termo.is_empty() { Ok("[]".into()) } else { lance.procurar_arquivos(termo).map_err(erro).and_then(json_de) }
+        }
+        "lancamento.recuperar" => lance.recuperar_reuniao(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "lancamento.descartar" => lance.descartar_reuniao(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "arquivo.listar" => lance.estado(true).map_err(erro).and_then(|e| json_de(&e["arquivos"])),
+        "reuniao.listar" => lance.estado(true).map_err(erro).and_then(|e| json_de(&e["anteriores"])),
+        "arquivo.cancelar" => lance.cancelar(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "lancamento.remover" => lance.remover(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "lancamento.desfazer" => lance.desfazer(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "lancamento.cancelarFila" => lance.cancelar_fila().map_err(erro).and_then(|_| ok()),
+        "reuniao.iniciar" | "lancamento.iniciar" => {
+            // A interface manda `mac`/`macEMicrofone`; no Windows a fonte é o áudio do sistema (loopback).
+            let fonte = texto(p, "fonte")?;
+            if !["mac", "macEMicrofone", "sistema", "sistemaEMicrofone"].contains(&fonte.as_str()) { return Err("fonte desconhecida".into()); }
+            lance.iniciar_reuniao(&fonte).map_err(erro).and_then(|_| ok())
+        }
+        "reuniao.pausar" | "lancamento.pausar" => lance.pausar(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "reuniao.encerrar" | "lancamento.encerrar" => lance.encerrar(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "lancamento.resumir" => lance.resumir(&texto(p, "id")?).map_err(erro).and_then(|_| ok()),
+        "lancamento.cancelarResumo" => { lance.cancelar_resumo(&texto(p, "id")?); ok() }
+        "lancamento.titulo" => lance.alterar_titulo(&texto(p, "id")?, &prefixo(&texto(p, "nome")?, 160)).map_err(erro).and_then(|_| ok()),
+        "falante.renomear" | "lancamento.voz" => lance.renomear_voz(&texto(p, "id")?, &texto(p, "voz")?, &texto(p, "nome")?).map_err(erro).and_then(|_| ok()),
+        "lancamento.trecho" => {
+            let voz = p.get("voz").and_then(Value::as_str).map(String::from);
+            let nome = if voz.is_none() { Some(prefixo(&texto(p, "nome")?, 120)) } else { None };
+            lance.reatribuir(&texto(p, "id")?, &texto(p, "trecho")?, voz.as_deref(), nome.as_deref()).map_err(erro).and_then(|_| ok())
+        }
+        "historico" => {
+            let busca = p.get("busca").and_then(Value::as_str).unwrap_or("");
+            let limite = p.get("limite").and_then(Value::as_f64).unwrap_or(200.0).clamp(1.0, 1000.0) as usize;
+            banco.historico(limite, busca).map_err(erro).and_then(json_de)
+        }
+        "estatisticas" => {
+            let dias = p.get("dias").and_then(Value::as_f64).unwrap_or(30.0).clamp(7.0, 365.0) as u32;
+            banco.estatisticas(dias).map_err(erro).and_then(json_de)
+        }
+        "dicionario.listar" => banco.termos().map_err(erro).and_then(json_de),
+        "dicionario.salvar" => {
+            let termo = p.get("termo").and_then(Value::as_str).ok_or("falta termo")?;
+            let formas: Vec<String> = p.get("ouvidoComo").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+            let id = p.get("id").and_then(Value::as_f64).unwrap_or(0.0) as i64;
+            banco.salvar_termo(id, termo, formas).map_err(erro).and_then(json_de)
+        }
+        "dicionario.apagar" => { banco.apagar_termo(inteiro(p, "id")?).map_err(erro)?; ok() }
+        _ => Err(outro.into()),
+    }
+}
+
 fn estado(casca: &Casca) -> Value {
     let c = &casca.controlador;
     let tecla = casca.prefs.atalho();
-    let (rec, detalhe) = casca.integracao.reconhecedor();
-    let mut modelo = casca.integracao.modelo_ia();
+    let motores = &casca.integracao.motores;
+    let (rec, detalhe) = motores.estado_reconhecedor();
+    let (limpador, detalhe_limpador) = motores.estado_limpador();
+    let mut modelo = motores.modelo_ia();
     modelo["aviso"] = json!(casca.prefs.ler("avisoModelo") == "1");
     json!({
         "fase": c.fase().id(),
         "maosLivres": c.maos_livres(),
         "reconhecedor": {"estado": rec, "detalhe": detalhe, "nome": "Parakeet"},
-        "limpador": {"estado": "desligado", "detalhe": "", "ligado": casca.prefs.limpeza_ia(), "modelo": casca.prefs.modelo().trim_end_matches(".gguf")},
+        "limpador": {"estado": limpador, "detalhe": detalhe_limpador, "ligado": casca.prefs.limpeza_ia(), "modelo": casca.prefs.modelo().trim_end_matches(".gguf")},
         "modeloIA": modelo,
         "permissoes": {"microfone": if audio::microfone_disponivel() { "concedida" } else { "negada" }, "acessibilidade": "concedida"},
         "atalho": {"tecla": tecla.id(), "nome": tecla.nome(), "simbolo": tecla.simbolo(), "instalado": *c.atalho_instalado.lock().unwrap()},
@@ -270,7 +290,7 @@ fn ajustes(casca: &Casca) -> Value {
         "microfones": audio::microfones().into_iter().map(|(uid, nome)| json!({"uid": uid, "nome": nome})).collect::<Vec<_>>(),
         "modelos": modelos,
         "pastaDeModelos": caminhos::modelos().to_string_lossy(),
-        "llamaInstalado": caminhos::llama_server().is_file(),
+        "llamaInstalado": casca.integracao.motores.llama_instalado(),
     })
 }
 
@@ -308,6 +328,99 @@ mod testes {
         assert!(chamados.len() >= 25, "varredura achou poucos métodos: {chamados:?}");
         let faltando: Vec<_> = chamados.iter().filter(|m| !atendidos.contains(m.as_str())).collect();
         assert!(faltando.is_empty(), "métodos chamados pela interface sem atendimento: {faltando:?}");
+    }
+
+    mod integrada {
+        use std::{sync::{Arc, Mutex}, thread, time::{Duration, Instant}};
+
+        use serde_json::{json, Value};
+
+        use crate::{integracao::{dubles::{voz, MotoresDuble}, Integracao}, lancamento::{dubles::CapturaDuble, Lancamento}, ponte::{atender_dados, METODOS, Situacao}};
+
+        struct Ponte { _tmp: tempfile::TempDir, banco: Integracao, lance: Arc<Lancamento>, eventos: Arc<Mutex<Vec<String>>> }
+
+        impl Ponte {
+            fn nova() -> Self {
+                let tmp = tempfile::tempdir().unwrap();
+                let motores = MotoresDuble::novo();
+                let banco = Integracao::abrir(&tmp.path().join("d.sqlite"), motores.clone()).unwrap();
+                let eventos = Arc::new(Mutex::new(Vec::new()));
+                let e = eventos.clone();
+                let lance = Lancamento::new(&tmp.path().join("d.sqlite"), &tmp.path().join("Audio"), motores, Arc::new(CapturaDuble { segundos: 3.0 }),
+                    Arc::new(|t: &str| t.to_string()), Arc::new(move |a, _| e.lock().unwrap().push(a.to_string()))).unwrap();
+                Self { _tmp: tmp, banco, lance, eventos }
+            }
+            /// Chama como a interface: nome do método e parâmetros JSON; devolve o JSON lido da resposta em texto.
+            fn chamar(&self, metodo: &str, params: Value) -> Result<Value, String> {
+                let r = atender_dados(&self.banco, &self.lance, metodo, &params).unwrap_or_else(|| panic!("{metodo} não é método de dados"));
+                r.map(|t| serde_json::from_str(&t).unwrap())
+            }
+            fn esperar(&self, o_que: &str, mut f: impl FnMut(&Self) -> bool) {
+                let inicio = Instant::now();
+                while !f(self) { assert!(inicio.elapsed() < Duration::from_secs(30), "esperando {o_que}"); thread::sleep(Duration::from_millis(50)); }
+            }
+        }
+
+        #[test]
+        fn nenhum_metodo_fica_sem_atendimento_real_salvo_wispr() {
+            let fora: Vec<_> = METODOS.iter().filter(|(_, s)| *s == Situacao::Indisponivel).map(|(m, _)| *m).collect();
+            assert_eq!(fora, ["wispr.importar"]);
+            let fonte = include_str!("integracao.rs").to_owned() + include_str!("lancamento.rs") + include_str!("ponte.rs");
+            assert!(!fonte.contains(&["Ainda não disponível", " nesta versão de teste"].concat()), "sobrou stub");
+        }
+
+        #[test]
+        fn dicionario_historico_e_estatisticas_pela_ponte() {
+            let p = Ponte::nova();
+            let t = p.chamar("dicionario.salvar", json!({"termo": "Dita.se", "ouvidoComo": ["dita se"]})).unwrap();
+            assert_eq!(p.chamar("dicionario.listar", json!({})).unwrap()[0]["termo"], "Dita.se");
+            assert_eq!(p.chamar("dicionario.apagar", json!({"id": t["id"]})).unwrap(), true);
+            assert_eq!(p.chamar("historico", json!({"busca": "", "limite": 50})).unwrap(), json!([]));
+            let e = p.chamar("estatisticas", json!({"dias": 30})).unwrap();
+            assert_eq!(e["porDia"].as_array().unwrap().len(), 30);
+            assert!(p.chamar("dicionario.apagar", json!({})).is_err(), "sem id recusa");
+        }
+
+        #[test]
+        fn arquivo_e_edicoes_pela_ponte() {
+            let p = Ponte::nova();
+            let estado = p.chamar("lancamento.estado", json!({})).unwrap();
+            assert_eq!(estado["disponivel"], true);
+            let arq = p._tmp.path().join("aula.wav");
+            crate::audio::EscritorWav::criar(&arq).unwrap().gravar(&voz(3.0, 0.5)).unwrap();
+            let id = p.lance.adicionar(&[arq]).unwrap().unwrap();
+            p.esperar("arquivo pronto", |p| p.chamar("arquivo.listar", json!({})).unwrap()[0]["fase"] == "pronto");
+            let doc = p.chamar("lancamento.documento", json!({"id": id})).unwrap();
+            let trecho = doc["trechos"][0]["id"].clone();
+            assert_eq!(p.chamar("lancamento.buscarArquivos", json!({"termo": "palavra1"})).unwrap(), json!([id]));
+            assert_eq!(p.chamar("lancamento.titulo", json!({"id": id, "nome": "Aula 1"})).unwrap(), true);
+            assert_eq!(p.chamar("falante.renomear", json!({"id": id, "voz": "offline-1", "nome": "Ana"})).unwrap(), true);
+            assert_eq!(p.chamar("lancamento.trecho", json!({"id": id, "trecho": trecho, "nome": "Bia"})).unwrap(), true);
+            let doc = p.chamar("lancamento.documento", json!({"id": id})).unwrap();
+            assert_eq!(doc["nome"], "Aula 1");
+            assert!(doc["vozes"].as_array().unwrap().iter().any(|v| v["nome"] == "Bia"), "{doc}");
+            assert_eq!(p.chamar("lancamento.remover", json!({"id": id})).unwrap(), true);
+            assert!(p.chamar("arquivo.listar", json!({})).unwrap().as_array().unwrap().is_empty());
+            assert_eq!(p.chamar("lancamento.desfazer", json!({"id": id})).unwrap(), true);
+            assert_eq!(p.chamar("arquivo.listar", json!({})).unwrap().as_array().unwrap().len(), 1);
+            assert!(p.eventos.lock().unwrap().iter().any(|e| e == "ditado:progresso"));
+        }
+
+        #[test]
+        fn reuniao_pela_ponte_ate_arquivada() {
+            let p = Ponte::nova();
+            assert!(p.chamar("lancamento.iniciar", json!({"fonte": "radio"})).is_err());
+            p.chamar("reuniao.iniciar", json!({"fonte": "macEMicrofone"})).unwrap();
+            let id = p.chamar("lancamento.estado", json!({})).unwrap()["reuniao"]["id"].as_str().unwrap().to_string();
+            assert_eq!(p.chamar("reuniao.pausar", json!({"id": id})).unwrap(), true);
+            assert_eq!(p.chamar("lancamento.pausar", json!({"id": id})).unwrap(), true);
+            thread::sleep(Duration::from_millis(1200));
+            assert_eq!(p.chamar("reuniao.encerrar", json!({"id": id})).unwrap(), true);
+            p.esperar("reunião arquivada", |p| p.chamar("reuniao.listar", json!({})).unwrap().as_array().unwrap().iter().any(|r| r["id"] == json!(id)));
+            assert!(p.chamar("lancamento.estado", json!({})).unwrap().get("reuniao").is_none());
+            assert!(p.chamar("lancamento.resumir", json!({"id": id})).is_err(), "sem IA local, resumo recusa com motivo");
+            assert_eq!(p.chamar("lancamento.cancelarResumo", json!({"id": id})).unwrap(), true);
+        }
     }
 
     #[test]

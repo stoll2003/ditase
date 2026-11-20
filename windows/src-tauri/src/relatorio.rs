@@ -1,7 +1,7 @@
 //! "Copiar relatório de teste": o que o Vinicius cola no chat depois de testar no PC.
 //! Só versão, Windows, situação das peças e as últimas linhas do registro. O registro nunca
 //! recebe texto ditado nem título de janela; mesmo assim, linhas com aspas são cortadas.
-use crate::{audio, caminhos, integracao::PENDENCIAS, Casca};
+use crate::{audio, caminhos, Casca};
 
 pub fn montar(casca: &Casca) -> String {
     let mut r = String::new();
@@ -11,10 +11,14 @@ pub fn montar(casca: &Casca) -> String {
     let microfones = audio::microfones();
     r.push_str(&format!("Microfones: {} encontrado(s); escolhido: {}\n", microfones.len(), if casca.prefs.microfone().is_empty() { "padrão" } else { "outro" }));
     r.push_str(&format!("Fase do ditado: {}\n", casca.controlador.fase().id()));
-    let prontos = crate::ponte::METODOS.iter().filter(|(_, s)| *s == crate::ponte::Situacao::Pronto).count();
-    r.push_str(&format!("Ponte: {} métodos, {prontos} prontos na casca, {} dependem do núcleo\n", crate::ponte::METODOS.len(), crate::ponte::METODOS.len() - prontos));
-    r.push_str("\nAinda dependem do núcleo/motores:\n");
-    for (_, efeito) in PENDENCIAS { r.push_str(&format!("- {efeito}\n")); }
+    let fora = crate::ponte::METODOS.iter().filter(|(_, s)| *s == crate::ponte::Situacao::Indisponivel).count();
+    r.push_str(&format!("Ponte: {} métodos, {fora} sem equivalente no Windows (importar do Wispr Flow)\n", crate::ponte::METODOS.len()));
+    let motores = &casca.integracao.motores;
+    let (fala, _) = motores.estado_reconhecedor();
+    let (limpador, _) = motores.estado_limpador();
+    r.push_str(&format!("Modelo de fala: {fala}; IA local: {limpador} (limpeza {}), modelo {}\n",
+        if casca.prefs.limpeza_ia() { "ligada" } else { "desligada" },
+        motores.modelo_ia()["estado"].as_str().unwrap_or("?")));
     r.push_str("\nÚltimas linhas do registro:\n");
     for linha in caminhos::ultimas_linhas(60) {
         // Defesa extra: nada entre aspas sai no relatório.

@@ -1,43 +1,56 @@
-//! Único ponto de contato da casca com o núcleo (`nucleo-rs`) e os motores (`motores`).
+//! Ligação da casca com o núcleo (`nucleo`) e os motores (`motores`) no ditado e no histórico.
 //!
-//! O Dev Back está portando a API pública Swift `Nucleo` com os mesmos nomes em snake_case.
-//! Cada função aqui diz qual chamada do núcleo ela espera. Enquanto o núcleo não tem a peça,
-//! a função devolve [`Faltando`] (mutações) ou um valor vazio no formato do contrato (leituras),
-//! para a interface abrir sem erro. Na integração, só este arquivo muda.
-//!
-//! Lista do que depende do núcleo e dos motores: [`PENDENCIAS`] (também sai no relatório de teste).
-use std::path::{Path, PathBuf};
+//! Os motores entram pelo trait [`Motores`]: no app, [`crate::motores_locais::MotoresLocais`]
+//! (Parakeet, diarização e llama-server); nos testes, dublês que não baixam modelo nenhum.
+//! Arquivos e reuniões ficam em [`crate::lancamento`].
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, MutexGuard},
+};
 
-use serde_json::{json, Value};
+use nucleo::{
+    motores::{IdentificadorDeFalantes, Limpador, ReconhecedorDeFala, Transcritor},
+    AoTrecho, AplicadorDicionario, Banco, ConfigSessao, Estatisticas, Palavras, RegrasFala, SessaoDitado, Termo,
+};
+use serde_json::Value;
 
-#[derive(Debug, Clone)]
-pub struct Faltando(pub &'static str);
-
-impl std::fmt::Display for Faltando {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Ainda não disponível nesta versão de teste do Windows: {}.", self.0)
-    }
-}
-impl std::error::Error for Faltando {}
+use crate::caminhos::nota;
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
-fn falta<T>(o_que: &'static str) -> Res<T> { Err(Box::new(Faltando(o_que))) }
+/// O reconhecedor serve aos dois fluxos: ditado (`Transcritor`) e arquivos/reuniões (`ReconhecedorDeFala`).
+pub trait Fala: Transcritor + ReconhecedorDeFala {}
+impl<T: Transcritor + ReconhecedorDeFala + ?Sized> Fala for T {}
 
-/// Pendências de integração: (peça esperada, o que fica sem funcionar até lá).
-pub const PENDENCIAS: &[(&str, &str)] = &[
-    ("nucleo::Banco (abrir, inserir, atualizar, concluir, ditado, historico, apagar_ditado, para_estatisticas, gravar_trecho, interrompidos, termos, salvar_termo, apagar_termo, contar_uso, ultimo_concluido)", "histórico, dicionário, insights, recuperação de ditado interrompido"),
-    ("nucleo::Estatisticas::calcular", "página Insights (vem zerada)"),
-    ("nucleo::SessaoDitado + nucleo::AplicadorDicionario + nucleo::Segmentador", "transcrever o ditado (hoje grava o WAV e avisa)"),
-    ("motores: Transcritor Parakeet (sherpa-onnx)", "reconhecedor de fala"),
-    ("motores: Limpador llama-server + nucleo::LimpadorLlama", "limpeza por IA"),
-    ("nucleo::BaixadorDeModelo + catálogo do modelo padrão", "baixar o modelo de IA pelo Início"),
-    ("nucleo::lancamento (ArmazemLancamento, ProcessadorDeArquivo, ProcessadorDeReuniao, ColetorDeReuniao, DiarioReuniao, LeituraLancamento)", "Arquivos e Reunião (disponivel=false)"),
-    ("motores: IdentificadorDeFalantes (diarização sherpa-onnx)", "falantes em arquivos e reuniões"),
-    ("nucleo::ImportadorWispr (se houver banco equivalente no Windows)", "importar do Wispr Flow"),
-];
+/// O que a casca precisa dos motores. Nada aqui baixa ou carrega modelo nos testes.
+pub trait Motores: Send + Sync {
+    /// Reconhecedor carregado. `esperar`: bloqueia enquanto o modelo ainda carrega (arquivos em fila).
+    /// O erro é um texto para mostrar à pessoa ("Baixando o modelo de fala: 40%").
+    fn fala(&self, esperar: bool) -> Result<Arc<dyn Fala>, String>;
+    /// Os arquivos do modelo de fala estão no disco (mesmo que ainda carregando).
+    fn fala_disponivel(&self) -> bool;
+    /// Separação de falantes, quando o modelo existe.
+    fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>>;
+    /// Limpeza por IA do ditado, só quando ligada nos ajustes e com modelo e servidor presentes.
+    fn limpador(&self) -> Option<Arc<dyn Limpador>>;
+    /// Começa a subir o servidor de IA no começo da gravação (o primeiro trecho não espera).
+    fn aquecer(&self) {}
+    /// Resumo da reunião por IA local disponível agora.
+    fn resumo_disponivel(&self) -> bool;
+    /// Até quatro tópicos a partir das linhas "Nome: fala".
+    fn resumir(&self, linhas: &[String], cancelado: &dyn Fn() -> bool) -> Result<Vec<String>, String>;
+    /// Estado do reconhecedor para a interface: (estado, detalhe).
+    fn estado_reconhecedor(&self) -> (String, String);
+    /// Objeto `limpador` do contrato (sem `ligado` e `modelo`, que vêm dos ajustes).
+    fn estado_limpador(&self) -> (String, String);
+    /// Objeto `modeloIA` do contrato (sem `aviso`).
+    fn modelo_ia(&self) -> Value;
+    fn baixar_modelo(&self) -> Result<(), String>;
+    fn cancelar_modelo(&self);
+    fn llama_instalado(&self) -> bool;
+}
 
-/// Resultado de um ditado, espelho de `ResultadoDitado` do Swift.
+/// Resultado de um ditado, espelho de `nucleo::ResultadoDitado`.
 #[derive(Debug, Clone, Default)]
 pub struct ResultadoDitado {
     pub texto: String,
@@ -50,7 +63,22 @@ pub struct ResultadoDitado {
     pub recusas: u32,
 }
 
-/// Metadados do ditado que a casca cria e completa (espelho de `nucleo::Ditado`).
+impl From<nucleo::ResultadoDitado> for ResultadoDitado {
+    fn from(r: nucleo::ResultadoDitado) -> Self {
+        Self {
+            texto: r.texto,
+            texto_bruto: r.texto_bruto,
+            palavras: r.palavras as u32,
+            duracao_fala: r.duracao_fala,
+            limpador: r.limpador,
+            trocas: r.trocas.into_iter().map(|t| t.termo_id).collect(),
+            falhas: r.falhas as u32,
+            recusas: r.recusas as u32,
+        }
+    }
+}
+
+/// Metadados do ditado que o controlador cria e completa.
 #[derive(Debug, Clone, Default)]
 pub struct Ditado {
     pub id: i64,
@@ -64,7 +92,7 @@ pub struct Ditado {
     pub motor: String,
 }
 
-/// Sessão de um ditado: espera `nucleo::SessaoDitado` (alimentar, finalizar, cancelar, medidor.silencio).
+/// Sessão de um ditado (envolve `nucleo::SessaoDitado`).
 pub trait SessaoDeDitado: Send {
     fn alimentar(&mut self, amostras: &[f32]);
     fn silencio(&self) -> f64;
@@ -72,148 +100,383 @@ pub trait SessaoDeDitado: Send {
     fn cancelar(self: Box<Self>);
 }
 
-pub struct Integracao { banco: PathBuf }
+struct Sessao(SessaoDitado);
+
+impl SessaoDeDitado for Sessao {
+    fn alimentar(&mut self, amostras: &[f32]) {
+        if let Err(e) = self.0.alimentar(amostras) { nota(format!("sessão: {e}")); }
+    }
+    fn silencio(&self) -> f64 { self.0.medidor().1 }
+    fn finalizar(self: Box<Self>) -> ResultadoDitado {
+        match self.0.finalizar() {
+            Ok(r) => r.into(),
+            Err(e) => { nota(format!("sessão: {e}")); ResultadoDitado { falhas: 1, ..Default::default() } }
+        }
+    }
+    fn cancelar(self: Box<Self>) { let mut s = self.0; s.cancelar(); }
+}
+
+pub fn agora() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+fn json<T: serde::Serialize>(v: T) -> Res<Value> { Ok(serde_json::to_value(v)?) }
+
+pub struct Integracao {
+    banco: Arc<Mutex<Banco>>,
+    caminho: PathBuf,
+    pub motores: Arc<dyn Motores>,
+}
 
 impl Integracao {
-    /// Espera `nucleo::Banco::abrir(caminho)`.
-    pub fn abrir(banco: &Path) -> Self { Self { banco: banco.to_path_buf() } }
-    pub fn caminho_do_banco(&self) -> &Path { &self.banco }
+    pub fn abrir(caminho: &Path, motores: Arc<dyn Motores>) -> Res<Self> {
+        Ok(Self { banco: Arc::new(Mutex::new(Banco::new(caminho)?)), caminho: caminho.to_path_buf(), motores })
+    }
+    pub fn caminho_do_banco(&self) -> &Path { &self.caminho }
+    fn b(&self) -> MutexGuard<'_, Banco> { self.banco.lock().unwrap_or_else(|e| e.into_inner()) }
 
-    // MARK: Histórico e dicionário (nucleo::Banco)
+    // MARK: Histórico e dicionário
 
-    /// `Banco::historico(limite, None, busca)` serializado como `Ditado[]` do contrato.
-    pub fn historico(&self, _limite: usize, _busca: &str) -> Res<Value> { Ok(json!([])) }
-    /// `Banco::termos()`.
-    pub fn termos(&self) -> Res<Value> { Ok(json!([])) }
-    /// `Banco::salvar_termo(Termo { id, termo, ouvido_como, .. })`, preservando usos, origem e criado_em do atual.
-    pub fn salvar_termo(&self, _id: i64, _termo: &str, _ouvido_como: Vec<String>) -> Res<Value> { falta("dicionário (núcleo)") }
-    /// `Banco::apagar_termo(id)`.
-    pub fn apagar_termo(&self, _id: i64) -> Res<()> { falta("dicionário (núcleo)") }
-    /// `Banco::ditado(id)`: devolve o nome do arquivo de áudio guardado, para apagar junto.
-    pub fn audio_do_ditado(&self, _id: i64) -> Res<Option<String>> { Ok(None) }
-    /// `Banco::apagar_ditado(id)`.
-    pub fn apagar_ditado(&self, _id: i64) -> Res<()> { falta("histórico (núcleo)") }
-    /// `Estatisticas::calcular(banco.para_estatisticas()?, agora, dias_no_grafico)`.
-    pub fn estatisticas(&self, dias: u32) -> Res<Value> { Ok(estatisticas_vazias(dias)) }
-    /// `Banco::ultimo_concluido()` → texto.
-    pub fn ultimo_texto(&self) -> Res<Option<String>> { Ok(None) }
-    /// `Banco::interrompidos()` + `trechos(id)`: recupera ditados que ficaram "gravando".
-    pub fn recuperar_interrompidos(&self) -> Res<usize> { Ok(0) }
+    pub fn historico(&self, limite: usize, busca: &str) -> Res<Value> { json(self.b().historico(limite as i64, None, busca)?) }
+    pub fn termos(&self) -> Res<Value> { json(self.b().termos()?) }
+
+    /// Termo existente preserva usos, origem e data de criação (como no Mac).
+    pub fn salvar_termo(&self, id: i64, termo: &str, ouvido_como: Vec<String>) -> Res<Value> {
+        let mut b = self.b();
+        let mut novo = Termo { id, termo: termo.to_string(), ouvido_como, ..Default::default() };
+        if id != 0 {
+            if let Some(atual) = b.termos()?.into_iter().find(|t| t.id == id) {
+                novo.usos = atual.usos;
+                novo.origem = atual.origem;
+                novo.criado_em = atual.criado_em;
+            }
+        }
+        json(b.salvar(novo)?)
+    }
+    pub fn apagar_termo(&self, id: i64) -> Res<()> { Ok(self.b().apagar_termo(id)?) }
+    pub fn audio_do_ditado(&self, id: i64) -> Res<Option<String>> { Ok(self.b().ditado(id)?.map(|d| d.audio).filter(|a| !a.is_empty())) }
+    pub fn apagar_ditado(&self, id: i64) -> Res<()> { Ok(self.b().apagar_ditado(id)?) }
+    pub fn estatisticas(&self, dias: u32) -> Res<Value> {
+        let ditados = self.b().para_estatisticas()?;
+        json(Estatisticas::calcular(&ditados, agora(), dias.clamp(7, 365) as usize))
+    }
+    pub fn ultimo_texto(&self) -> Res<Option<String>> { Ok(self.b().ultimo_concluido()?.map(|d| d.texto)) }
+
+    /// Ditado que ficou "gravando" porque o app fechou no meio: o que já estava transcrito volta ao
+    /// histórico como "recuperado"; sem texto e com áudio guardado, fica "falhou" para retranscrever.
+    pub fn recuperar_interrompidos(&self, audios: &Path) -> Res<usize> {
+        let mut b = self.b();
+        let mut recuperados = 0;
+        for mut d in b.interrompidos()? {
+            let trechos = match b.trechos(d.id) {
+                Ok(t) => t,
+                Err(e) => { nota(format!("recuperação: trechos do ditado {} ilegíveis: {e}", d.id)); continue; }
+            };
+            if trechos.is_empty() {
+                if !d.audio.is_empty() && audios.join(&d.audio).is_file() {
+                    d.estado = "falhou".into();
+                    b.atualizar(&d)?;
+                } else {
+                    b.apagar_ditado(d.id)?;
+                }
+                continue;
+            }
+            d.texto_bruto = trechos.join(" ");
+            d.texto = RegrasFala::filtrar(&d.texto_bruto);
+            d.palavras = Palavras::contar(&d.texto) as i64;
+            d.estado = "recuperado".into();
+            d.limpador = "regras".into();
+            match b.concluir(&d) {
+                Ok(()) => { recuperados += 1; nota(format!("ditado {} recuperado com {} palavras", d.id, d.palavras)); }
+                Err(e) => nota(format!("recuperação: ditado {} não foi gravado, reserva mantida: {e}", d.id)),
+            }
+        }
+        Ok(recuperados)
+    }
 
     // MARK: Ciclo do ditado
 
-    /// `Banco::inserir(Ditado { estado: "gravando", .. })` → id. Sem núcleo: id local, nada persiste.
-    pub fn inserir_ditado(&self, _d: &Ditado) -> Res<i64> {
-        Ok(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(1))
+    pub fn inserir_ditado(&self, d: &Ditado) -> Res<i64> {
+        let n = nucleo::Ditado {
+            iniciado_em: d.iniciado_em, app: d.app.clone(), app_nome: d.app_nome.clone(), estado: "gravando".into(),
+            motor: d.motor.clone(), origem: "ditado".into(), audio: d.audio.clone(), ..Default::default()
+        };
+        Ok(self.b().inserir(&n, None)?)
     }
-    /// `Banco::atualizar` / `Banco::concluir` com o resultado; `Banco::contar_uso(trocas)`.
-    pub fn concluir_ditado(&self, _d: &Ditado, _r: &ResultadoDitado) -> Res<()> { falta("histórico (núcleo)") }
-    /// `Banco::atualizar(estado = "falhou")`, mantendo o áudio para retranscrever.
-    pub fn marcar_falha(&self, _d: &Ditado) -> Res<()> { falta("histórico (núcleo)") }
-    /// `Banco::apagar_ditado(id)` para o ditado em silêncio ou cancelado.
-    pub fn descartar_ditado(&self, _id: i64) -> Res<()> { Ok(()) }
-    /// `SessaoDitado::new(transcritor, limpador, AplicadorDicionario::new(banco.termos()?, ehPalavraComum), config, ao_trecho)`.
-    /// `limpeza` traz (porta do llama-server, modelo) quando a limpeza por IA está ligada.
-    pub fn nova_sessao(&self, _id: i64, _limpeza: Option<(u16, String)>) -> Res<Box<dyn SessaoDeDitado>> {
-        falta("transcrição do ditado (núcleo e motor de fala)")
-    }
-    /// Retranscrever: `Banco::ditado(id)` → áudio → nova sessão → `Banco::atualizar`.
-    pub fn retranscrever(&self, _id: i64) -> Res<()> { falta("retranscrever (núcleo e motor de fala)") }
 
-    // MARK: Modelos
-
-    /// Reconhecedor carregado (`motores` Parakeet). Estado para a interface.
-    pub fn reconhecedor(&self) -> (&'static str, String) { ("falhou", "Motor de fala ainda não integrado nesta versão de teste.".into()) }
-    /// Modelo padrão de IA: `nucleo::BaixadorDeModelo` + `ModeloRemoto` do catálogo.
-    pub fn modelo_ia(&self) -> Value {
-        json!({"estado": "indisponivel", "arquivo": "Qwen3.5-2B-Q4_K_M.gguf", "tamanho": 0})
+    pub fn definir_audio(&self, id: i64, audio: &str) -> Res<()> {
+        let b = self.b();
+        if let Some(mut d) = b.ditado(id)? { d.audio = audio.to_string(); b.atualizar(&d)?; }
+        Ok(())
     }
-    pub fn baixar_modelo(&self) -> Res<()> { falta("download do modelo de IA (núcleo)") }
-    pub fn cancelar_modelo(&self) -> Res<()> { Ok(()) }
-    /// `ImportadorWispr::importar(banco)`.
-    pub fn importar_wispr(&self) -> Res<Value> { falta("importar do Wispr Flow") }
+
+    fn preencher(atual: Option<nucleo::Ditado>, d: &Ditado, r: &ResultadoDitado) -> nucleo::Ditado {
+        let mut n = atual.unwrap_or_else(|| nucleo::Ditado { id: d.id, iniciado_em: d.iniciado_em, origem: "ditado".into(), ..Default::default() });
+        n.duracao = d.duracao;
+        n.duracao_fala = r.duracao_fala;
+        n.latencia = d.latencia;
+        n.texto_bruto = r.texto_bruto.clone();
+        n.texto = r.texto.clone();
+        n.palavras = r.palavras as i64;
+        n.limpador = r.limpador.clone();
+        n.trocas_dicionario = r.trocas.len() as i64;
+        n.estado = d.estado.clone();
+        n.audio = d.audio.clone();
+        n
+    }
+
+    /// Grava o resultado e apaga a reserva de trechos na mesma transação (`Banco::concluir`).
+    pub fn concluir_ditado(&self, d: &Ditado, r: &ResultadoDitado) -> Res<()> {
+        let mut b = self.b();
+        let n = Self::preencher(b.ditado(d.id)?, d, r);
+        b.concluir(&n)?;
+        if !r.trocas.is_empty() { b.contar_uso(&r.trocas)?; }
+        Ok(())
+    }
+
+    /// Reconhecedor falhou: o ditado fica "falhou" com o áudio para retranscrever.
+    pub fn marcar_falha(&self, d: &Ditado) -> Res<()> {
+        let b = self.b();
+        let mut n = Self::preencher(b.ditado(d.id)?, d, &ResultadoDitado::default());
+        n.estado = "falhou".into();
+        Ok(b.atualizar(&n)?)
+    }
+
+    pub fn descartar_ditado(&self, id: i64) -> Res<()> { Ok(self.b().apagar_ditado(id)?) }
+
+    fn sessao(&self, id: Option<i64>, limpeza: bool, esperar: bool) -> Result<SessaoDitado, String> {
+        let fala = self.motores.fala(esperar)?;
+        let transcritor: Arc<dyn Transcritor> = fala;
+        let limpador = if limpeza { self.motores.limpador() } else { None };
+        let termos = self.b().termos().map_err(|e| e.to_string())?;
+        let dicionario = AplicadorDicionario::new(termos, None);
+        let ao_trecho: Option<AoTrecho> = id.map(|id| {
+            let banco = self.banco.clone();
+            Arc::new(move |ordem: usize, bruto: &str| {
+                let b = banco.lock().unwrap_or_else(|e| e.into_inner());
+                if let Err(e) = b.gravar_trecho(id, ordem as i64, bruto) { nota(format!("trecho {ordem} do ditado {id} não foi gravado: {e}")); }
+            }) as AoTrecho
+        });
+        Ok(SessaoDitado::new(transcritor, limpador, dicionario, ConfigSessao::default(), ao_trecho))
+    }
+
+    /// Sessão do ditado `id`: cada trecho bruto vai para a reserva no banco antes do fim.
+    pub fn nova_sessao(&self, id: i64, limpeza: bool) -> Result<Box<dyn SessaoDeDitado>, String> {
+        Ok(Box::new(Sessao(self.sessao(Some(id), limpeza, false)?)))
+    }
+
+    /// Passa de novo pelo reconhecedor o áudio guardado de um ditado que falhou ou ficou parcial.
+    /// Devolve o texto da pílula.
+    pub fn retranscrever(&self, id: i64, audios: &Path, limpeza: bool) -> Result<&'static str, String> {
+        let d = self.b().ditado(id).map_err(|e| e.to_string())?.ok_or("Ditado não encontrado")?;
+        if d.audio.is_empty() || d.audio.contains(['/', '\\']) { return Err("O áudio desse ditado não existe mais".into()); }
+        let amostras = crate::decodificacao::decodificar(&audios.join(&d.audio)).map_err(|_| "O áudio desse ditado não existe mais".to_string())?;
+        let mut sessao = self.sessao(None, limpeza, true)?;
+        for bloco in amostras.chunks(16_000) { sessao.alimentar(bloco).map_err(|e| e.to_string())?; }
+        let r = sessao.finalizar().map_err(|e| e.to_string())?;
+        if r.texto.is_empty() { return Ok("Ainda não consegui transcrever"); }
+        let parcial = r.falhas > 0;
+        let r: ResultadoDitado = r.into();
+        let mut n = d;
+        n.texto = r.texto.clone();
+        n.texto_bruto = r.texto_bruto.clone();
+        n.palavras = r.palavras as i64;
+        n.duracao_fala = r.duracao_fala;
+        n.limpador = r.limpador.clone();
+        n.estado = if parcial { "parcial" } else { "concluido" }.into();
+        self.b().atualizar(&n).map_err(|e| e.to_string())?;
+        Ok(if parcial { "Parte do áudio não foi transcrita" } else { "Transcrito. Está no histórico" })
+    }
+
+    /// Regras de fala e dicionário sobre o texto de cada trecho de arquivo ou reunião.
+    pub fn preparar(&self, texto: &str) -> String {
+        let termos = self.b().termos().unwrap_or_default();
+        let filtrado = RegrasFala::filtrar(texto);
+        RegrasFala::arrumar_espacos(&AplicadorDicionario::new(termos, None).aplicar(&filtrado).0)
+    }
+
+    /// `ImportadorWispr` não existe no Windows (o Wispr Flow para Windows não usa banco equivalente conhecido).
+    pub fn importar_wispr(&self) -> Res<Value> { Err("Importar do Wispr Flow não está disponível no Windows.".into()) }
 }
 
-/// Mesmo formato de `Estatisticas` do contrato, tudo zero, com `porDia` dos últimos `dias`.
-pub fn estatisticas_vazias(dias: u32) -> Value {
-    let hoje = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0) / 86_400;
-    let por_dia: Vec<Value> = (0..dias.clamp(7, 365) as i64).rev().map(|n| {
-        let (a, m, d) = civil(hoje - n);
-        json!({"dia": format!("{a:04}-{m:02}-{d:02}"), "palavras": 0, "ditados": 0, "minutos": 0})
-    }).collect();
-    json!({
-        "totalPalavras": 0, "totalDitados": 0, "minutosFalados": 0, "ppmMedio": 0, "ppmDeCadaDitado": [],
-        "minutosEconomizados": 0, "diasSeguidos": 0, "maiorSequencia": 0, "diasAtivos": 0, "palavrasHoje": 0,
-        "palavrasNaSemana": 0, "palavrasNaSemanaAnterior": 0, "maiorDitadoPalavras": 0, "maiorDitadoMinutos": 0,
-        "latenciaMediana": 0, "trocasDicionario": 0, "porDia": por_dia, "porHora": vec![0; 24], "porDiaDaSemana": vec![0; 7], "porApp": [],
-    })
-}
+#[cfg(test)]
+pub mod dubles {
+    //! Motores de mentira: palavras a partir da energia do áudio, sem modelo nenhum.
+    use std::{path::Path, sync::{atomic::{AtomicUsize, Ordering}, Arc}};
 
-/// Dia civil (UTC) a partir de dias desde 1970 (algoritmo de Howard Hinnant).
-fn civil(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (yoe + era * 400 + i64::from(m <= 2), m, d)
-}
+    use nucleo::motores::{Erro, FaixaDeVoz, IdentificadorDeFalantes, Limpador, PalavraReconhecida, PedidoLimpeza, ReconhecedorDeFala, Transcritor};
+    use serde_json::{json, Value};
 
-/// Serviço de arquivos e reuniões (espelho de `ServicoLancamento.swift`). A captura e a
-/// decodificação são da casca (`audio`, `decodificacao`); o processamento, o armazenamento e
-/// a recuperação são do núcleo.
-pub struct Lancamento;
+    use super::{Fala, Motores};
 
-impl Lancamento {
-    /// `ServicoLancamento::estado()`: sem núcleo, `disponivel: false` e listas vazias.
-    pub fn estado(&self, microfone: bool) -> Value {
-        json!({
-            "arquivos": [], "anteriores": [], "recuperaveis": [],
-            "permissoes": {"audioSistema": "concedida", "microfone": if microfone { "concedida" } else { "negada" }},
-            "disponivel": false
-        })
+    pub const TAXA: usize = 16_000;
+
+    /// Tom de 440 Hz com volume 0,3 em `fala` segundos, depois `silencio` segundos de silêncio.
+    pub fn voz(fala: f64, silencio: f64) -> Vec<f32> {
+        let n = (fala * TAXA as f64) as usize;
+        let mut v: Vec<f32> = (0..n).map(|i| 0.3 * (2.0 * std::f32::consts::PI * 440.0 * i as f32 / TAXA as f32).sin()).collect();
+        v.extend(std::iter::repeat_n(0.0, (silencio * TAXA as f64) as usize));
+        v
     }
-    pub fn documento(&self, _id: &str) -> Res<Value> { falta("documentos de arquivos e reuniões (núcleo)") }
-    pub fn procurar_arquivos(&self, _termo: &str) -> Res<Value> { Ok(json!([])) }
-    pub fn recuperar_reuniao(&self, _id: &str) -> Res<()> { falta("recuperar reunião (núcleo)") }
-    pub fn descartar_reuniao(&self, _id: &str) -> Res<()> { falta("descartar reunião (núcleo)") }
-    /// `ProcessadorDeArquivo` com o PCM já decodificado pela casca. Devolve o id do primeiro arquivo.
-    pub fn adicionar(&self, _arquivos: &[PathBuf]) -> Res<Option<String>> { falta("transcrever arquivos (núcleo e motores)") }
-    pub fn fonte_para_repetir(&self, _id: &str) -> Res<Option<PathBuf>> { Ok(None) }
-    pub fn repetir(&self, _id: &str, _arquivo: &Path) -> Res<()> { falta("refazer arquivo (núcleo)") }
-    pub fn cancelar(&self, _id: &str) {}
-    pub fn remover(&self, _id: &str) -> Res<()> { falta("remover (núcleo)") }
-    pub fn desfazer(&self, _id: &str) -> Res<()> { falta("desfazer (núcleo)") }
-    pub fn cancelar_fila(&self) {}
-    /// `ColetorDeReuniao` alimentado pela captura da casca (sistema por loopback e microfone).
-    pub fn iniciar_reuniao(&self, _fonte: &str) -> Res<()> { falta("reunião (núcleo e motores)") }
-    pub fn pausar(&self, _id: &str) -> Res<()> { falta("reunião (núcleo)") }
-    pub fn encerrar(&self, _id: &str) -> Res<()> { falta("reunião (núcleo)") }
-    pub fn resumir(&self, _id: &str) -> Res<()> { falta("resumo (núcleo e IA local)") }
-    pub fn cancelar_resumo(&self, _id: &str) {}
-    pub fn alterar_titulo(&self, _id: &str, _nome: &str) -> Res<()> { falta("editar título (núcleo)") }
-    pub fn renomear_voz(&self, _id: &str, _voz: &str, _nome: &str) -> Res<()> { falta("renomear falante (núcleo)") }
-    pub fn reatribuir(&self, _id: &str, _trecho: &str, _voz: Option<&str>, _nome: Option<&str>) -> Res<()> { falta("reatribuir trecho (núcleo)") }
+
+    /// Uma palavra ("palavraK") por célula de 0,5 s com som, numa grade absoluta: a mesma fala vista
+    /// por janelas diferentes dá a mesma palavra com o mesmo tempo. Célula cortada pela janela fica de fora.
+    pub struct FalaDuble { pub chamadas: AtomicUsize }
+
+    impl Transcritor for FalaDuble {
+        fn nome(&self) -> &str { "duble" }
+        fn transcrever(&self, amostras: &[f32]) -> Result<String, Erro> {
+            self.chamadas.fetch_add(1, Ordering::Relaxed);
+            Ok(self.palavras(amostras, 0.0, None)?.into_iter().map(|p| p.texto).collect::<Vec<_>>().join(" "))
+        }
+    }
+
+    impl ReconhecedorDeFala for FalaDuble {
+        fn palavras(&self, amostras: &[f32], inicio: f64, _fim: Option<f64>) -> Result<Vec<PalavraReconhecida>, Erro> {
+            let fim = inicio + amostras.len() as f64 / TAXA as f64;
+            let (primeira, ultima) = ((inicio * 2.0 - 1e-6).ceil() as i64, (fim * 2.0 + 1e-6).floor() as i64);
+            Ok((primeira..ultima).filter_map(|k| {
+                let a = ((k as f64 * 0.5 - inicio) * TAXA as f64).round().max(0.0) as usize;
+                let b = (a + TAXA / 2).min(amostras.len());
+                amostras.get(a..b).filter(|c| c.iter().any(|x| x.abs() > 0.05))
+                    .map(|_| PalavraReconhecida { texto: format!("palavra{k}"), inicio: k as f64 * 0.5 + 0.05, fim: k as f64 * 0.5 + 0.45 })
+            }).collect())
+        }
+    }
+
+    pub struct FalantesDuble;
+    impl IdentificadorDeFalantes for FalantesDuble {
+        fn faixas(&self, wav: &Path) -> Result<Vec<FaixaDeVoz>, Erro> {
+            let tamanho = std::fs::metadata(wav)?.len();
+            Ok(vec![FaixaDeVoz { voz: "offline-1".into(), inicio: 0.0, fim: tamanho as f64 / 32_000.0 + 1.0 }])
+        }
+    }
+
+    pub struct LimpadorDuble;
+    impl Limpador for LimpadorDuble {
+        fn nome(&self) -> &str { "limpador-duble" }
+        fn limpar(&self, p: &PedidoLimpeza) -> Result<String, Erro> { Ok(p.transcricao.clone()) }
+    }
+
+    pub struct MotoresDuble { pub fala: Arc<FalaDuble>, pub com_falantes: bool, pub com_limpeza: bool }
+
+    impl MotoresDuble {
+        pub fn novo() -> Arc<Self> { Arc::new(Self { fala: Arc::new(FalaDuble { chamadas: AtomicUsize::new(0) }), com_falantes: true, com_limpeza: false }) }
+    }
+
+    impl Motores for MotoresDuble {
+        fn fala(&self, _esperar: bool) -> Result<Arc<dyn Fala>, String> { Ok(self.fala.clone()) }
+        fn fala_disponivel(&self) -> bool { true }
+        fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>> { self.com_falantes.then(|| Arc::new(FalantesDuble) as Arc<dyn IdentificadorDeFalantes>) }
+        fn limpador(&self) -> Option<Arc<dyn Limpador>> { self.com_limpeza.then(|| Arc::new(LimpadorDuble) as Arc<dyn Limpador>) }
+        fn resumo_disponivel(&self) -> bool { self.com_limpeza }
+        fn resumir(&self, linhas: &[String], _cancelado: &dyn Fn() -> bool) -> Result<Vec<String>, String> {
+            Ok(vec![format!("{} falas", linhas.len())])
+        }
+        fn estado_reconhecedor(&self) -> (String, String) { ("pronto".into(), String::new()) }
+        fn estado_limpador(&self) -> (String, String) { ("desligado".into(), String::new()) }
+        fn modelo_ia(&self) -> Value { json!({"estado": "instalado", "arquivo": "duble.gguf", "tamanho": 1}) }
+        fn baixar_modelo(&self) -> Result<(), String> { Ok(()) }
+        fn cancelar_modelo(&self) {}
+        fn llama_instalado(&self) -> bool { false }
+    }
 }
 
 #[cfg(test)]
 mod testes {
-    use super::*;
+    use super::{dubles::*, *};
 
-    #[test]
-    fn calendario_civil() {
-        assert_eq!(civil(0), (1970, 1, 1));
-        assert_eq!(civil(20_000), (2024, 10, 4));
+    fn integracao() -> (tempfile::TempDir, Integracao) {
+        let tmp = tempfile::tempdir().unwrap();
+        let i = Integracao::abrir(&tmp.path().join("t.sqlite"), MotoresDuble::novo()).unwrap();
+        (tmp, i)
+    }
+
+    fn ditado(i: &Integracao) -> Ditado {
+        let mut d = Ditado { iniciado_em: agora(), app: "notepad.exe".into(), app_nome: "notepad".into(), motor: "duble".into(), ..Default::default() };
+        d.id = i.inserir_ditado(&d).unwrap();
+        d
     }
 
     #[test]
-    fn estatisticas_vazias_no_formato_do_contrato() {
-        let e = estatisticas_vazias(30);
-        assert_eq!(e["porDia"].as_array().unwrap().len(), 30);
-        assert_eq!(e["porHora"].as_array().unwrap().len(), 24);
-        for campo in ["totalPalavras", "ppmDeCadaDitado", "porApp", "latenciaMediana", "porDiaDaSemana"] { assert!(e.get(campo).is_some(), "{campo}"); }
+    fn ditado_de_ponta_a_ponta_grava_historico_e_ultimo_texto() {
+        let (_t, i) = integracao();
+        let mut d = ditado(&i);
+        let mut s = i.nova_sessao(d.id, false).unwrap();
+        for bloco in voz(2.0, 1.5).chunks(1600) { s.alimentar(bloco); }
+        let r = s.finalizar();
+        assert!(r.texto.contains("palavra"), "{r:?}");
+        assert_eq!(r.falhas, 0);
+        d.estado = "concluido".into();
+        d.duracao = 3.5;
+        i.concluir_ditado(&d, &r).unwrap();
+        let h = i.historico(10, "").unwrap();
+        assert_eq!(h.as_array().unwrap().len(), 1);
+        assert_eq!(h[0]["estado"], "concluido");
+        assert_eq!(h[0]["appNome"], "notepad");
+        assert_eq!(i.ultimo_texto().unwrap().unwrap(), r.texto);
+        let e = i.estatisticas(30).unwrap();
+        assert_eq!(e["totalDitados"], 1);
+    }
+
+    #[test]
+    fn trechos_vao_para_a_reserva_e_voltam_na_recuperacao() {
+        let tmp = tempfile::tempdir().unwrap();
+        let banco = tmp.path().join("t.sqlite");
+        {
+            let i = Integracao::abrir(&banco, MotoresDuble::novo()).unwrap();
+            let d = ditado(&i);
+            let mut s = i.nova_sessao(d.id, false).unwrap();
+            for bloco in voz(2.0, 1.5).chunks(1600) { s.alimentar(bloco); }
+            // O app "cai": a sessão termina, mas o ditado nunca é concluído.
+            let _ = s.finalizar();
+        }
+        let i = Integracao::abrir(&banco, MotoresDuble::novo()).unwrap();
+        assert_eq!(i.recuperar_interrompidos(tmp.path()).unwrap(), 1);
+        let h = i.historico(10, "").unwrap();
+        assert_eq!(h[0]["estado"], "recuperado");
+        assert!(h[0]["texto"].as_str().unwrap().contains("palavra"));
+    }
+
+    #[test]
+    fn interrompido_sem_texto_com_audio_vira_falhou_e_sem_audio_sai() {
+        let tmp = tempfile::tempdir().unwrap();
+        let i = Integracao::abrir(&tmp.path().join("t.sqlite"), MotoresDuble::novo()).unwrap();
+        let com = ditado(&i);
+        i.definir_audio(com.id, "1.wav").unwrap();
+        std::fs::write(tmp.path().join("1.wav"), b"x").unwrap();
+        let _sem = ditado(&i);
+        i.recuperar_interrompidos(tmp.path()).unwrap();
+        let h = i.historico(10, "").unwrap();
+        assert_eq!(h.as_array().unwrap().len(), 1);
+        assert_eq!(h[0]["estado"], "falhou");
+    }
+
+    #[test]
+    fn dicionario_salva_preserva_usos_e_apaga() {
+        let (_t, i) = integracao();
+        let t = i.salvar_termo(0, "Dita.se", vec!["dita se".into()]).unwrap();
+        let id = t["id"].as_i64().unwrap();
+        let t2 = i.salvar_termo(id, "Dita.se", vec!["ditasse".into()]).unwrap();
+        assert_eq!(t2["ouvidoComo"][0], "ditasse");
+        assert_eq!(i.termos().unwrap().as_array().unwrap().len(), 1);
+        i.apagar_termo(id).unwrap();
+        assert!(i.termos().unwrap().as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn retranscrever_usa_o_audio_guardado() {
+        let tmp = tempfile::tempdir().unwrap();
+        let i = Integracao::abrir(&tmp.path().join("t.sqlite"), MotoresDuble::novo()).unwrap();
+        let mut d = ditado(&i);
+        let mut w = crate::audio::EscritorWav::criar(&tmp.path().join("7.wav")).unwrap();
+        w.gravar(&voz(2.0, 1.0)).unwrap();
+        d.audio = "7.wav".into();
+        d.estado = "falhou".into();
+        i.definir_audio(d.id, "7.wav").unwrap();
+        i.marcar_falha(&d).unwrap();
+        assert_eq!(i.retranscrever(d.id, tmp.path(), false).unwrap(), "Transcrito. Está no histórico");
+        let h = i.historico(10, "").unwrap();
+        assert_eq!(h[0]["estado"], "concluido");
     }
 }

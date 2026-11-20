@@ -43,4 +43,6 @@ pub mod sistema {
     /// Programa em primeiro plano: (nome do executável, nome para exibir). Nunca o título da janela.
     pub fn app_em_foco() -> (String, String) { (String::new(), String::new()) }
     pub fn abrir(alvo: &str) -> std::io::Result<()> { std::process::Command::new("open").arg(alvo).spawn().map(|_| ()) }
+    /// Espaço livre no volume; fora do Windows o baixador segue sem a conferência.
+    pub fn espaco_livre(_pasta: &std::path::Path) -> Option<u64> { None }
 }

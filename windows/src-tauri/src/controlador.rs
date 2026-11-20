@@ -1,7 +1,6 @@
 //! Ciclo do ditado (porta de `Controlador.swift`): atalho, microfone, sessão, banco, colagem e
-//! pílula. A sessão e o banco vêm de [`crate::integracao`]; enquanto o motor de fala não está
-//! integrado, o ditado grava o WAV, cola um texto de teste marcado e avisa na pílula, para a
-//! sessão no PC Windows conferir atalho, microfone, pílula e colagem de ponta a ponta.
+//! pílula. A sessão (Parakeet, regras, dicionário e limpeza opcional) e o banco vêm de
+//! [`crate::integracao`]. Sem modelo de fala pronto, o ditado não começa e a pílula diz por quê.
 use std::{
     sync::{mpsc, Arc, Mutex, OnceLock, Weak},
     thread,
@@ -27,7 +26,7 @@ struct Gravacao {
     ditado: Ditado,
     inicio: Instant,
     captura: Captura,
-    bomba: thread::JoinHandle<(Option<Box<dyn SessaoDeDitado>>, usize)>,
+    bomba: thread::JoinHandle<(Box<dyn SessaoDeDitado>, usize)>,
     silencio: Arc<Mutex<f64>>,
 }
 
@@ -55,7 +54,7 @@ impl Controlador {
 
     /// Liga atalho, manutenção e relógio. Chamado uma vez na abertura.
     pub fn ligar(self: &Arc<Self>) {
-        match self.integracao.recuperar_interrompidos() {
+        match self.integracao.recuperar_interrompidos(&caminhos::audios()) {
             Ok(n) if n > 0 => nota(format!("recuperação: {n} ditado(s) interrompido(s) voltaram ao histórico")),
             Err(e) => nota(format!("recuperação: {e}")),
             _ => {}
@@ -110,16 +109,24 @@ impl Controlador {
             Ok(id) => id,
             Err(e) => { nota(format!("banco: {e}")); drop(i); self.pilula.avisar("Erro ao abrir o histórico", 3.0); return false; }
         };
-        let limpeza = self.prefs.limpeza_ia().then(|| (0u16, self.prefs.modelo()));
+        let limpeza = self.prefs.limpeza_ia();
         let sessao = match self.integracao.nova_sessao(d.id, limpeza) {
-            Ok(s) => Some(s),
-            Err(e) => { nota(format!("ditado {}: sem sessão ({e})", d.id)); None }
+            Ok(s) => s,
+            Err(motivo) => {
+                let _ = self.integracao.descartar_ditado(d.id);
+                drop(i);
+                nota(format!("ditado recusado: {motivo}"));
+                self.pilula.avisar(&motivo, 3.5);
+                return false;
+            }
         };
-        // Sem motor de fala, o WAV é a prova do teste; com motor, segue o ajuste de guardar áudio.
-        let guardar = self.prefs.guardar_audio_dias() > 0 || sessao.is_none();
-        let caminho = guardar.then(|| caminhos::audios().join(format!("{}.wav", d.id)));
+        if limpeza { self.integracao.motores.aquecer(); }
+        let caminho = (self.prefs.guardar_audio_dias() > 0).then(|| caminhos::audios().join(format!("{}.wav", d.id)));
         let mut escritor = caminho.as_ref().and_then(|c| EscritorWav::criar(c).map_err(|e| nota(format!("wav: {e}"))).ok());
-        if escritor.is_some() { d.audio = caminho.as_ref().and_then(|c| c.file_name()).map(|n| n.to_string_lossy().into()).unwrap_or_default(); }
+        if escritor.is_some() {
+            d.audio = caminho.as_ref().and_then(|c| c.file_name()).map(|n| n.to_string_lossy().into()).unwrap_or_default();
+            if let Err(e) = self.integracao.definir_audio(d.id, &d.audio) { nota(format!("ditado {}: áudio não registrado ({e})", d.id)); }
+        }
 
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         let pilula = self.pilula.clone();
@@ -144,10 +151,8 @@ impl Controlador {
             for bloco in rx {
                 total += bloco.len();
                 if let Some(w) = escritor.as_mut() { if let Err(e) = w.gravar(&bloco) { nota(format!("wav: {e}")); escritor = None; } }
-                if let Some(s) = sessao.as_mut() {
-                    s.alimentar(&bloco);
-                    *silencio_bomba.lock().unwrap() = s.silencio();
-                }
+                sessao.alimentar(&bloco);
+                *silencio_bomba.lock().unwrap() = sessao.silencio();
             }
             (sessao, total)
         }).expect("bomba");
@@ -228,16 +233,19 @@ impl Controlador {
         self.mudou("estado");
         let c = self.clone();
         thread::spawn(move || {
-            let (sessao, amostras) = g.bomba.join().unwrap_or((None, 0));
             let mut d = g.ditado;
             d.duracao = soltou.duration_since(g.inicio).as_secs_f64();
-            match sessao {
-                Some(s) => {
-                    let r = s.finalizar();
+            match g.bomba.join() {
+                Ok((sessao, _)) => {
+                    let r = sessao.finalizar();
                     d.latencia = soltou.elapsed().as_secs_f64();
                     c.concluir(d, r, colar);
                 }
-                None => c.concluir_sem_motor(d, amostras, colar),
+                Err(_) => {
+                    nota(format!("ditado {}: a gravação parou com erro", d.id));
+                    let _ = c.integracao.marcar_falha(&d);
+                    c.pilula.avisar("Não consegui transcrever", 3.0);
+                }
             }
             { let mut i = c.interno.lock().unwrap(); i.fase = Fase::Parado; i.maos_livres = false; }
             c.mudou("estado");
@@ -268,17 +276,6 @@ impl Controlador {
         self.colar(&texto, r.falhas > 0);
     }
 
-    /// Versão de teste sem motor de fala: confere microfone, WAV, pílula e colagem.
-    fn concluir_sem_motor(&self, d: Ditado, amostras: usize, colar: bool) {
-        let segundos = amostras as f64 / audio::TAXA as f64;
-        nota(format!("ditado {}: teste sem motor de fala, {:.1} s de áudio em {}", d.id, segundos, if d.audio.is_empty() { "nenhum arquivo" } else { &d.audio }));
-        if !colar || amostras == 0 {
-            self.pilula.avisar(if amostras == 0 { "O microfone não mandou áudio" } else { "Áudio gravado. Sem colar" }, 3.0);
-            return;
-        }
-        self.colar(&format!("[Dita.se teste: {segundos:.1} s de áudio gravado; transcrição na próxima versão] "), false);
-    }
-
     fn colar(&self, texto: &str, parcial: bool) {
         match nativo::colagem::inserir(texto) {
             Insercao::Colado => {
@@ -301,7 +298,7 @@ impl Controlador {
             let d = g.ditado;
             let integracao = self.integracao.clone();
             thread::spawn(move || {
-                if let Ok((Some(s), _)) = g.bomba.join() { s.cancelar(); }
+                if let Ok((s, _)) = g.bomba.join() { s.cancelar(); }
                 let _ = integracao.descartar_ditado(d.id);
                 apagar_audio(&d.audio);
             });
@@ -318,9 +315,24 @@ impl Controlador {
         }
     }
 
-    pub fn retranscrever(&self, id: i64) -> Result<(), String> {
-        if self.fase() != Fase::Parado { return Err("Termine o ditado atual antes".into()); }
-        self.integracao.retranscrever(id).map_err(|e| e.to_string())
+    /// Passa de novo pelo reconhecedor o áudio guardado de um ditado que falhou ou ficou parcial.
+    pub fn retranscrever(self: &Arc<Self>, id: i64) -> Result<(), String> {
+        {
+            let mut i = self.interno.lock().unwrap();
+            if i.fase != Fase::Parado { return Err("Termine o ditado atual antes".into()); }
+            i.fase = Fase::Processando;
+        }
+        self.pilula.mostrar(FasePilula::Processando);
+        self.mudou("estado");
+        let c = self.clone();
+        thread::spawn(move || {
+            let aviso = c.integracao.retranscrever(id, &caminhos::audios(), c.prefs.limpeza_ia()).unwrap_or_else(|e| { nota(format!("retranscrever {id}: {e}")); "Ainda não consegui transcrever" });
+            c.interno.lock().unwrap().fase = Fase::Parado;
+            c.pilula.avisar(aviso, 3.0);
+            c.mudou("estado");
+            c.mudou("historico");
+        });
+        Ok(())
     }
 
     pub fn desligar(&self) {

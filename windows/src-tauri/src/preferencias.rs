@@ -7,6 +7,8 @@ use std::{collections::BTreeMap, fs, path::PathBuf, sync::Mutex};
 use serde_json::{json, Value};
 
 /// Teclas aceitas como atalho. Só uma é observada pelo gancho; nenhuma outra tecla é guardada.
+// Os nomes seguem os ids combinados com a interface ("controleDireito", ...).
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tecla { ControleDireito, ShiftDireito, AltDireito }
 
@@ -31,7 +33,8 @@ impl Tecla {
 
 pub const PADROES: &[(&str, &str)] = &[
     ("atalho", "controleDireito"),
-    ("limpezaIA", "1"),
+    // Desligada por padrão: o llama.cpp do Windows roda só na CPU. Liga sozinha ao baixar o modelo pelo Início.
+    ("limpezaIA", "0"),
     ("modelo", "Qwen3.5-2B-Q4_K_M.gguf"),
     ("sons", "1"),
     ("limiteMinutos", "120"),

@@ -55,3 +55,11 @@ pub fn app_em_foco() -> (String, String) {
 pub fn abrir(alvo: &str) -> std::io::Result<()> {
     Command::new("explorer.exe").arg(alvo).creation_flags(SEM_JANELA).spawn().map(|_| ())
 }
+
+/// Bytes livres para o usuário no volume da pasta (o baixador recusa sem espaço).
+pub fn espaco_livre(pasta: &std::path::Path) -> Option<u64> {
+    use windows::{core::HSTRING, Win32::Storage::FileSystem::GetDiskFreeSpaceExW};
+    let mut livre = 0u64;
+    unsafe { GetDiskFreeSpaceExW(&HSTRING::from(pasta.as_os_str()), Some(&mut livre), None, None) }.ok()?;
+    Some(livre)
+}

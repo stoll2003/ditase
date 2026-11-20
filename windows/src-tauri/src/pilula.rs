@@ -58,7 +58,7 @@ impl Pilula {
 
     fn enviar(&self, mensagem: Value) {
         if let Some(j) = self.janela() {
-            let _ = j.eval(&format!("window.pilula && window.pilula({mensagem})"));
+            let _ = j.eval(format!("window.pilula && window.pilula({mensagem})"));
         }
     }
 

@@ -8,6 +8,8 @@ mod caminhos;
 mod controlador;
 mod decodificacao;
 mod integracao;
+mod lancamento;
+mod motores_locais;
 mod nativo;
 mod pilula;
 mod ponte;
@@ -27,7 +29,7 @@ use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_updater::UpdaterExt;
 
-use crate::{controlador::Controlador, integracao::{Integracao, Lancamento}, pilula::Pilula, preferencias::Preferencias};
+use crate::{controlador::Controlador, integracao::Integracao, lancamento::{CapturaDoSistema, Lancamento}, motores_locais::MotoresLocais, pilula::Pilula, preferencias::Preferencias};
 
 const CANAL_DE_TESTE: &str = "https://github.com/stoll2003/ditase/releases/download/windows-teste/latest.json";
 const CHAVE_DO_CANAL: &str = env!("DITASE_UPDATER_PUB");
@@ -140,7 +142,7 @@ fn bandeja(app: &AppHandle, iniciar: bool) -> tauri::Result<()> {
                     casca.pilula.avisar(aviso, 3.0);
                 }
                 "atualizar" => { let a = app.clone(); tauri::async_runtime::spawn(async move { procurar_atualizacao(a, true).await }); }
-                "sair" => { casca.controlador.desligar(); app.exit(0); }
+                "sair" => { casca.controlador.desligar(); casca.lancamento.desligar(); app.exit(0); }
                 _ => {}
             }
         })
@@ -193,11 +195,30 @@ fn main() {
         .setup(|app| {
             let handle = app.handle().clone();
             let prefs = Arc::new(Preferencias::abrir(caminhos::preferencias()));
-            let integracao = Arc::new(Integracao::abrir(&caminhos::banco()));
+            let estado = handle.clone();
+            let motores = MotoresLocais::novo(caminhos::modelos(), prefs.clone(), Arc::new(move || ponte::emitir(&estado, "estado")));
+            let integracao = Arc::new(Integracao::abrir(&caminhos::banco(), motores.clone()).map_err(|e| format!("banco: {e}"))?);
             let pilula = Arc::new(Pilula::criar(&handle, prefs.pilula_sempre_visivel(), prefs.atalho().simbolo()));
             let avisar = handle.clone();
             let controlador = Controlador::new(prefs.clone(), integracao.clone(), pilula.clone(), move |assunto| ponte::emitir(&avisar, assunto));
-            let casca = Arc::new(Casca { app: handle.clone(), prefs: prefs.clone(), integracao, lancamento: Arc::new(Lancamento), pilula, controlador: controlador.clone() });
+            let (eventos, pilula_eventos) = (handle.clone(), pilula.clone());
+            let avisar_lancamento: lancamento::Avisar = Arc::new(move |assunto, detalhe| match detalhe {
+                None => ponte::emitir(&eventos, assunto),
+                Some(v) => {
+                    // A pílula mostra a etapa de arquivo ou reunião quando não há ditado.
+                    if assunto == "ditado:progresso" { pilula_eventos.progresso(Some(v.clone())); }
+                    if assunto == "ditado:resultado" { pilula_eventos.progresso(None); }
+                    ponte::emitir_evento(&eventos, assunto, &v);
+                }
+            });
+            let dicionario = integracao.clone();
+            let preparar: lancamento::Preparar = Arc::new(move |texto| dicionario.preparar(texto));
+            let microfone = prefs.clone();
+            let capturador = Arc::new(CapturaDoSistema { microfone: Arc::new(move || microfone.microfone()) });
+            let lancamento = Lancamento::new(&caminhos::banco(), &caminhos::audio_de_reuniao(), motores.clone(), capturador, preparar, avisar_lancamento)
+                .map_err(|e| format!("arquivos e reuniões: {e}"))?;
+            let casca = Arc::new(Casca { app: handle.clone(), prefs: prefs.clone(), integracao, lancamento, pilula, controlador: controlador.clone() });
+            motores.preparar_fala();
             app.manage(casca);
             abrir_principal(&handle)?;
             // Aberto pelo "iniciar com o Windows": fica só na bandeja e na pílula.
