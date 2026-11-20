@@ -120,7 +120,8 @@ fn porcento(feito: u64, total: u64) -> u64 { (feito * 100).checked_div(total).un
 
 impl MotoresLocais {
     pub fn novo(pasta: PathBuf, prefs: Arc<Preferencias>, ao_mudar: AoMudar) -> Arc<Self> {
-        let ajustes = llama::Ajustes { prazo_de_subida: PRAZO_DO_SERVIDOR, ..Default::default() };
+        // Chave e certificado TLS de cada partida ficam na pasta de trabalho privada do app (M2).
+        let ajustes = llama::Ajustes { prazo_de_subida: PRAZO_DO_SERVIDOR, pasta_de_trabalho: Some(caminhos::trabalho().join("llama")), ..Default::default() };
         let servidor = ServidorLlama::novo(caminhos::llama_server(), llama::PROMPT_LIMPEZA, ajustes);
         let saindo = Arc::new(AtomicBool::new(false));
         let saindo_obs = saindo.clone();
@@ -208,21 +209,16 @@ pub fn modelos_instalados(pasta: &Path) -> Vec<String> {
     if instalado(pasta, &QWEN) { vec![QWEN.arquivos[0].arquivo.to_string()] } else { Vec::new() }
 }
 
-/// Cliente HTTP só para o llama-server em 127.0.0.1. Nunca segue `HTTP_PROXY`/`ALL_PROXY` do
-/// ambiente: com proxy corporativo, o texto da reunião iria em claro para fora do computador.
-pub fn agente_local() -> ureq::Agent {
-    ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(60)).build()
-}
-
-/// Uma chamada de resumo ao servidor local.
-pub fn gerar_local(agente: &ureq::Agent, porta: u16, dados: &str) -> Result<String, String> {
-    let corpo = json!({
+/// Corpo de uma chamada de resumo (mesmo prompt e limites do Mac).
+pub fn corpo_do_resumo(dados: &str) -> Value {
+    json!({
         "messages": [{"role": "system", "content": SISTEMA_DO_RESUMO}, {"role": "user", "content": dados}],
         "temperature": 0, "max_tokens": 192, "stream": false
-    });
-    let resposta: Value = agente.post(&format!("http://127.0.0.1:{porta}/v1/chat/completions"))
-        .send_json(corpo).map_err(|e| e.to_string())?
-        .into_json().map_err(|e| e.to_string())?;
+    })
+}
+
+/// Texto do resumo na resposta do servidor; resposta cortada por limite de tokens é recusada.
+pub fn ler_resumo(resposta: &Value) -> Result<String, String> {
     let escolha = &resposta["choices"][0];
     if escolha["finish_reason"] == "length" { return Err("A IA local não devolveu um resumo completo.".into()); }
     let texto = escolha["message"]["content"].as_str().ok_or("A IA local não devolveu um resumo.")?;
@@ -313,9 +309,12 @@ impl Motores for MotoresLocais {
 
     fn resumir(&self, linhas: &[String], cancelado: &dyn Fn() -> bool) -> Result<Vec<String>, String> {
         if !self.resumo_disponivel() { return Err("IA local indisponível".into()); }
-        let porta = self.servidor.garantir(&self.modelo_ia_caminho()).map_err(|e| e.to_string())?;
-        let agente = agente_local();
-        resumir_com(linhas, cancelado, &|dados| gerar_local(&agente, porta, dados))
+        // Pelo canal TLS autenticado da partida (chave por execução), nunca HTTP aberto (M2).
+        let modelo = self.modelo_ia_caminho();
+        resumir_com(linhas, cancelado, &|dados| {
+            let r = self.servidor.completar(&modelo, &corpo_do_resumo(dados), Duration::from_secs(60)).map_err(|e| e.to_string())?;
+            ler_resumo(&r)
+        })
     }
 
     fn estado_reconhecedor(&self) -> (String, String) {
@@ -415,63 +414,14 @@ impl Motores for MotoresLocais {
 mod testes {
     use super::*;
 
-    /// B1: com `HTTP_PROXY` apontando para um proxy falso, o resumo vai direto ao servidor local e o
-    /// proxy não recebe nada. Na mesma condição, o cliente global do ureq (o usado antes da
-    /// correção) entrega a chamada ao proxy: é o que este teste pegaria.
-    /// Precisa abrir porta local; onde isso é proibido (sandbox), o teste avisa e não roda.
     #[test]
-    fn resumo_local_ignora_proxy_do_ambiente() {
-        use std::{io::{BufRead, BufReader, Read, Write}, net::TcpListener, sync::atomic::AtomicUsize};
-        let (Ok(servidor), Ok(proxy)) = (TcpListener::bind("127.0.0.1:0"), TcpListener::bind("127.0.0.1:0")) else {
-            eprintln!("resumo_local_ignora_proxy_do_ambiente: sem permissão para abrir porta local; não rodou");
-            return;
-        };
-        let porta = servidor.local_addr().unwrap().port();
-        let porta_proxy = proxy.local_addr().unwrap().port();
-        // Proxy falso: só conta conexões, nunca responde.
-        let no_proxy = Arc::new(AtomicUsize::new(0));
-        let (contagem, fim) = (no_proxy.clone(), Arc::new(AtomicBool::new(false)));
-        let parar = fim.clone();
-        proxy.set_nonblocking(true).unwrap();
-        let vigia = thread::spawn(move || {
-            let mut abertas = Vec::new();
-            while !parar.load(Ordering::Acquire) {
-                if let Ok((c, _)) = proxy.accept() { contagem.fetch_add(1, Ordering::Relaxed); abertas.push(c); }
-                thread::sleep(Duration::from_millis(5));
-            }
-        });
-        // Servidor llama falso: uma resposta de chat.
-        let atende = thread::spawn(move || {
-            let (mut c, _) = servidor.accept().unwrap();
-            let mut leitor = BufReader::new(c.try_clone().unwrap());
-            let mut tamanho = 0;
-            loop {
-                let mut linha = String::new();
-                leitor.read_line(&mut linha).unwrap();
-                if let Some(v) = linha.to_ascii_lowercase().strip_prefix("content-length:") { tamanho = v.trim().parse().unwrap(); }
-                if linha == "\r\n" { break; }
-            }
-            let mut corpo = vec![0; tamanho];
-            leitor.read_exact(&mut corpo).unwrap();
-            let r = r#"{"choices":[{"finish_reason":"stop","message":{"content":"- pauta revisada"}}]}"#;
-            write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{r}", r.len()).unwrap();
-        });
-        let antes = std::env::var_os("HTTP_PROXY");
-        std::env::set_var("HTTP_PROXY", format!("http://127.0.0.1:{porta_proxy}"));
-        let r = gerar_local(&agente_local(), porta, "Ana: revisar a pauta");
-        atende.join().unwrap();
-        let direto = no_proxy.load(Ordering::Relaxed);
-        // O cliente global lê o proxy do ambiente: a chamada vai para o proxy (que não responde).
-        let global = ureq::agent().post(&format!("http://127.0.0.1:{porta}/v1/chat/completions")).timeout(Duration::from_millis(500)).send_string("{}");
-        match antes { Some(v) => std::env::set_var("HTTP_PROXY", v), None => std::env::remove_var("HTTP_PROXY") }
-        thread::sleep(Duration::from_millis(50));
-        fim.store(true, Ordering::Release);
-        vigia.join().unwrap();
-        assert_eq!(r.unwrap(), "- pauta revisada", "o texto bruto chega; os marcadores saem em resumir_com");
-        assert_eq!(direto, 0, "o proxy recebeu a chamada do resumo");
-        // Controle só informativo: se o cliente global segue o proxy depende da versão do ureq e do
-        // ambiente (no Mac de desenvolvimento ele não seguiu). A garantia é o assert acima.
-        eprintln!("controle: cliente global {} o proxy", if global.is_err() && no_proxy.load(Ordering::Relaxed) >= 1 { "seguiu" } else { "não seguiu" });
+    fn resposta_do_resumo_cortada_e_recusada() {
+        let ok = json!({"choices": [{"finish_reason": "stop", "message": {"content": "- pauta"}}]});
+        assert_eq!(ler_resumo(&ok).unwrap(), "- pauta");
+        let cortada = json!({"choices": [{"finish_reason": "length", "message": {"content": "- pau"}}]});
+        assert!(ler_resumo(&cortada).is_err());
+        assert!(ler_resumo(&json!({})).is_err());
+        assert_eq!(corpo_do_resumo("x")["max_tokens"], 192);
     }
 
     #[test]
