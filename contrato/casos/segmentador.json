@@ -1,0 +1,122 @@
+{
+  "testSilencioNaoGeraTrecho": [
+    {
+      "fala": false,
+      "segundos": 5.0
+    }
+  ],
+  "testCliqueCurtoEhDescartado": [
+    {
+      "fala": false,
+      "segundos": 1.0
+    },
+    {
+      "fala": true,
+      "segundos": 0.06
+    },
+    {
+      "fala": false,
+      "segundos": 2.0
+    }
+  ],
+  "testFalaCurtaViraUmTrechoComMargem": [
+    {
+      "fala": false,
+      "segundos": 1.0
+    },
+    {
+      "fala": true,
+      "segundos": 2.0
+    },
+    {
+      "fala": false,
+      "segundos": 0.3
+    }
+  ],
+  "testPausaCurtaNaoCortaTrechoPequeno": [
+    {
+      "fala": true,
+      "segundos": 2.0
+    },
+    {
+      "fala": false,
+      "segundos": 0.7
+    },
+    {
+      "fala": true,
+      "segundos": 2.0
+    }
+  ],
+  "testPausaCortaDepoisDoMinimo": [
+    {
+      "fala": true,
+      "segundos": 6.0
+    },
+    {
+      "fala": false,
+      "segundos": 0.7
+    },
+    {
+      "fala": true,
+      "segundos": 3.0
+    }
+  ],
+  "testPausaLongaCortaSempreEInformaAPausa": [
+    {
+      "fala": true,
+      "segundos": 2.0
+    },
+    {
+      "fala": false,
+      "segundos": 3.0
+    },
+    {
+      "fala": true,
+      "segundos": 2.0
+    }
+  ],
+  "testFalaSemPausaCortaNoLimiteSemPerderAmostra": [
+    {
+      "fala": true,
+      "segundos": 40.0
+    }
+  ],
+  "testCorteForcadoProcuraOPontoQuieto": [
+    {
+      "fala": true,
+      "segundos": 11.0
+    },
+    {
+      "fala": false,
+      "segundos": 0.3
+    },
+    {
+      "fala": true,
+      "segundos": 6.0
+    }
+  ],
+  "testUmaHoraDeFalaNaoAcumulaMemoriaNemPerdeTrecho": [
+    {
+      "fala": true,
+      "segundos": 8.0
+    },
+    {
+      "fala": false,
+      "segundos": 0.8
+    }
+  ],
+  "testVozBaixaAindaEhFala": [
+    {
+      "fala": false,
+      "segundos": 0.5
+    },
+    {
+      "fala": true,
+      "segundos": 3.0
+    },
+    {
+      "fala": false,
+      "segundos": 0.5
+    }
+  ]
+}

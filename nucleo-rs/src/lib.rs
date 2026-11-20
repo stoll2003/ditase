@@ -1,4 +1,41 @@
 //! Núcleo do Dita.se portado do pacote Swift `Nucleo/`. Sem dependência de Windows:
 //! compila e testa também no Mac. As regras são as do Swift; os casos compartilhados em
 //! `contrato/casos/` garantem que as duas implementações dão o mesmo resultado.
+pub mod costura;
+pub mod linha_do_tempo;
 pub mod motores;
+pub mod segmentador;
+pub use costura::*;
+pub use linha_do_tempo::*;
+pub use segmentador::{Segmentador, Segmento};
+pub mod texto;
+pub use texto::*;
+pub mod baixador_de_modelo;
+pub use baixador_de_modelo::*;
+pub mod fidelidade;
+pub use fidelidade::Fidelidade;
+pub mod dicionario;
+pub use dicionario::*;
+pub mod banco;
+pub use banco::*;
+pub mod disco_de_blocos;
+pub use disco_de_blocos::*;
+pub mod abertura;
+pub mod armazem_lancamento;
+pub use abertura::*;
+pub use armazem_lancamento::*;
+pub mod coletor_de_reuniao;
+pub mod processador_de_arquivo;
+pub mod processador_de_reuniao;
+pub use coletor_de_reuniao::*;
+pub use processador_de_arquivo::*;
+pub use processador_de_reuniao::*;
+pub mod estatisticas;
+pub use estatisticas::*;
+pub mod sessao;
+pub use sessao::*;
+pub mod transcricao_longa;
+pub use transcricao_longa::*;
+pub mod fluxos;
+pub mod leitura_lancamento;
+pub use fluxos::*;

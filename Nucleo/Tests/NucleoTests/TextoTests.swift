@@ -2,46 +2,36 @@ import XCTest
 @testable import Nucleo
 
 final class RegrasFalaTests: XCTestCase {
-    func testTiraHesitacoes() {
-        XCTAssertEqual(RegrasFala.filtrar("Então, hã, eu preciso ahn daquele caderno."), "Então, eu preciso daquele caderno.")
-        XCTAssertEqual(RegrasFala.filtrar("Hum, acho que sim."), "Acho que sim.")
+    func testTiraHesitacoes() throws {
+        try conferirTexto("testTiraHesitacoes")
     }
 
-    func testVerboHaNaoEhHesitacao() {
-        XCTAssertEqual(RegrasFala.filtrar("Há três pacotes pendentes."), "Há três pacotes pendentes.")
-        XCTAssertEqual(RegrasFala.filtrar("O plano está ativo há dois anos."), "O plano está ativo há dois anos.")
-        XCTAssertEqual(RegrasFala.filtrar("Hã, preciso do resumo."), "Preciso do resumo.")
-        XCTAssertEqual(RegrasFala.filtrar("Isso ha muito tempo não acontece."), "Isso ha muito tempo não acontece.")
+    func testVerboHaNaoEhHesitacao() throws {
+        try conferirTexto("testVerboHaNaoEhHesitacao")
     }
 
-    func testPreservaPalavrasComSentido() {
-        // "ah" no meio de frase e gíria ficam como foram ditas.
-        let frase = "Aí eu falei ah não, esse trem aí tá muito simples, tipo, deixa assim."
-        XCTAssertEqual(RegrasFala.filtrar(frase), frase)
+    func testPreservaPalavrasComSentido() throws {
+        try conferirTexto("testPreservaPalavrasComSentido")
     }
 
-    func testTiraGaguejoDeLigacao() {
-        XCTAssertEqual(RegrasFala.filtrar("Eu eu quero que que você olhe o o roteiro."), "Eu quero que você olhe o roteiro.")
+    func testTiraGaguejoDeLigacao() throws {
+        try conferirTexto("testTiraGaguejoDeLigacao")
     }
 
-    func testNaoTiraRepeticaoDeEnfase() {
-        XCTAssertEqual(RegrasFala.filtrar("Isso é muito muito bom, não não faz isso."), "Isso é muito muito bom, não não faz isso.")
+    func testNaoTiraRepeticaoDeEnfase() throws {
+        try conferirTexto("testNaoTiraRepeticaoDeEnfase")
     }
 
-    func testComandosDeFormatacao() {
-        XCTAssertEqual(RegrasFala.filtrar("Primeira parte. Novo parágrafo. Segunda parte."), "Primeira parte.\n\nSegunda parte.")
-        XCTAssertEqual(RegrasFala.filtrar("Item um, nova linha, item dois."), "Item um.\nItem dois.")
+    func testComandosDeFormatacao() throws {
+        try conferirTexto("testComandosDeFormatacao")
     }
 
-    func testComandoNoMeioDaFraseNaoEhComando() {
-        let frase = "Eles lançaram uma nova linha de produtos."
-        XCTAssertEqual(RegrasFala.filtrar(frase), frase)
+    func testComandoNoMeioDaFraseNaoEhComando() throws {
+        try conferirTexto("testComandoNoMeioDaFraseNaoEhComando")
     }
 
-    func testMaiusculaEEspacos() {
-        XCTAssertEqual(RegrasFala.arrumarEspacos("  olá ,  mundo . tudo bem ? sim"), "Olá, mundo. Tudo bem? Sim")
-        XCTAssertEqual(RegrasFala.arrumarEspacos("abre o arquivo.pdf e o Qwen3.5 agora"), "Abre o arquivo.pdf e o Qwen3.5 agora")
-        XCTAssertEqual(RegrasFala.arrumarEspacos("frase um. frase dois"), "Frase um. Frase dois")
+    func testMaiusculaEEspacos() throws {
+        try conferirTexto("testMaiusculaEEspacos")
     }
 }
 

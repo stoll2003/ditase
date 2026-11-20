@@ -1,0 +1,93 @@
+{
+  "testTiraHesitacoes": [
+    {
+      "operacao": "filtrar",
+      "entrada": "Então, hã, eu preciso ahn daquele caderno.",
+      "esperado": "Então, eu preciso daquele caderno."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "Hum, acho que sim.",
+      "esperado": "Acho que sim."
+    }
+  ],
+  "testVerboHaNaoEhHesitacao": [
+    {
+      "operacao": "filtrar",
+      "entrada": "Há três pacotes pendentes.",
+      "esperado": "Há três pacotes pendentes."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "O plano está ativo há dois anos.",
+      "esperado": "O plano está ativo há dois anos."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "Hã, preciso do resumo.",
+      "esperado": "Preciso do resumo."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "Isso ha muito tempo não acontece.",
+      "esperado": "Isso ha muito tempo não acontece."
+    }
+  ],
+  "testPreservaPalavrasComSentido": [
+    {
+      "operacao": "filtrar",
+      "entrada": "Aí eu falei ah não, esse trem aí tá muito simples, tipo, deixa assim.",
+      "esperado": "Aí eu falei ah não, esse trem aí tá muito simples, tipo, deixa assim."
+    }
+  ],
+  "testTiraGaguejoDeLigacao": [
+    {
+      "operacao": "filtrar",
+      "entrada": "Eu eu quero que que você olhe o o roteiro.",
+      "esperado": "Eu quero que você olhe o roteiro."
+    }
+  ],
+  "testNaoTiraRepeticaoDeEnfase": [
+    {
+      "operacao": "filtrar",
+      "entrada": "Isso é muito muito bom, não não faz isso.",
+      "esperado": "Isso é muito muito bom, não não faz isso."
+    }
+  ],
+  "testComandosDeFormatacao": [
+    {
+      "operacao": "filtrar",
+      "entrada": "Primeira parte. Novo parágrafo. Segunda parte.",
+      "esperado": "Primeira parte.\n\nSegunda parte."
+    },
+    {
+      "operacao": "filtrar",
+      "entrada": "Item um, nova linha, item dois.",
+      "esperado": "Item um.\nItem dois."
+    }
+  ],
+  "testComandoNoMeioDaFraseNaoEhComando": [
+    {
+      "operacao": "filtrar",
+      "entrada": "Eles lançaram uma nova linha de produtos.",
+      "esperado": "Eles lançaram uma nova linha de produtos."
+    }
+  ],
+  "testMaiusculaEEspacos": [
+    {
+      "operacao": "arrumarEspacos",
+      "entrada": "  olá ,  mundo . tudo bem ? sim",
+      "esperado": "Olá, mundo. Tudo bem? Sim"
+    },
+    {
+      "operacao": "arrumarEspacos",
+      "entrada": "abre o arquivo.pdf e o Qwen3.5 agora",
+      "esperado": "Abre o arquivo.pdf e o Qwen3.5 agora"
+    },
+    {
+      "operacao": "arrumarEspacos",
+      "entrada": "frase um. frase dois",
+      "esperado": "Frase um. Frase dois"
+    }
+  ]
+}

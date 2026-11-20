@@ -1,0 +1,117 @@
+{
+  "testAceitaPontuacaoMaiusculaEParagrafo": [
+    {
+      "original": "eu montei o rascunho hoje depois eu reviso amanhã eu publico",
+      "modelo": "Eu montei o rascunho hoje. Depois eu reviso.\n\nAmanhã eu publico.",
+      "esperado": "Eu montei o rascunho hoje. Depois eu reviso.\n\nAmanhã eu publico."
+    }
+  ],
+  "testNaoTrocaGiriaPorSinonimo": [
+    {
+      "original": "As tabelas já estão linkadas nele e esse trem funciona.",
+      "modelo": "As tabelas já estão vinculadas nele, e essa coisa funciona.",
+      "esperado": "As tabelas já estão linkadas nele, e esse trem funciona."
+    }
+  ],
+  "testNaoCorrigeNomeProprio": [
+    {
+      "original": "A gente publica no Nebulo então.",
+      "modelo": "A gente publica no Nebula Cloud, então.",
+      "esperado": "A gente publica no Nebulo, então."
+    }
+  ],
+  "testRestauraFraseCortada": [
+    {
+      "original": "Na verdade eu quero montar um filtro aqui que organiza isso. Depois a gente vê.",
+      "modelo": "Na verdade, organiza isso. Depois a gente vê."
+    }
+  ],
+  "testAceitaCorteDeMuleta": [
+    {
+      "original": "Então, né, eu preciso disso aí, tipo, pra amanhã, tá?",
+      "modelo": "Eu preciso disso aí pra amanhã.",
+      "esperado": "Eu preciso disso aí pra amanhã."
+    }
+  ],
+  "testAceitaCorteDeRecomeco": [
+    {
+      "original": "O teste está falhando porque o teste está falhando porque a porta está ocupada.",
+      "modelo": "O teste está falhando porque a porta está ocupada.",
+      "esperado": "O teste está falhando porque a porta está ocupada."
+    }
+  ],
+  "testAceitaAutocorrecao": [
+    {
+      "original": "Reserva a sala na sexta, não, espera, reserva na quinta às duas que é melhor.",
+      "modelo": "Reserva na quinta às duas, que é melhor.",
+      "esperado": "Reserva na quinta às duas, que é melhor."
+    }
+  ],
+  "testDescartaPalavraQueNinguemFalou": [
+    {
+      "original": "Salva um álbum com essa capa.",
+      "modelo": "Por favor, salva um álbum bonito com essa capa, obrigado.",
+      "esperado": "Salva um álbum com essa capa."
+    }
+  ],
+  "testAspasDoModeloFicam": [
+    {
+      "original": "Ele disse tipo bússola e eu quis dizer válvula.",
+      "modelo": "Ele disse tipo \"bússola\" e eu quis dizer \"válvula\".",
+      "esperado": "Ele disse tipo \"bússola\" e eu quis dizer \"válvula\"."
+    }
+  ],
+  "testModeloVazioDevolveOriginal": [
+    {
+      "original": "Texto falado.",
+      "modelo": "",
+      "esperado": "Texto falado."
+    }
+  ],
+  "testNaoAceitaTrocaDeAcentoQueMudaAPalavra": [
+    {
+      "original": "Ele pode pagar amanhã.",
+      "modelo": "Ele pôde pagar amanhã.",
+      "esperado": "Ele pode pagar amanhã."
+    },
+    {
+      "original": "Meu avô comprou o carro ontem.",
+      "modelo": "Minha avó comprou o carro ontem.",
+      "esperado": "Meu avô comprou o carro ontem."
+    }
+  ],
+  "testMantemSinalDeNumero": [
+    {
+      "original": "O saldo ficou em -100 reais ontem.",
+      "modelo": "O saldo ficou em 100 reais ontem.",
+      "esperado": "O saldo ficou em -100 reais ontem."
+    }
+  ],
+  "testNaoApagaPronome": [
+    {
+      "original": "Eu quero que ele feche a porta amanhã.",
+      "modelo": "Eu quero que feche a porta amanhã.",
+      "esperado": "Eu quero que ele feche a porta amanhã."
+    }
+  ],
+  "testNaVerdadeNaoAutorizaApagarAFraseAnterior": [
+    {
+      "original": "A oficina não entregou a peça ontem. Na verdade precisamos ligar hoje e anotar tudo no caderno da bancada imediatamente.",
+      "modelo": "Na verdade precisamos ligar hoje e anotar tudo no caderno da bancada imediatamente.",
+      "esperado": "A oficina não entregou a peça ontem. Na verdade precisamos ligar hoje e anotar tudo no caderno da bancada imediatamente."
+    }
+  ],
+  "testCorrecaoNaoAtravessaFraseEncerrada": [
+    {
+      "original": "O ensaio começa na sexta. Reserva a sala azul, quer dizer, reserva a sala verde.",
+      "modelo": "Reserva a sala verde."
+    }
+  ],
+  "testMuletaComSentidoFica": [
+    {
+      "original": "Foi assim que eu fiz e ficou bem melhor então.",
+      "modelo": "Foi que eu fiz e ficou melhor.",
+      "esperado": "Foi assim que eu fiz e ficou bem melhor então."
+    }
+  ]
+}
