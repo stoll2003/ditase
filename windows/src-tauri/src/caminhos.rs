@@ -129,7 +129,8 @@ pub fn migrar(velha: &Path, nova: &Path) -> io::Result<usize> {
     let copiar = || -> io::Result<()> {
         for n in &presentes {
             fs::copy(velha.join(n), temporario(n))?;
-            fs::File::open(temporario(n))?.sync_all()?;
+            // No Windows, FlushFileBuffers exige o arquivo aberto para escrita.
+            fs::OpenOptions::new().write(true).open(temporario(n))?.sync_all()?;
         }
         for n in &presentes {
             fs::rename(temporario(n), nova.join(n))?;
