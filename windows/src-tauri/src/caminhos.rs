@@ -18,6 +18,8 @@ const PASTA: &str = "Dita.se";
 const MIGRADOS: &[&str] = &["ditado.sqlite", "ditado.sqlite-wal", "ditado.sqlite-shm", "preferencias.json", "ditado.log"];
 
 static RAIZ: OnceLock<PathBuf> = OnceLock::new();
+/// Pasta local já resolvida por `preparar` (caminho real).
+static LOCAL: OnceLock<PathBuf> = OnceLock::new();
 
 /// Pasta local do perfil. `DITASE_RAIZ` substitui (testes e diagnóstico).
 fn local() -> Option<PathBuf> {
@@ -34,11 +36,31 @@ fn antiga() -> Option<PathBuf> {
     std::env::var_os("APPDATA").filter(|v| !v.is_empty()).map(|p| PathBuf::from(p).join(PASTA))
 }
 
+/// Caminho real, sem links nem junções no meio: o núcleo recusa gravar áudio por caminho com link
+/// (proteção contra junções). Uma pasta `AppData` realocada por junção continua funcionando porque
+/// o app passa a usar o destino real. No Windows tira o prefixo `\\?\` que `canonicalize` põe.
+pub fn real(p: &Path) -> PathBuf {
+    let Ok(c) = fs::canonicalize(p) else { return p.to_path_buf() };
+    let texto = c.to_string_lossy();
+    match texto.strip_prefix(r"\\?\") {
+        Some(resto) if !resto.starts_with("UNC\\") => PathBuf::from(resto),
+        _ => c,
+    }
+}
+
+/// Pasta temporária para testes, no caminho real (no Mac, `/tmp` e `/var` são links).
+#[cfg(test)]
+pub fn pasta_de_teste() -> tempfile::TempDir {
+    tempfile::Builder::new().prefix("ditase-teste").tempdir_in(real(&std::env::temp_dir())).unwrap()
+}
+
 /// Chamar uma vez, antes de abrir banco ou registro. Cria a pasta e migra os dados antigos.
 /// Erro: não há pasta do perfil utilizável (o app avisa e fecha).
 pub fn preparar() -> Result<(), String> {
     let nova = local().ok_or("O Windows não informou a pasta do perfil (LOCALAPPDATA).")?;
     fs::create_dir_all(&nova).map_err(|e| format!("Não consegui criar a pasta do Dita.se: {e}"))?;
+    let nova = real(&nova);
+    let _ = LOCAL.set(nova.clone());
     let mut raiz = nova.clone();
     if let Some(velha) = antiga().filter(|v| v != &nova) {
         match migrar(&velha, &nova) {
@@ -91,7 +113,7 @@ pub fn raiz() -> PathBuf {
     let _ = fs::create_dir_all(&r);
     r
 }
-fn raiz_local() -> PathBuf { local().expect("pasta do perfil indisponível; chame caminhos::preparar na abertura") }
+fn raiz_local() -> PathBuf { LOCAL.get().cloned().or_else(local).expect("pasta do perfil indisponível; chame caminhos::preparar na abertura") }
 /// Áudio guardado dos ditados (reserva para retranscrever) e PCM das reuniões.
 pub fn audios() -> PathBuf { pasta(raiz_local(), "Audio") }
 pub fn audio_de_reuniao() -> PathBuf { pasta(raiz_local(), "ReunioesAudio") }
@@ -142,7 +164,7 @@ mod testes {
 
     #[test]
     fn migra_banco_com_wal_e_shm_e_apaga_a_origem() {
-        let t = tempfile::tempdir().unwrap();
+        let t = pasta_de_teste();
         let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
         fs::create_dir_all(&velha).unwrap();
         for (n, c) in [("ditado.sqlite", "db"), ("ditado.sqlite-wal", "wal"), ("ditado.sqlite-shm", "shm"), ("preferencias.json", "{}")] { fs::write(velha.join(n), c).unwrap(); }
@@ -155,7 +177,7 @@ mod testes {
 
     #[test]
     fn com_banco_no_destino_nao_mexe_em_nada() {
-        let t = tempfile::tempdir().unwrap();
+        let t = pasta_de_teste();
         let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
         fs::create_dir_all(&velha).unwrap();
         fs::create_dir_all(&nova).unwrap();
@@ -168,7 +190,7 @@ mod testes {
 
     #[test]
     fn falha_no_meio_deixa_a_origem_intacta() {
-        let t = tempfile::tempdir().unwrap();
+        let t = pasta_de_teste();
         let velha = t.path().join("Roaming");
         fs::create_dir_all(&velha).unwrap();
         fs::write(velha.join("ditado.sqlite"), "db").unwrap();

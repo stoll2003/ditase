@@ -450,7 +450,7 @@ mod testes {
     /// carregados nem contam como disponíveis.
     #[test]
     fn modelo_com_tamanho_certo_sem_conferencia_nao_e_usado() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         for c in [&PARAKEET, &FALANTES] {
             let pasta = c.caminho(tmp.path());
             std::fs::create_dir_all(&pasta).unwrap();
@@ -466,7 +466,7 @@ mod testes {
     /// M7: um .gguf avulso na pasta, mesmo escolhido nas preferências, não é usado nem listado.
     #[test]
     fn modelo_avulso_nao_e_usado() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         std::fs::write(tmp.path().join("avulso.gguf"), b"GGUF").unwrap();
         let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
         prefs.definir("modelo", "avulso.gguf");

@@ -345,7 +345,7 @@ mod testes {
         }
 
         impl Ponte {
-            fn nova() -> Self { Self::na(Arc::new(tempfile::tempdir().unwrap())) }
+            fn nova() -> Self { Self::na(Arc::new(crate::caminhos::pasta_de_teste())) }
             /// Outra ponte na mesma pasta: o app reaberto.
             fn na(tmp: Arc<tempfile::TempDir>) -> Self {
                 let motores = MotoresDuble::novo();
@@ -436,7 +436,7 @@ mod testes {
         /// na mesma pasta encontra a reunião sem perder fala.
         #[test]
         fn ponte_solta_com_reuniao_em_andamento_encerra_threads_e_reabre() {
-            let tmp = Arc::new(tempfile::tempdir().unwrap());
+            let tmp = Arc::new(crate::caminhos::pasta_de_teste());
             let id;
             {
                 let p = Ponte::na(tmp.clone());

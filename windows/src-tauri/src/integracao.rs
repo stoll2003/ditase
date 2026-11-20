@@ -125,6 +125,8 @@ pub fn agora() -> f64 {
 fn json<T: serde::Serialize>(v: T) -> Res<Value> { Ok(serde_json::to_value(v)?) }
 
 pub struct Integracao {
+    /// Onde a fila do ditado guarda o excedente de áudio (M6). `None`: só RAM.
+    pasta_de_trabalho: Option<PathBuf>,
     banco: Arc<Mutex<Banco>>,
     caminho: PathBuf,
     pub motores: Arc<dyn Motores>,
@@ -132,9 +134,15 @@ pub struct Integracao {
 
 impl Integracao {
     pub fn abrir(caminho: &Path, motores: Arc<dyn Motores>) -> Res<Self> {
-        Ok(Self { banco: Arc::new(Mutex::new(Banco::new(caminho)?)), caminho: caminho.to_path_buf(), motores })
+        Ok(Self { pasta_de_trabalho: None, banco: Arc::new(Mutex::new(Banco::new(caminho)?)), caminho: caminho.to_path_buf(), motores })
     }
     pub fn caminho_do_banco(&self) -> &Path { &self.caminho }
+
+    /// Pasta privada do app para o excedente da fila do ditado, em vez da pasta temporária do sistema (M6).
+    pub fn com_pasta_de_trabalho(mut self, pasta: PathBuf) -> Self {
+        if std::fs::create_dir_all(&pasta).is_ok() { self.pasta_de_trabalho = Some(pasta); }
+        self
+    }
     fn b(&self) -> MutexGuard<'_, Banco> { self.banco.lock().unwrap_or_else(|e| e.into_inner()) }
 
     // MARK: Histórico e dicionário
@@ -259,7 +267,8 @@ impl Integracao {
                 if let Err(e) = b.gravar_trecho(id, ordem as i64, bruto) { nota(format!("trecho {ordem} do ditado {id} não foi gravado: {e}")); }
             }) as AoTrecho
         });
-        Ok(SessaoDitado::new(transcritor, limpador, dicionario, ConfigSessao::default(), ao_trecho))
+        let config = ConfigSessao { pasta_de_trabalho: self.pasta_de_trabalho.clone(), ..ConfigSessao::default() };
+        Ok(SessaoDitado::new(transcritor, limpador, dicionario, config, ao_trecho))
     }
 
     /// Sessão do ditado `id`: cada trecho bruto vai para a reserva no banco antes do fim.
@@ -421,7 +430,7 @@ mod testes {
     use super::{dubles::*, *};
 
     fn integracao() -> (tempfile::TempDir, Integracao) {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let i = Integracao::abrir(&tmp.path().join("t.sqlite"), MotoresDuble::novo()).unwrap();
         (tmp, i)
     }
@@ -453,9 +462,22 @@ mod testes {
         assert_eq!(e["totalDitados"], 1);
     }
 
+    /// M6: com pasta de trabalho, o ditado funciona e a pasta é a do app.
+    #[test]
+    fn sessao_usa_a_pasta_de_trabalho_do_app() {
+        let tmp = crate::caminhos::pasta_de_teste();
+        let i = Integracao::abrir(&tmp.path().join("t.sqlite"), MotoresDuble::novo()).unwrap().com_pasta_de_trabalho(tmp.path().join("Trabalho").join("ditado"));
+        assert_eq!(i.pasta_de_trabalho.as_deref(), Some(tmp.path().join("Trabalho").join("ditado").as_path()));
+        assert!(tmp.path().join("Trabalho").join("ditado").is_dir());
+        let d = ditado(&i);
+        let mut s = i.nova_sessao(d.id, false).unwrap();
+        for bloco in voz(2.0, 1.0).chunks(1600) { s.alimentar(bloco); }
+        assert!(s.finalizar().texto.contains("palavra"));
+    }
+
     #[test]
     fn trechos_vao_para_a_reserva_e_voltam_na_recuperacao() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let banco = tmp.path().join("t.sqlite");
         {
             let i = Integracao::abrir(&banco, MotoresDuble::novo()).unwrap();
@@ -474,7 +496,7 @@ mod testes {
 
     #[test]
     fn interrompido_sem_texto_com_audio_vira_falhou_e_sem_audio_sai() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let i = Integracao::abrir(&tmp.path().join("t.sqlite"), MotoresDuble::novo()).unwrap();
         let com = ditado(&i);
         i.definir_audio(com.id, "1.wav").unwrap();
@@ -500,7 +522,7 @@ mod testes {
 
     #[test]
     fn retranscrever_usa_o_audio_guardado() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let i = Integracao::abrir(&tmp.path().join("t.sqlite"), MotoresDuble::novo()).unwrap();
         let mut d = ditado(&i);
         let mut w = crate::audio::EscritorWav::criar(&tmp.path().join("7.wav")).unwrap();

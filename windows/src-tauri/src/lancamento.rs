@@ -906,7 +906,7 @@ mod testes {
     fn servico(segundos: f64) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) { servico_com(segundos, MotoresDuble::novo()) }
 
     fn servico_com(segundos: f64, motores: Arc<MotoresDuble>) -> (tempfile::TempDir, Arc<Lancamento>, Arc<Registro>) {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let reg = Arc::new(Registro(Mutex::new(Vec::new())));
         let r = reg.clone();
         let avisar: Avisar = Arc::new(move |a, v| r.0.lock().unwrap().push((a.to_string(), v)));
@@ -962,7 +962,7 @@ mod testes {
     /// I2 de ponta a ponta: retomadas seguidas com áudio chegando não geram lacuna.
     #[test]
     fn pausas_seguidas_nao_geram_lacuna() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(dubles::CapturaEmTempoReal),
             Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
         let id = s.iniciar_reuniao("mac").unwrap();
@@ -1150,7 +1150,7 @@ mod testes {
 
     #[test]
     fn reuniao_interrompida_fica_recuperavel_e_recupera_sem_perder_fala() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let banco = tmp.path().join("t.sqlite");
         let audio = tmp.path().join("Audio");
         let id;
@@ -1221,7 +1221,7 @@ mod testes_derivacao {
     /// reunião pausada; sem microfone na reunião, não há derivação; ao parar, deixa de receber.
     #[test]
     fn derivacao_do_microfone_da_reuniao() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let s = Lancamento::new(&tmp.path().join("t.sqlite"), &tmp.path().join("Audio"), MotoresDuble::novo(), Arc::new(CapturaContinua),
             Arc::new(|t: &str| t.to_string()), Arc::new(|_, _| {})).unwrap();
         assert!(s.derivar(Box::new(|_, _| {})).is_none(), "sem reunião não há derivação");

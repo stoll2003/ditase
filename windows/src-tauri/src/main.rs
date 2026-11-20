@@ -231,7 +231,7 @@ fn main() {
             let prefs = Arc::new(Preferencias::abrir(caminhos::preferencias()));
             let estado = handle.clone();
             let motores = MotoresLocais::novo(caminhos::modelos(), prefs.clone(), Arc::new(move || ponte::emitir(&estado, "estado")));
-            let integracao = Arc::new(Integracao::abrir(&caminhos::banco(), motores.clone()).map_err(|e| format!("banco: {e}"))?);
+            let integracao = Arc::new(Integracao::abrir(&caminhos::banco(), motores.clone()).map_err(|e| format!("banco: {e}"))?.com_pasta_de_trabalho(caminhos::trabalho().join("ditado")));
             let pilula = Arc::new(Pilula::criar(&handle, prefs.pilula_sempre_visivel(), prefs.atalho().simbolo()));
             let avisar = handle.clone();
             let controlador = Controlador::new(prefs.clone(), integracao.clone(), pilula.clone(), Arc::new(controlador::SistemaReal), move |assunto| ponte::emitir(&avisar, assunto));

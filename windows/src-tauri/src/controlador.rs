@@ -530,7 +530,7 @@ mod testes {
     struct Cena { _tmp: tempfile::TempDir, c: Arc<Controlador>, pilula: Arc<PilulaDuble>, sistema: Arc<SistemaDuble> }
 
     fn cena(pcm: Vec<f32>, ajustar: impl FnOnce(&mut SistemaDuble)) -> Cena {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = crate::caminhos::pasta_de_teste();
         let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
         let integracao = Arc::new(Integracao::abrir(&tmp.path().join("d.sqlite"), MotoresDuble::novo()).unwrap());
         let mut s = SistemaDuble { pcm, microfone: true, colagem: Insercao::Colado, colados: Mutex::new(Vec::new()), aberturas: AtomicUsize::new(0), pasta: tmp.path().join("Audio") };
