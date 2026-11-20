@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <!-- Controles comuns v6: exigidos pelos diálogos nativos do Tauri (mesma dependência do manifesto padrão). -->
+  <!-- Common Controls v6: required by Tauri native dialogs (same as the default manifest). Keep this file ASCII only: rc.exe corrupts UTF-8 bytes and Windows rejects the manifest (side-by-side error). -->
   <dependency>
     <dependentAssembly>
       <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0" processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*" />
     </dependentAssembly>
   </dependency>
-  <!-- UTF-8 como página de código: a API C do sherpa-onnx abre arquivos com char*; sem isso,
-       pasta de usuário com acento (C:\Users\João) quebra a carga dos modelos. Windows 10 1903+. -->
+  <!-- UTF-8 active code page: the sherpa-onnx C API opens files with char*; without it a user
+       folder with accents breaks model loading. Windows 10 1903+. -->
   <application xmlns="urn:schemas-microsoft-com:asm.v3">
     <windowsSettings>
       <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
