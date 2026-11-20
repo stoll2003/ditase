@@ -173,7 +173,12 @@ impl MotoresLocais {
             let inicio = Instant::now();
             match Parakeet::carregar(&PARAKEET.caminho(&m.pasta), 0) {
                 Ok(p) => { nota(format!("reconhecedor carregado em {:.1} s", inicio.elapsed().as_secs_f64())); m.definir_fala(EstadoFala::Pronto(Arc::new(p))); }
-                Err(e) => { nota(format!("reconhecedor falhou: {e}")); m.definir_fala(EstadoFala::Falhou(format!("O modelo de fala não carregou: {e}"))); }
+                Err(e) => {
+                    nota(format!("reconhecedor falhou: {e}"));
+                    m.definir_fala(EstadoFala::Falhou(format!("O modelo de fala não carregou: {e}")));
+                    // Sem return, uma nova tentativa pelo Início abriria outra thread baixando os falantes no mesmo .part.
+                    return;
+                }
             }
             // 2. Falantes depois, com o ditado já liberado. Sem eles, arquivos e reuniões saem sem separar pessoas.
             if !instalado(&m.pasta, &FALANTES) {

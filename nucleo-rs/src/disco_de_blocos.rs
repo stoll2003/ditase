@@ -2,7 +2,7 @@ use crate::FonteDeAudio;
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashSet,
-    fs::{self, File, OpenOptions},
+    fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
 };
@@ -107,7 +107,7 @@ fn pasta_real(p: &Path) -> io::Result<()> {
 fn sincronizar(p: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
-        File::open(p)?.sync_all()?
+        fs::File::open(p)?.sync_all()?
     }
     #[cfg(not(unix))]
     let _ = p;
@@ -148,6 +148,7 @@ fn renomear_duravel(de: &Path, para: &Path) -> io::Result<()> {
     }
 }
 fn criar_pasta(p: &Path) -> io::Result<()> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut b = fs::DirBuilder::new();
     #[cfg(unix)]
     {
