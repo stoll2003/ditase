@@ -275,6 +275,17 @@ impl Limite {
         self.marcas.push_back(agora);
         true
     }
+
+    /// Quanto falta para liberar a próxima ação (zero se já está livre).
+    pub fn espera(&self, agora: Instant) -> Duration {
+        if self.marcas.len() < self.max {
+            return Duration::ZERO;
+        }
+        self.marcas
+            .front()
+            .map(|t| (*t + self.janela).saturating_duration_since(agora))
+            .unwrap_or(Duration::ZERO)
+    }
 }
 
 /// Atrasos da conferência depois de um aviso de tela: o primeiro roda depois do `SetWindowPos`
@@ -388,6 +399,7 @@ pub struct Pilula {
     interno: Mutex<Interno>,
     eu: OnceLock<Weak<Pilula>>,
     recriando: AtomicBool,
+    retentativa_agendada: AtomicBool,
     geracao_conferencia: AtomicU64,
 }
 
@@ -456,6 +468,7 @@ impl Pilula {
             }),
             eu: OnceLock::new(),
             recriando: AtomicBool::new(false),
+            retentativa_agendada: AtomicBool::new(false),
             geracao_conferencia: AtomicU64::new(0),
         });
         let _ = p.eu.set(Arc::downgrade(&p));
@@ -512,6 +525,28 @@ impl Pilula {
     #[cfg(not(windows))]
     fn conferir(&self, _motivo: &'static str) {}
 
+    /// Uma única nova conferência daqui a `atraso` (pedidos repetidos enquanto uma está agendada
+    /// são ignorados).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn reconferir_depois(&self, atraso: Duration) {
+        if self.retentativa_agendada.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(eu) = self.eu.get().cloned() else {
+            self.retentativa_agendada.store(false, Ordering::Release);
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("ditase.ilha.retentativa".into())
+            .spawn(move || {
+                std::thread::sleep(atraso);
+                if let Some(p) = eu.upgrade() {
+                    p.retentativa_agendada.store(false, Ordering::Release);
+                    p.conferir("retentativa");
+                }
+            });
+    }
+
     /// Compara a ilha com a tela de agora e conserta (reaplica ou recria), com limite contra laço.
     #[cfg(windows)]
     fn conferir(&self, motivo: &'static str) {
@@ -542,12 +577,23 @@ impl Pilula {
         if conserto == Conserto::Nada && motivo != "abertura" {
             return;
         }
-        let permitido = {
+        let (permitido, espera) = {
             let mut i = self.interno.lock().unwrap();
-            match conserto {
-                Conserto::Nada => true,
-                Conserto::Reaplicar => i.limite_reaplicar.permitir(Instant::now()),
-                Conserto::Recriar => i.limite_recriar.permitir(Instant::now()),
+            let agora = Instant::now();
+            let limite = match conserto {
+                Conserto::Nada => None,
+                Conserto::Reaplicar => Some(&mut i.limite_reaplicar),
+                Conserto::Recriar => Some(&mut i.limite_recriar),
+            };
+            match limite {
+                None => (true, Duration::ZERO),
+                Some(l) => {
+                    if l.permitir(agora) {
+                        (true, Duration::ZERO)
+                    } else {
+                        (false, l.espera(agora))
+                    }
+                }
             }
         };
         let telas: Vec<String> = monitores
@@ -579,6 +625,9 @@ impl Pilula {
             }
         ));
         if !permitido {
+            // Nova tentativa quando o limite libera, para a ilha não ficar no DPI ou na posição
+            // antigos até o próximo evento de tela.
+            self.reconferir_depois(espera + Duration::from_millis(50));
             return;
         }
         match conserto {
@@ -1300,6 +1349,26 @@ mod testes {
         assert!(l.permitir(t0 + Duration::from_millis(10)));
         assert!(!l.permitir(t0 + Duration::from_millis(20)));
         assert!(l.permitir(t0 + Duration::from_secs(3)));
+    }
+
+    /// Achado do Par: a recriação barrada pelo limite precisa de nova tentativa quando ele libera.
+    #[test]
+    fn limite_informa_quando_libera_para_a_nova_tentativa() {
+        let mut l = Limite::novo(Duration::from_secs(20), 2);
+        let t0 = Instant::now();
+        assert_eq!(l.espera(t0), Duration::ZERO);
+        assert!(l.permitir(t0));
+        assert!(l.permitir(t0 + Duration::from_millis(6500)));
+        let t3 = t0 + Duration::from_millis(13000);
+        assert!(!l.permitir(t3));
+        assert_eq!(l.espera(t3), Duration::from_millis(7000));
+        assert!(l.permitir(t3 + l.espera(t3)));
+        let producao = include_str!("pilula.rs");
+        let producao = producao
+            .split("#[cfg(test)]\nmod testes")
+            .next()
+            .unwrap_or(producao);
+        assert!(producao.contains("self.reconferir_depois(espera"));
     }
 
     #[test]
