@@ -83,6 +83,39 @@ public static class QaIlha {
     [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint f, ref uint np, [Out] PATH_INFO[] p, ref uint nm, [Out] MODE_INFO[] m, IntPtr t);
     [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref DPI_GET g);
     [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(ref DPI_SET s);
+    [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr m, int t, out uint x, out uint y);
+    [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint f);
+    public static uint DpiDoMonitor(IntPtr h) { uint x, y; GetDpiForMonitor(MonitorFromWindow(h, 2), 0, out x, out y); return x; }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    public struct DEVMODE {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmDeviceName;
+        public short dmSpecVersion, dmDriverVersion, dmSize, dmDriverExtra; public int dmFields;
+        public int dmPositionX, dmPositionY, dmDisplayOrientation, dmDisplayFixedOutput;
+        public short dmColor, dmDuplex, dmYResolution, dmTTOption, dmCollate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string dmFormName;
+        public short dmLogPixels; public int dmBitsPerPel, dmPelsWidth, dmPelsHeight, dmDisplayFlags, dmDisplayFrequency;
+        public int dmICMMethod, dmICMIntent, dmMediaType, dmDitherType, dmReserved1, dmReserved2, dmPanningWidth, dmPanningHeight;
+    }
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)] static extern bool EnumDisplaySettings(string d, int i, ref DEVMODE m);
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)] static extern int ChangeDisplaySettingsEx(string d, ref DEVMODE m, IntPtr h, uint f, IntPtr l);
+    [DllImport("user32.dll", CharSet = CharSet.Ansi)] static extern int ChangeDisplaySettingsEx(string d, IntPtr m, IntPtr h, uint f, IntPtr l);
+    // Maior modo listado pelo adaptador; devolve "LxA código" ou "" se não houver maior.
+    public static string AumentarResolucao() {
+        var atual = new DEVMODE(); atual.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+        EnumDisplaySettings(null, -1, ref atual);
+        DEVMODE melhor = atual; bool achou = false;
+        for (int i = 0; ; i++) {
+            var m = new DEVMODE(); m.dmSize = (short)Marshal.SizeOf(typeof(DEVMODE));
+            if (!EnumDisplaySettings(null, i, ref m)) break;
+            if ((long)m.dmPelsWidth * m.dmPelsHeight > (long)melhor.dmPelsWidth * melhor.dmPelsHeight && m.dmPelsHeight <= 2160) { melhor = m; achou = true; }
+        }
+        if (!achou) return "";
+        melhor.dmFields = 0x80000 | 0x100000;  // DM_PELSWIDTH | DM_PELSHEIGHT
+        int r = ChangeDisplaySettingsEx(null, ref melhor, IntPtr.Zero, 0, IntPtr.Zero);
+        return melhor.dmPelsWidth + "x" + melhor.dmPelsHeight + " " + r;
+    }
+    public static int RestaurarResolucao() { return ChangeDisplaySettingsEx(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero); }
     public static readonly int[] Valores = { 100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500 };
 
     static PATH_SOURCE Fonte() {
@@ -272,6 +305,9 @@ Checar 'volta_ao_repouso' $v[2] ([ordered]@{ medido = $v[0]; esperado = $v[1] })
 
 # 3. Escalas possíveis no monitor do runner, trocadas em tempo de execução e restauradas.
 try {
+    $res = [QaIlha]::AumentarResolucao()
+    $rel.resolucao = if ($res) { "trocada para $res (código 0 = ok)" } else { 'sem modo maior que o atual' }
+    Start-Sleep -Milliseconds 2000
     $info = [QaIlha]::LerEscala()
     $orig = $info[1]
     $rel.escalaOriginal = [ordered]@{ recomendada = $info[0]; atual = $info[1]; maxima = $info[3] }
@@ -282,7 +318,12 @@ try {
         Start-Sleep -Milliseconds 1500
         $m = Esperar-Tamanho $ilha 92 7 6
         $aplicada = [Math]::Round($m[0].escala * 100)
-        $item = [ordered]@{ pedida = $pct; codigo = $rc; aplicada = $aplicada; medido = $m[0]; esperado = $m[1]; ok = ($m[2] -and $aplicada -eq $pct) }
+        # Fonte independente: o que o sistema diz da escala e do DPI efetivo do monitor da ilha.
+        $sistema = [QaIlha]::LerEscala()[1]
+        $dpiMon = [Math]::Round([QaIlha]::DpiDoMonitor($ilha) / 96.0 * 100)
+        $noSistema = ($sistema -eq $pct) -and ($dpiMon -eq $pct)
+        $item = [ordered]@{ pedida = $pct; codigo = $rc; escalaDoSistema = $sistema; dpiDoMonitor = $dpiMon; aplicadaNoSistema = $noSistema
+            aplicadaNaIlha = $aplicada; medido = $m[0]; esperado = $m[1]; ok = ($m[2] -and $aplicada -eq $pct) }
         if ($item.ok) {
             $d1 = $false; [void][QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$d1)
             $d2 = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$d2)
@@ -291,10 +332,14 @@ try {
         }
         $rel.escalas += $item
         Recortar $m[0] ("ilha-repouso-{0}.png" -f $pct)
-        if (-not $item.ok) { $falhas++ }
-        Write-Host ("escala {0}%: código {1}, aplicada {2}%, ok={3}" -f $pct, $rc, $aplicada, $item.ok)
+        if (-not $noSistema) {
+            # O sistema não aplicou a escala nesta sessão: limite do runner, não falha da ilha.
+            $rel.limites += "Escala $pct% não aplicada pelo sistema na sessão (sistema=$sistema%, monitor=$dpiMon%)."
+        } elseif (-not $item.ok) { $falhas++ }
+        Write-Host ("escala {0}%: código {1}, sistema {2}%, monitor {3}%, ilha {4}%, ok={5}" -f $pct, $rc, $sistema, $dpiMon, $aplicada, $item.ok)
     }
     [void][QaIlha]::DefinirEscala($orig)
+    if ($res) { [void][QaIlha]::RestaurarResolucao() }
     Start-Sleep -Milliseconds 1000
 } catch {
     $rel.limites += "Troca de escala indisponível no runner: $($_.Exception.Message)"
