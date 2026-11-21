@@ -97,6 +97,17 @@ pub const FALANTES: ConjuntoDeModelo = ConjuntoDeModelo {
 /// Mesmo GGUF do Mac (`ModeloRemoto.qwenPadrao`).
 pub const QWEN: ConjuntoDeModelo = ConjuntoDeModelo {
     pasta: "",
+    licenca: "Apache-2.0 (Qwen/Qwen3.5-4B; GGUF da Unsloth)",
+    arquivos: &[ArquivoRemoto {
+        arquivo: "Qwen3.5-4B-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/b0bd07786f94b700012140fd9263b2de83d4f97b/Qwen3.5-4B-Q4_K_M.gguf",
+        sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        tamanho: 2_740_937_888,
+    }],
+};
+
+pub const QWEN_2B: ConjuntoDeModelo = ConjuntoDeModelo {
+    pasta: "",
     licenca: "Apache-2.0 (Qwen/Qwen3.5-2B; GGUF da Unsloth)",
     arquivos: &[ArquivoRemoto {
         arquivo: "Qwen3.5-2B-Q4_K_M.gguf",
@@ -132,7 +143,7 @@ pub const LLAMA_WINDOWS_ARQUIVOS: &[&str] = &[
     "LICENSE-LLVM-OpenMP",
 ];
 
-pub const MODELOS_DO_APP: &[ConjuntoDeModelo] = &[PARAKEET, FALANTES, QWEN];
+pub const MODELOS_DO_APP: &[ConjuntoDeModelo] = &[PARAKEET, FALANTES, QWEN, QWEN_2B];
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

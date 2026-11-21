@@ -66,7 +66,7 @@ export type Estado = {
     ligado: boolean;
     modelo: string;
   };
-  /** Modelo padrão da IA local: download sob demanda. `feito` e `tamanho` em bytes. */
+  /** Modelo da IA local: download sob demanda. `feito` e `tamanho` em bytes. */
   modeloIA: {
     estado: "indisponivel" | "ausente" | "baixando" | "conferindo" | "instalado" | "falhou";
     arquivo: string;
@@ -88,6 +88,7 @@ export type Ajustes = {
   teclas: { id: string; nome: string }[];
   microfones: { uid: string; nome: string }[];
   modelos: string[];
+  modeloPadrao?: string;
   pastaDeModelos: string;
   llamaInstalado: boolean;
 };

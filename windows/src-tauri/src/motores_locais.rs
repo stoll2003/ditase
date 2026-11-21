@@ -2,11 +2,11 @@
 //!
 //! - Modelos de fala e de falantes (~706 MB) baixam sozinhos na primeira abertura, como o Mac faz
 //!   com o modelo de fala. O progresso aparece no estado do reconhecedor.
-//! - O modelo de IA (Qwen, 1,28 GB) baixa só pelo botão do Início, com progresso e cancelamento.
+//! - O modelo de IA baixa sob demanda, com progresso e cancelamento.
 //! - Todo download passa pelo `BaixadorDeModelo` do núcleo: `.part` com retomada, espaço em disco,
 //!   SHA-256 conferido antes de renomear e marcador de conferência.
-//! - Limpeza por IA: desligada por padrão no Windows (o llama.cpp distribuído é o de CPU, sem placa
-//!   de vídeo). Se o servidor não subir em 60 s ou falhar, a limpeza é desligada nos ajustes e o
+//! - O llama.cpp distribuído roda na CPU. Se o servidor não subir em 60 s ou falhar,
+//!   a limpeza é desligada nos ajustes e o
 //!   ditado segue com regras e dicionário.
 use std::{
     io::{self, Read},
@@ -20,7 +20,7 @@ use std::{
 };
 
 use motores::{
-    catalogo::{ArquivoRemoto, ConjuntoDeModelo, FALANTES, PARAKEET, QWEN},
+    catalogo::{ArquivoRemoto, ConjuntoDeModelo, FALANTES, PARAKEET, QWEN, QWEN_2B},
     fala::Parakeet,
     falantes::{Diarizador, LIMIAR_PADRAO},
     llama::{self, Estado as EstadoLlama, LimpadorLlama, ServidorLlama},
@@ -54,9 +54,9 @@ enum EstadoFala {
 #[derive(Clone)]
 enum EstadoModelo {
     Parado,
-    Baixando(u64, u64),
-    Conferindo,
-    Falhou(String),
+    Baixando(&'static ConjuntoDeModelo, u64, u64),
+    Conferindo(&'static ConjuntoDeModelo),
+    Falhou(&'static ConjuntoDeModelo, String),
 }
 
 pub type AoMudar = Arc<dyn Fn() + Send + Sync>;
@@ -267,30 +267,32 @@ impl MotoresLocais {
         });
     }
 
-    /// Sempre o arquivo do catálogo: nenhum caminho vindo das preferências chega ao llama-server.
-    fn modelo_ia_caminho(&self) -> PathBuf {
-        QWEN.caminho(&self.pasta).join(QWEN.arquivos[0].arquivo)
-    }
-
-    /// Só o modelo do catálogo com o SHA-256 conferido conta.
-    fn qwen_instalado(&self) -> bool {
-        instalado(&self.pasta, &QWEN)
+    fn modelo_ia_caminho(&self) -> Option<PathBuf> {
+        let modelo = modelo_do_catalogo(&self.prefs.modelo())?;
+        instalado(&self.pasta, modelo)
+            .then(|| modelo.caminho(&self.pasta).join(modelo.arquivos[0].arquivo))
     }
 }
 
-/// Modelos de IA aceitos (M7): só identificadores do catálogo, conferidos por SHA-256 no download.
-/// Arquivo .gguf avulso na pasta de modelos é ignorado.
-pub fn modelos_do_catalogo() -> Vec<&'static str> {
-    vec![QWEN.arquivos[0].arquivo]
+const CATALOGO_IA: &[ConjuntoDeModelo] = &[QWEN, QWEN_2B];
+
+fn modelo_do_catalogo(nome: &str) -> Option<&'static ConjuntoDeModelo> {
+    CATALOGO_IA
+        .iter()
+        .find(|modelo| modelo.arquivos[0].arquivo == nome)
 }
 
-/// Modelos do catálogo já instalados e conferidos, para a lista dos Ajustes.
+/// Modelos de IA aceitos (M7): só identificadores do catálogo, conferidos por SHA-256.
+pub fn modelo_aceito(nome: &str) -> bool {
+    modelo_do_catalogo(nome).is_some()
+}
+
 pub fn modelos_instalados(pasta: &Path) -> Vec<String> {
-    if instalado(pasta, &QWEN) {
-        vec![QWEN.arquivos[0].arquivo.to_string()]
-    } else {
-        Vec::new()
-    }
+    CATALOGO_IA
+        .iter()
+        .filter(|modelo| instalado(pasta, modelo))
+        .map(|modelo| modelo.arquivos[0].arquivo.to_string())
+        .collect()
 }
 
 /// Corpo de uma chamada de resumo (mesmo prompt e limites do Mac).
@@ -418,23 +420,28 @@ impl Motores for MotoresLocais {
     }
 
     fn limpador(&self) -> Option<Arc<dyn Limpador>> {
-        (self.prefs.limpeza_ia() && self.llama_instalado() && self.qwen_instalado()).then(|| {
-            Arc::new(self.servidor.limpador(self.modelo_ia_caminho())) as Arc<dyn Limpador>
-        })
+        if !self.prefs.limpeza_ia() || !self.llama_instalado() {
+            return None;
+        }
+        let modelo = self.modelo_ia_caminho()?;
+        Some(Arc::new(self.servidor.limpador(modelo)))
     }
 
     fn aquecer(&self) {
-        if !(self.prefs.limpeza_ia() && self.llama_instalado() && self.qwen_instalado()) {
+        if !self.prefs.limpeza_ia() || !self.llama_instalado() {
             return;
         }
-        let (servidor, modelo) = (self.servidor.clone(), self.modelo_ia_caminho());
+        let Some(modelo) = self.modelo_ia_caminho() else {
+            return;
+        };
+        let servidor = self.servidor.clone();
         thread::spawn(move || {
             let _ = servidor.garantir(&modelo);
         });
     }
 
     fn resumo_disponivel(&self) -> bool {
-        self.prefs.limpeza_ia() && self.llama_instalado() && self.qwen_instalado()
+        self.prefs.limpeza_ia() && self.llama_instalado() && self.modelo_ia_caminho().is_some()
     }
 
     fn resumir(
@@ -442,11 +449,11 @@ impl Motores for MotoresLocais {
         linhas: &[String],
         cancelado: &dyn Fn() -> bool,
     ) -> Result<Vec<String>, String> {
-        if !self.resumo_disponivel() {
-            return Err("IA local indisponível".into());
-        }
         // Pelo canal TLS autenticado da partida (chave por execução), nunca HTTP aberto (M2).
-        let modelo = self.modelo_ia_caminho();
+        let modelo = self
+            .modelo_ia_caminho()
+            .filter(|_| self.prefs.limpeza_ia() && self.llama_instalado())
+            .ok_or("IA local indisponível")?;
         resumir_com(linhas, cancelado, &|dados| {
             let r = self
                 .servidor
@@ -477,8 +484,8 @@ impl Motores for MotoresLocais {
         if !self.llama_instalado() {
             return ("semBinario".into(), String::new());
         }
-        if !self.qwen_instalado() {
-            return ("semModelo".into(), QWEN.arquivos[0].arquivo.into());
+        if self.modelo_ia_caminho().is_none() {
+            return ("semModelo".into(), self.prefs.modelo());
         }
         match self.servidor.estado() {
             EstadoLlama::Desligado => ("desligado".into(), String::new()),
@@ -491,79 +498,86 @@ impl Motores for MotoresLocais {
     }
 
     fn modelo_ia(&self) -> Value {
-        let a = &QWEN.arquivos[0];
+        let estado = self.modelo.lock().unwrap().clone();
+        let escolhido = modelo_do_catalogo(&self.prefs.modelo());
+        let alvo = match &estado {
+            EstadoModelo::Baixando(modelo, ..) | EstadoModelo::Conferindo(modelo) => *modelo,
+            _ => escolhido.unwrap_or(&QWEN),
+        };
+        let a = &alvo.arquivos[0];
         let mut v = json!({"arquivo": a.arquivo, "tamanho": a.tamanho});
         if !self.llama_instalado() {
             v["estado"] = json!("indisponivel");
             return v;
         }
-        match &*self.modelo.lock().unwrap() {
-            EstadoModelo::Baixando(feito, total) => {
+        match estado {
+            EstadoModelo::Baixando(_, feito, total) => {
                 v["estado"] = json!("baixando");
                 v["feito"] = json!(feito);
                 v["tamanho"] = json!(total);
             }
-            EstadoModelo::Conferindo => {
+            EstadoModelo::Conferindo(_) => {
                 v["estado"] = json!("conferindo");
                 v["feito"] = json!(a.tamanho);
             }
-            EstadoModelo::Falhou(m) => {
-                v["estado"] = json!("falhou");
-                v["detalhe"] = json!(m);
-                v["feito"] = json!(baixador(&self.pasta, &QWEN, a)
-                    .map(|b| b.ja_baixado())
-                    .unwrap_or(0));
+            _ if escolhido.is_some_and(|modelo| instalado(&self.pasta, modelo)) => {
+                v["estado"] = json!("instalado");
             }
-            EstadoModelo::Parado if self.qwen_instalado() => v["estado"] = json!("instalado"),
-            EstadoModelo::Parado => {
+            _ => {
                 v["estado"] = json!("ausente");
-                v["feito"] = json!(baixador(&self.pasta, &QWEN, a)
+                v["feito"] = json!(baixador(&self.pasta, alvo, a)
                     .map(|b| b.ja_baixado())
                     .unwrap_or(0));
+                if let EstadoModelo::Falhou(modelo, mensagem) = estado {
+                    if modelo == alvo {
+                        v["estado"] = json!("falhou");
+                        v["detalhe"] = json!(mensagem);
+                    }
+                }
             }
         }
         v
     }
 
-    /// Garante o modelo de fala e baixa o de IA. Depois de baixado por escolha da pessoa, a limpeza liga.
+    /// Baixa o modelo de IA escolhido, mantendo as preferências da pessoa.
     fn baixar_modelo(&self) -> Result<(), String> {
         if !self.llama_instalado() {
             return Err("A IA local não está disponível nesta instalação.".into());
         }
+        let alvo = modelo_do_catalogo(&self.prefs.modelo()).unwrap_or(&QWEN);
         {
             let mut m = self.modelo.lock().unwrap();
-            if matches!(*m, EstadoModelo::Baixando(..) | EstadoModelo::Conferindo) {
+            if matches!(*m, EstadoModelo::Baixando(..) | EstadoModelo::Conferindo(_)) {
                 return Ok(());
             }
-            *m = EstadoModelo::Baixando(0, QWEN.tamanho());
+            self.cancelar.store(false, Ordering::Release);
+            *m = EstadoModelo::Baixando(alvo, 0, alvo.tamanho());
         }
         // O modelo de fala que falhou ao baixar tenta de novo junto.
         if let Some(eu) = self.eu.upgrade() {
             eu.preparar_fala();
         }
-        self.cancelar.store(false, Ordering::Release);
-        let (pasta, cancelar, ao_mudar, prefs, modelo) = (
+        let (pasta, cancelar, ao_mudar, modelo) = (
             self.pasta.clone(),
             self.cancelar.clone(),
             self.ao_mudar.clone(),
-            self.prefs.clone(),
             self.modelo.clone(),
         );
         let definir = move |e: EstadoModelo| *modelo.lock().unwrap() = e;
-        thread::Builder::new()
+        let inicio = thread::Builder::new()
             .name("ditase.modelo-ia".into())
             .spawn(move || {
                 let mut ultimo = Instant::now() - Duration::from_secs(1);
                 let r = baixar_conjunto(
                     &pasta,
-                    &QWEN,
+                    alvo,
                     &|| cancelar.load(Ordering::Acquire),
                     &mut |etapa, feito, total| {
                         let novo = match etapa {
-                            Etapa::Conferindo => EstadoModelo::Conferindo,
-                            Etapa::Baixando { .. } => EstadoModelo::Baixando(feito, total),
+                            Etapa::Conferindo => EstadoModelo::Conferindo(alvo),
+                            Etapa::Baixando { .. } => EstadoModelo::Baixando(alvo, feito, total),
                         };
-                        if matches!(novo, EstadoModelo::Conferindo)
+                        if matches!(novo, EstadoModelo::Conferindo(_))
                             || ultimo.elapsed() > Duration::from_millis(250)
                         {
                             ultimo = Instant::now();
@@ -575,8 +589,6 @@ impl Motores for MotoresLocais {
                 match r {
                     Ok(()) => {
                         nota("modelo de IA instalado");
-                        prefs.definir("modelo", QWEN.arquivos[0].arquivo);
-                        prefs.definir("limpezaIA", "1");
                         definir(EstadoModelo::Parado);
                     }
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => {
@@ -585,12 +597,17 @@ impl Motores for MotoresLocais {
                     }
                     Err(e) => {
                         nota(format!("modelo de IA: {e}"));
-                        definir(EstadoModelo::Falhou(e.to_string()));
+                        definir(EstadoModelo::Falhou(alvo, e.to_string()));
                     }
                 }
                 ao_mudar();
-            })
-            .map_err(|e| e.to_string())?;
+            });
+        if let Err(e) = inicio {
+            let erro = e.to_string();
+            *self.modelo.lock().unwrap() = EstadoModelo::Falhou(alvo, erro.clone());
+            (self.ao_mudar)();
+            return Err(erro);
+        }
         Ok(())
     }
 
@@ -701,13 +718,9 @@ mod testes {
         let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
         prefs.definir("modelo", "avulso.gguf");
         let m = MotoresLocais::novo(tmp.path().to_path_buf(), prefs, Arc::new(|| {}));
-        assert!(!m.qwen_instalado());
-        assert_eq!(
-            m.modelo_ia_caminho().file_name().unwrap(),
-            QWEN.arquivos[0].arquivo
-        );
+        assert!(m.modelo_ia_caminho().is_none());
         assert!(modelos_instalados(tmp.path()).is_empty());
-        assert!(!modelos_do_catalogo().contains(&"avulso.gguf"));
+        assert!(!modelo_aceito("avulso.gguf"));
     }
 
     #[test]
@@ -719,11 +732,14 @@ mod testes {
         assert_eq!(m.estado_reconhecedor().0, "parado");
         assert_eq!(m.modelo_ia()["estado"], "indisponivel");
         assert!(m.limpador().is_none() && !m.resumo_disponivel());
-        assert_eq!(
-            remoto(&QWEN.arquivos[0]).sha256,
-            ModeloRemoto::qwen_padrao().sha256
-        );
-        for c in [&PARAKEET, &FALANTES, &QWEN] {
+        let catalogo = remoto(&QWEN.arquivos[0]);
+        let nucleo = ModeloRemoto::qwen_padrao();
+        assert_eq!(catalogo.arquivo, nucleo.arquivo);
+        assert_eq!(catalogo.url, nucleo.url);
+        assert_eq!(catalogo.sha256, nucleo.sha256);
+        assert_eq!(catalogo.tamanho, nucleo.tamanho);
+        assert!(modelo_aceito(QWEN_2B.arquivos[0].arquivo));
+        for c in [&PARAKEET, &FALANTES, &QWEN, &QWEN_2B] {
             for a in c.arquivos {
                 assert!(baixador(&tmp, c, a).is_ok(), "{}", a.arquivo);
             }

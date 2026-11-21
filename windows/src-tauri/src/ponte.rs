@@ -237,7 +237,7 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
             if chave == "atalho" && Tecla::de_id(valor).is_none() {
                 return Err("tecla desconhecida".into());
             }
-            if chave == "modelo" && !crate::motores_locais::modelos_do_catalogo().contains(&valor) {
+            if chave == "modelo" && !crate::motores_locais::modelo_aceito(valor) {
                 return Err("modelo fora do catálogo".into());
             }
             if casca.prefs.definir(chave, valor) {
@@ -508,7 +508,7 @@ fn estado(casca: &Casca) -> Value {
         "fase": c.fase().id(),
         "maosLivres": c.maos_livres(),
         "reconhecedor": {"estado": rec, "detalhe": detalhe, "nome": "Parakeet"},
-        "limpador": {"estado": limpador, "detalhe": detalhe_limpador, "ligado": casca.prefs.limpeza_ia(), "modelo": crate::motores_locais::modelos_do_catalogo()[0].trim_end_matches(".gguf")},
+        "limpador": {"estado": limpador, "detalhe": detalhe_limpador, "ligado": casca.prefs.limpeza_ia(), "modelo": casca.prefs.modelo().trim_end_matches(".gguf")},
         "modeloIA": modelo,
         "permissoes": {"microfone": if audio::microfone_disponivel() { "concedida" } else { "negada" }, "acessibilidade": "concedida"},
         "atalho": {"tecla": tecla.id(), "nome": tecla.nome(), "simbolo": tecla.simbolo(), "instalado": *c.atalho_instalado.lock().unwrap()},
@@ -525,6 +525,7 @@ fn ajustes(casca: &Casca) -> Value {
         "teclas": Tecla::TODAS.iter().map(|t| json!({"id": t.id(), "nome": t.nome()})).collect::<Vec<_>>(),
         "microfones": audio::microfones().into_iter().map(|(uid, nome)| json!({"uid": uid, "nome": nome})).collect::<Vec<_>>(),
         "modelos": modelos,
+        "modeloPadrao": motores::catalogo::QWEN.arquivos[0].arquivo,
         "pastaDeModelos": caminhos::modelos().to_string_lossy(),
         "llamaInstalado": casca.integracao.motores.llama_instalado(),
     })

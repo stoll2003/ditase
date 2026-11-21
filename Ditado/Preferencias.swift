@@ -28,7 +28,7 @@ final class Preferencias {
     static let padroes: [String: String] = [
         "atalho": Tecla.opcaoDireita.rawValue,
         "limpezaIA": "1",
-        "modelo": "Qwen3.5-2B-Q4_K_M.gguf",
+        "modelo": ModeloRemoto.qwenPadrao.arquivo,
         "sons": "1",
         "limiteMinutos": "120",
         "pararEmSilencioMinutos": "5",

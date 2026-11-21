@@ -259,7 +259,7 @@ final class Ponte: NSObject, WKScriptMessageHandlerWithReply {
             return try codificar(resumo)
 
         case "modelo.baixar":
-            controlador.modeloIA.baixar()
+            controlador.modeloIA.baixar(escolhido: controlador.prefs.modelo)
             return "true"
 
         case "modelo.cancelar":
@@ -295,13 +295,15 @@ final class Ponte: NSObject, WKScriptMessageHandlerWithReply {
         }
         let tecla = controlador.prefs.atalho
         let gerenciador = controlador.modeloIA
-        var modeloIA: [String: Any] = ["arquivo": gerenciador.modelo.arquivo, "tamanho": gerenciador.modelo.tamanho,
+        let escolhido = controlador.prefs.modelo
+        let remoto = gerenciador.modeloParaDownload(escolhido: escolhido)
+        var modeloIA: [String: Any] = ["arquivo": remoto.arquivo, "tamanho": remoto.tamanho,
                                        "aviso": controlador.prefs.ler("avisoModelo") == "1"]
-        switch gerenciador.situacao(escolhido: controlador.prefs.modelo) {
+        switch gerenciador.situacao(escolhido: escolhido) {
         case .indisponivel: modeloIA["estado"] = "indisponivel"
         case .ausente(let parcial): modeloIA.merge(["estado": "ausente", "feito": parcial]) { $1 }
         case .baixando(let feito, let total): modeloIA.merge(["estado": "baixando", "feito": feito, "tamanho": total]) { $1 }
-        case .conferindo: modeloIA.merge(["estado": "conferindo", "feito": gerenciador.modelo.tamanho]) { $1 }
+        case .conferindo: modeloIA.merge(["estado": "conferindo", "feito": remoto.tamanho]) { $1 }
         case .instalado: modeloIA["estado"] = "instalado"
         case .falhou(let motivo, let parcial): modeloIA.merge(["estado": "falhou", "detalhe": motivo, "feito": parcial]) { $1 }
         }
@@ -326,6 +328,7 @@ final class Ponte: NSObject, WKScriptMessageHandlerWithReply {
             "teclas": Preferencias.Tecla.allCases.map { ["id": $0.rawValue, "nome": $0.nome] },
             "microfones": Gravador.microfones().map { ["uid": $0.uid, "nome": $0.nome] },
             "modelos": arquivos,
+            "modeloPadrao": ModeloRemoto.qwenPadrao.arquivo,
             "pastaDeModelos": Caminhos.modelos.path,
             "llamaInstalado": ServidorLLM.binario != nil,
         ]

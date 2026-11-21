@@ -15,15 +15,26 @@ public struct ModeloRemoto: Sendable, Equatable {
         self.tamanho = tamanho
     }
 
-    /// Qwen3.5-2B quantizado em Q4_K_M. A Qwen publica só os pesos originais (Qwen/Qwen3.5-2B);
+    /// Qwen3.5-4B quantizado em Q4_K_M. A Qwen publica só os pesos originais (Qwen/Qwen3.5-4B);
     /// o GGUF vem do repositório da Unsloth, fixado na revisão abaixo. Hash e tamanho são os do
     /// arquivo LFS dessa revisão.
     public static let qwenPadrao = ModeloRemoto(
+        arquivo: "Qwen3.5-4B-Q4_K_M.gguf",
+        url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/b0bd07786f94b700012140fd9263b2de83d4f97b/Qwen3.5-4B-Q4_K_M.gguf")!,
+        sha256: "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4",
+        tamanho: 2_740_937_888
+    )
+
+    public static let qwen2B = ModeloRemoto(
         arquivo: "Qwen3.5-2B-Q4_K_M.gguf",
         url: URL(string: "https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/f6d5376be1edb4d416d56da11e5397a961aca8ae/Qwen3.5-2B-Q4_K_M.gguf")!,
         sha256: "aaf42c8b7c3cab2bf3d69c355048d4a0ee9973d48f16c731c0520ee914699223",
         tamanho: 1_280_835_840
     )
+
+    public static func qwen(arquivo: String) -> ModeloRemoto? {
+        [qwenPadrao, qwen2B].first { $0.arquivo == arquivo }
+    }
 }
 
 public enum ErroDeDownload: Error, Equatable, LocalizedError {

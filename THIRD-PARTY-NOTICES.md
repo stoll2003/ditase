@@ -4,6 +4,9 @@ O aplicativo **Dita.se** é distribuído sob a licença [MIT](LICENSE) e inclui 
 
 Os modelos de inteligência artificial (como *Parakeet TDT v3*, *Sortformer* e *Qwen 3.5*) não são embutidos no instalador `.dmg`; eles são baixados sob demanda ou carregados localmente da pasta do usuário (`~/Library/Application Support/Ditado/Models`) sob as licenças dos respectivos publicadores.
 
+O modelo de IA padrão é o [Qwen3.5-4B](https://huggingface.co/Qwen/Qwen3.5-4B),
+em [GGUF Q4_K_M quantizado pela Unsloth](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/blob/b0bd07786f94b700012140fd9263b2de83d4f97b/Qwen3.5-4B-Q4_K_M.gguf), sob Apache-2.0.
+
 ---
 
 ## Sumário dos Componentes Redistribuídos

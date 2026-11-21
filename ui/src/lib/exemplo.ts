@@ -118,7 +118,7 @@ const estado: Estado = {
   maosLivres: false,
   reconhecedor: { estado: "pronto", detalhe: "", nome: "Parakeet Ultra" },
   limpador: { estado: "pronto", detalhe: "", ligado: true, modelo: "Qwen3.5-4B-Q4_K_M" },
-  modeloIA: { estado: "instalado", arquivo: "Qwen3.5-2B-Q4_K_M.gguf", tamanho: 1_280_835_840, aviso: true },
+  modeloIA: { estado: "instalado", arquivo: "Qwen3.5-4B-Q4_K_M.gguf", tamanho: 2_740_937_888, aviso: true },
   permissoes: { microfone: "concedida", acessibilidade: "concedida" },
   atalho: { tecla: atalhoInicial.id, nome: atalhoInicial.nome, simbolo: atalhoInicial.simbolo, instalado: true },
   wisprAberto: false,
@@ -159,9 +159,9 @@ function estadoComModelo(atual: Estado): Estado {
   modeloDemo ??= situacaoInicialDoModelo();
   const m = modeloDemo;
   const limpador: Estado["limpador"] =
-    m.estado === "indisponivel" ? { ...atual.limpador, estado: "semBinario", modelo: "Qwen3.5-2B-Q4_K_M" }
+    m.estado === "indisponivel" ? { ...atual.limpador, estado: "semBinario", modelo: m.arquivo.replace(".gguf", "") }
       : m.estado === "instalado" ? atual.limpador
-        : { ...atual.limpador, estado: "semModelo", modelo: "Qwen3.5-2B-Q4_K_M" };
+        : { ...atual.limpador, estado: "semModelo", modelo: m.arquivo.replace(".gguf", "") };
   return { ...atual, limpador, modeloIA: m };
 }
 
@@ -242,6 +242,7 @@ export function responderDeExemplo(metodo: string, params: Record<string, unknow
         valores,
         teclas: (noWindows ? teclasWindows : teclasMac).map(({ id, nome }) => ({ id, nome })),
         microfones: [{ uid: "embutido", nome: noWindows ? "Microfone integrado" : "Microfone do MacBook" }],
+        modeloPadrao: "Qwen3.5-4B-Q4_K_M.gguf",
         modelos: ["Qwen3.5-2B-Q4_K_M.gguf", "Qwen3.5-4B-Q4_K_M.gguf"],
         pastaDeModelos: noWindows ? "%APPDATA%\\Dita.se\\Modelos" : "~/Library/Application Support/Ditado/Models",
         llamaInstalado: situacaoInicialDoModelo().estado !== "indisponivel",

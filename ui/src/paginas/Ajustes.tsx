@@ -30,6 +30,7 @@ export function Ajustes({ estado }: { estado?: Estado }) {
   const limpador = estado?.limpador;
   const modeloIA = estado?.modeloIA;
   const semIA = modeloIA?.estado === "indisponivel";
+  const modelos = [...new Set([v.modelo, dados.modeloPadrao ?? v.modelo, ...dados.modelos])];
 
   const importar = async () => {
     setImportando(true);
@@ -118,14 +119,14 @@ export function Ajustes({ estado }: { estado?: Estado }) {
           <Linha>
             <Select
               label="Modelo"
-              description="Arquivos .gguf na pasta de modelos. O de 2B deixa o texto pronto em cerca de um segundo; o de 4B pontua um pouco melhor, mas faz esperar vários segundos."
+              description="O Qwen de 4 bilhões é o padrão. Você também pode escolher outro modelo disponível na pasta."
               value={v.modelo}
-              disabled={v.limpezaIA !== "1" || semIA}
+              disabled={semIA}
               onValueChange={(valor) => definir("modelo", valor)}
-              options={(dados.modelos.includes(v.modelo) ? dados.modelos : [v.modelo, ...dados.modelos]).map((m) => ({
+              options={modelos.map((m) => ({
                 value: m,
                 label: m.replace(".gguf", ""),
-                description: dados.modelos.includes(m) ? undefined : "arquivo não encontrado",
+                description: dados.modelos.includes(m) ? undefined : m === dados.modeloPadrao ? "Disponível para baixar" : "Arquivo não encontrado",
               }))}
             />
             <div className="mt-3">

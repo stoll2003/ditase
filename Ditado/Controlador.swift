@@ -89,7 +89,7 @@ final class Controlador {
         }
 
         modeloIA.aoMudar = { [weak self] in self?.aoMudar?("estado") }
-        modeloIA.aoConcluir = { [weak self] in self?.modeloInstalado() }
+        modeloIA.aoConcluir = { [weak self] arquivo in self?.modeloInstalado(arquivo) }
 
         servidor.aoMudar = { [weak self] estado in
             Task { @MainActor in
@@ -113,14 +113,8 @@ final class Controlador {
 
     /// Download terminado e conferido: passa a usar o modelo e já o carrega, para o estado
     /// chegar a "Pronta" e o primeiro ditado não esperar.
-    private func modeloInstalado() {
-        let pasta = Caminhos.modelos
-        if !FileManager.default.fileExists(atPath: pasta.appendingPathComponent(prefs.modelo).path) {
-            prefs.definir("modelo", modeloIA.modelo.arquivo)
-        }
-        servidor.parar()
-        guard prefs.limpezaIA else { return }
-        let modelo = prefs.modelo
+    private func modeloInstalado(_ modelo: String) {
+        guard prefs.limpezaIA, prefs.modelo == modelo else { return }
         Task.detached { [servidor] in await servidor.garantir(modelo: modelo) }
     }
 

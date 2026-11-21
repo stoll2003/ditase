@@ -76,12 +76,15 @@ final class BaixadorDeModeloTests: XCTestCase {
 
     func testModeloPadraoFixadoNumaRevisaoComHash() {
         let m = ModeloRemoto.qwenPadrao
-        XCTAssertEqual(m.arquivo, "Qwen3.5-2B-Q4_K_M.gguf")
-        XCTAssertTrue(m.url.absoluteString.hasPrefix("https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/"))
+        XCTAssertEqual(m.arquivo, "Qwen3.5-4B-Q4_K_M.gguf")
+        XCTAssertTrue(m.url.absoluteString.hasPrefix("https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/"))
         let revisao = m.url.pathComponents[m.url.pathComponents.count - 2]
         XCTAssertEqual(revisao.count, 40, "a URL precisa apontar para um commit, não para main")
-        XCTAssertEqual(m.sha256.count, 64)
+        XCTAssertEqual(m.sha256, "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4")
+        XCTAssertEqual(m.tamanho, 2_740_937_888)
         XCTAssertEqual(m.url.lastPathComponent, m.arquivo)
+        XCTAssertEqual(ModeloRemoto.qwen(arquivo: "Qwen3.5-2B-Q4_K_M.gguf"), .qwen2B)
+        XCTAssertNil(ModeloRemoto.qwen(arquivo: "avulso.gguf"))
     }
 
     func testBaixaConfereERenomeiaParaONomeFinal() async throws {

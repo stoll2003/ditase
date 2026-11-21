@@ -59,9 +59,8 @@ impl Tecla {
 
 pub const PADROES: &[(&str, &str)] = &[
     ("atalho", "controleDireito"),
-    // Desligada por padrão: o llama.cpp do Windows roda só na CPU. Liga sozinha ao baixar o modelo pelo Início.
-    ("limpezaIA", "0"),
-    ("modelo", "Qwen3.5-2B-Q4_K_M.gguf"),
+    ("limpezaIA", "1"),
+    ("modelo", motores::catalogo::QWEN.arquivos[0].arquivo),
     ("sons", "1"),
     ("limiteMinutos", "120"),
     ("pararEmSilencioMinutos", "5"),
@@ -187,9 +186,24 @@ mod testes {
     fn padroes_e_chave_desconhecida() {
         let p = Preferencias::abrir(temporario("a"));
         assert_eq!(p.atalho(), Tecla::ControleDireito);
+        assert_eq!(p.modelo(), "Qwen3.5-4B-Q4_K_M.gguf");
+        assert!(p.limpeza_ia());
         assert!(!p.definir("inventada", "1"));
         assert_eq!(p.ler("inventada"), "");
         assert_eq!(p.todas().as_object().unwrap().len(), PADROES.len());
+    }
+
+    #[test]
+    fn preserva_modelo_e_limpeza_gravados() {
+        let arq = temporario("modelo");
+        let p = Preferencias::abrir(arq.clone());
+        assert!(p.definir("modelo", "Qwen3.5-2B-Q4_K_M.gguf"));
+        assert!(p.definir("limpezaIA", "0"));
+        let p = Preferencias::abrir(arq.clone());
+        assert_eq!(p.modelo(), "Qwen3.5-2B-Q4_K_M.gguf");
+        assert!(!p.limpeza_ia());
+        assert!(p.definir("modelo", "Qwen3.5-4B-Q4_K_M.gguf"));
+        assert_eq!(Preferencias::abrir(arq).modelo(), "Qwen3.5-4B-Q4_K_M.gguf");
     }
 
     #[test]

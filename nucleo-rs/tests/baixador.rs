@@ -59,8 +59,8 @@ fn baixar(b: &BaixadorDeModelo, t: &Transporte) -> io::Result<()> {
 fn manifesto() {
     let m = ModeloRemoto::qwen_padrao();
     assert_eq!(m.sha256.len(), 64);
-    assert!(m.url.contains("f6d5376be1edb4d416d56da11e5397a961aca8ae"));
-    assert_eq!(m.tamanho, 1280835840)
+    assert!(m.url.contains("b0bd07786f94b700012140fd9263b2de83d4f97b"));
+    assert_eq!(m.tamanho, 2_740_937_888)
 }
 #[test]
 fn progresso_hash_nome_final_e_cache() {

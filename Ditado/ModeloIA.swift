@@ -18,63 +18,75 @@ final class GerenciadorDeModelo {
         case falhou(String, parcial: Int64)
     }
 
-    let modelo = ModeloRemoto.qwenPadrao
+    private var modeloEmCurso: ModeloRemoto?
     var aoMudar: (() -> Void)?
-    var aoConcluir: (() -> Void)?
+    var aoConcluir: ((String) -> Void)?
 
     private var tarefa: Task<Void, Never>?
     private var etapa: BaixadorDeModelo.Etapa?
-    private var falha: String?
+    private var falha: (modelo: ModeloRemoto, texto: String)?
     private var ultimoAviso = Date.distantPast
     private var avisoAgendado = false
 
-    private var baixador: BaixadorDeModelo { BaixadorDeModelo(modelo: modelo, pasta: Caminhos.modelos) }
-
     var baixando: Bool { tarefa != nil }
 
-    /// Situação para o modelo escolhido nos Ajustes. Outro modelo que já esteja na pasta conta
-    /// como instalado; o download oferecido é sempre o padrão.
+    func modeloParaDownload(escolhido: String) -> ModeloRemoto {
+        modeloEmCurso ?? ModeloRemoto.qwen(arquivo: escolhido) ?? .qwenPadrao
+    }
+
     func situacao(escolhido: String) -> Situacao {
         if ServidorLLM.binario == nil { return .indisponivel }
+        let modelo = modeloParaDownload(escolhido: escolhido)
+        let baixador = BaixadorDeModelo(modelo: modelo, pasta: Caminhos.modelos)
         if tarefa != nil {
             if case .baixando(let feito, let total) = etapa { return .baixando(feito: feito, total: total) }
             if etapa == .conferindo { return .conferindo }
             return .baixando(feito: baixador.jaBaixado, total: modelo.tamanho)
         }
-        // O modelo padrão só conta depois de conferido pelo hash. Cópia sem conferência (versão
-        // anterior do app, colocada à mão) é conferida uma vez, sem baixar de novo sozinha.
-        if baixador.precisaConferir, falha == nil {
-            baixar()
+        if ModeloRemoto.qwen(arquivo: escolhido) == nil,
+           FileManager.default.fileExists(atPath: Caminhos.modelos.appendingPathComponent(escolhido).path) {
+            return .instalado
+        }
+        if baixador.instalado { return .instalado }
+        if let falha, falha.modelo == modelo { return .falhou(falha.texto, parcial: baixador.jaBaixado) }
+        // Confere uma cópia já presente, sem iniciar tráfego de rede.
+        if baixador.precisaConferir {
+            iniciar(modelo, soConferir: true)
             return .conferindo
         }
-        let escolhidoExiste = escolhido != modelo.arquivo
-            && FileManager.default.fileExists(atPath: Caminhos.modelos.appendingPathComponent(escolhido).path)
-        if escolhidoExiste || baixador.instalado { return .instalado }
-        if let falha { return .falhou(falha, parcial: baixador.jaBaixado) }
         return .ausente(parcial: baixador.jaBaixado)
     }
 
-    func baixar() {
-        let baixador = self.baixador
+    func baixar(escolhido: String) {
+        iniciar(modeloParaDownload(escolhido: escolhido))
+    }
+
+    private func iniciar(_ modelo: ModeloRemoto, soConferir: Bool = false) {
+        let baixador = BaixadorDeModelo(modelo: modelo, pasta: Caminhos.modelos)
         guard tarefa == nil, ServidorLLM.binario != nil, !baixador.instalado else { return }
+        modeloEmCurso = modelo
         falha = nil
-        etapa = nil
-        Registro.nota("modelo: download de \(modelo.arquivo) a partir de \(baixador.jaBaixado) bytes")
+        etapa = soConferir ? .conferindo : nil
+        Registro.nota("modelo: \(soConferir ? "conferência" : "download") de \(modelo.arquivo) a partir de \(baixador.jaBaixado) bytes")
         tarefa = Task { [weak self] in
             do {
-                try await baixador.baixar { [weak self] etapa in
-                    Task { @MainActor in self?.avancar(etapa) }
+                if soConferir {
+                    try await Task.detached { try baixador.conferirExistente() }.value
+                } else {
+                    try await baixador.baixar { [weak self] etapa in
+                        Task { @MainActor in self?.avancar(etapa) }
+                    }
                 }
                 Registro.nota("modelo: \(baixador.modelo.arquivo) instalado e conferido")
                 self?.terminar(falha: nil)
-                self?.aoConcluir?()
+                self?.aoConcluir?(modelo.arquivo)
             } catch let erro as ErroDeDownload where erro == .cancelado {
                 Registro.nota("modelo: download cancelado em \(baixador.jaBaixado) bytes")
                 self?.terminar(falha: nil)
             } catch {
                 let texto = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 Registro.nota("modelo: falha no download: \(error)")
-                self?.terminar(falha: texto)
+                self?.terminar(falha: (modelo, texto))
             }
         }
         aoMudar?()
@@ -82,8 +94,9 @@ final class GerenciadorDeModelo {
 
     func cancelar() { tarefa?.cancel() }
 
-    private func terminar(falha: String?) {
+    private func terminar(falha: (ModeloRemoto, String)?) {
         tarefa = nil
+        modeloEmCurso = nil
         etapa = nil
         self.falha = falha
         aoMudar?()
@@ -120,7 +133,7 @@ extension GerenciadorDeModelo {
         }
         let cancelarEm = ModoLinha.argumento("--cancelar-em").flatMap(Int64.init).map { $0 << 20 }
         let g = GerenciadorDeModelo()
-        let escolhido = g.modelo.arquivo
+        let escolhido = ModoLinha.argumento("--modelo") ?? ModeloRemoto.qwenPadrao.arquivo
         var ultimo = ""
         var cancelou = false
         func mostrar() {
@@ -145,7 +158,7 @@ extension GerenciadorDeModelo {
         }
         print("pasta: \(pasta)")
         mostrar()
-        g.baixar()
+        g.baixar(escolhido: escolhido)
         while g.baixando { try? await Task.sleep(nanoseconds: 50_000_000) }
         mostrar()
         if case .instalado = g.situacao(escolhido: escolhido) { return 0 }

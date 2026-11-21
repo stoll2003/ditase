@@ -88,9 +88,10 @@ final class ServidorLLM: @unchecked Sendable {
             return false
         }
         let arquivo = Caminhos.modelos.appendingPathComponent(modelo)
-        // O modelo padrão só sobe depois de conferido pelo hash (o gerenciador confere a cópia antiga).
-        let padrao = ModeloRemoto.qwenPadrao
-        let conferido = modelo != padrao.arquivo || BaixadorDeModelo(modelo: padrao, pasta: Caminhos.modelos).instalado
+        // Modelos do catálogo só sobem depois da conferência.
+        let conferido = ModeloRemoto.qwen(arquivo: modelo).map {
+            BaixadorDeModelo(modelo: $0, pasta: Caminhos.modelos).instalado
+        } ?? true
         guard conferido, FileManager.default.fileExists(atPath: arquivo.path) else {
             mudar(.semModelo(modelo))
             return false
