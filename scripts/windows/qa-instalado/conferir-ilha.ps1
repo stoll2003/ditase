@@ -344,25 +344,27 @@ try {
         } elseif (-not $item.ok) { $falhas++ }
         Write-Host ("escala {0}%: código {1}, sistema {2}%, monitor {3}%, ilha {4}%, ok={5}" -f $pct, $rc, $sistema, $dpiMon, $aplicada, $item.ok)
     }
-    # Abertura já em escala alta (caso mais comum): reinicia o app instalado com a escala trocada.
-    $alta = @($possiveis | Where-Object { $_ -gt 100 } | Sort-Object -Descending | Select-Object -First 1)
-    if ($Executavel -and $alta) {
-        $pctAlta = $alta[0]
-        [void][QaIlha]::DefinirEscala($pctAlta)
-        Start-Sleep -Milliseconds 1500
-        Stop-Process -Id $ProcessoApp -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        $novo = Start-Process -FilePath $Executavel -PassThru
-        $script:ProcessoApp = $novo.Id
-        $ilha = [IntPtr]::Zero; $fimN = (Get-Date).AddSeconds(30)
-        while ($ilha -eq [IntPtr]::Zero -and (Get-Date) -lt $fimN) { Start-Sleep -Milliseconds 300; $ilha = Achar-Ilha }
-        if ($ilha -eq [IntPtr]::Zero) {
-            Checar "abertura_em_$pctAlta" $false ([ordered]@{ motivo = 'ilha não apareceu após reiniciar' })
-        } else {
+    # Abertura já em cada escala acima de 100% (caso mais comum): reinicia o app instalado.
+    $altas = @($possiveis | Where-Object { $_ -gt 100 })
+    if ($Executavel) {
+        foreach ($pctAlta in $altas) {
+            [void][QaIlha]::DefinirEscala($pctAlta)
+            Start-Sleep -Milliseconds 1500
+            Stop-Process -Id $script:ProcessoApp -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            $novo = Start-Process -FilePath $Executavel -PassThru
+            $script:ProcessoApp = $novo.Id
+            $ilha = [IntPtr]::Zero; $fimN = (Get-Date).AddSeconds(30)
+            while ($ilha -eq [IntPtr]::Zero -and (Get-Date) -lt $fimN) { Start-Sleep -Milliseconds 300; $ilha = Achar-Ilha }
+            if ($ilha -eq [IntPtr]::Zero) {
+                Checar "abertura_em_$pctAlta" $false ([ordered]@{ motivo = 'ilha não apareceu após reiniciar' })
+                continue
+            }
             $m = Esperar-Tamanho $ilha 92 7 20
             $d1 = $false; [void][QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$d1)
             $d2 = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$d2)
-            Checar "abertura_em_$pctAlta" ($m[2] -and $d1 -and -not $d2) ([ordered]@{ medido = $m[0]; esperado = $m[1]; recorteOk = ($d1 -and -not $d2) })
+            $esc = [Math]::Round($m[0].escala * 100)
+            Checar "abertura_em_$pctAlta" ($m[2] -and $esc -eq $pctAlta -and $d1 -and -not $d2) ([ordered]@{ medido = $m[0]; esperado = $m[1]; recorteOk = ($d1 -and -not $d2) })
             Recortar $m[0] ("ilha-abertura-{0}.png" -f $pctAlta)
         }
         Stop-Process -Id $script:ProcessoApp -Force -ErrorAction SilentlyContinue
