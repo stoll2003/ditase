@@ -360,8 +360,57 @@ async function faseTransicao(cdp, relatorio) {
   return "transicao_ok";
 }
 
+/**
+ * Grava a pílula/cápsula (alvo pilula.html do mesmo WebView2) por screencast CDP: cada quadro vira
+ * JPEG com horário. O WebView2 só emite quadro quando a imagem muda, então buracos longos durante o
+ * processamento indicam animação parada; o intervalo entre quadros mede a fluidez.
+ */
+async function gravarPilula(rotulo) {
+  const porta = portaDoPerfil() ?? PORTA;
+  let alvo;
+  try {
+    const alvos = await (await fetch(`http://127.0.0.1:${porta}/json`)).json();
+    alvo = alvos.find((a) => a.type === "page" && String(a.url || "").includes("pilula") && a.webSocketDebuggerUrl);
+  } catch {}
+  if (!alvo) return { parar: async () => ({ rotulo, erro: "alvo da pílula não encontrado" }) };
+  const pasta = path.join(SAIDA, `pilula-${rotulo}`);
+  fs.mkdirSync(pasta, { recursive: true });
+  const ws = new WebSocket(alvo.webSocketDebuggerUrl);
+  await new Promise((ok, erro) => { ws.addEventListener("open", ok, { once: true }); ws.addEventListener("error", erro, { once: true }); });
+  let seq = 0;
+  const quadros = [];
+  const enviar = (method, params = {}) => ws.send(JSON.stringify({ id: ++seq, method, params }));
+  ws.addEventListener("message", (ev) => {
+    const msg = JSON.parse(String(ev.data));
+    if (msg.method !== "Page.screencastFrame") return;
+    const { data, metadata, sessionId } = msg.params;
+    const n = quadros.length;
+    fs.writeFileSync(path.join(pasta, `${String(n).padStart(5, "0")}.jpg`), Buffer.from(data, "base64"));
+    quadros.push({ n, t: metadata.timestamp, w: metadata.deviceWidth, h: metadata.deviceHeight });
+    enviar("Page.screencastFrameAck", { sessionId });
+  });
+  enviar("Page.enable");
+  enviar("Page.startScreencast", { format: "jpeg", quality: 85, everyNthFrame: 1 });
+  const inicio = Date.now() / 1000;
+  return {
+    async parar() {
+      try { enviar("Page.stopScreencast"); } catch {}
+      await esperar(300);
+      try { ws.close(); } catch {}
+      const t = quadros.map((q) => q.t).sort((x, y) => x - y);
+      const gaps = t.slice(1).map((v, i) => v - t[i]).sort((x, y) => x - y);
+      const p = (q) => (gaps.length ? Number(gaps[Math.min(gaps.length - 1, Math.floor(q * gaps.length))].toFixed(3)) : null);
+      const resumo = { rotulo, quadros: quadros.length, inicio, primeiro: t[0] ?? null, ultimo: t.at(-1) ?? null,
+        duracaoS: t.length > 1 ? Number((t.at(-1) - t[0]).toFixed(2)) : 0, intervaloP50: p(0.5), intervaloP95: p(0.95), intervaloMax: p(1) };
+      fs.writeFileSync(path.join(pasta, "quadros.json"), JSON.stringify({ resumo, quadros }, null, 1));
+      return resumo;
+    },
+  };
+}
+
 async function faseArquivos(cdp, relatorio, chaves) {
   await irPara(cdp, "Arquivos");
+  const gravacao = await gravarPilula("arquivos").catch((e) => ({ parar: async () => ({ erro: String(e) }) }));
   const dialogo = rodarProcesso("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT_DIALOGO, "-Arquivo", WAV, "-ArvoreSaida", path.join(SAIDA, "dialogo-arvore.txt")]);
   const clique = await clicarBotaoPorTexto(cdp, "Escolher arquivo");
   if (!clique.ok) throw new ErroDeProva("ui_controle_ausente", "Escolher arquivo não clicável", clique);
@@ -378,6 +427,8 @@ async function faseArquivos(cdp, relatorio, chaves) {
     }
     return main.includes("pronto em ") && main.includes("palavra") ? main : null;
   });
+  await esperar(3000); // fim do processamento e transição de volta na pílula
+  relatorio.etapas.pilula_arquivos = await gravacao.parar();
   const conf = conferirPalavras(texto, chaves, 0.6);
   relatorio.etapas.arquivo_ui = { ...conf, amostra: texto.slice(0, 400) };
   relatorio.screenshots.push(await cdp.screenshot("03-arquivos-transcricao.png"));
