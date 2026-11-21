@@ -80,9 +80,9 @@ fn abrir() -> Result<Aberta, String> {
     Err("área de transferência ocupada por outro programa".into())
 }
 
-fn guardar() -> Vec<(u32, Vec<u8>)> {
+fn guardar() -> Result<Conteudo, String> {
+    let _a = abrir()?;
     let mut itens = Vec::new();
-    let Ok(_a) = abrir() else { return itens };
     let mut formato = 0u32;
     loop {
         formato = unsafe { EnumClipboardFormats(formato) };
@@ -106,7 +106,7 @@ fn guardar() -> Vec<(u32, Vec<u8>)> {
             let _ = GlobalUnlock(g);
         }
     }
-    itens
+    Ok(itens)
 }
 
 /// Põe um formato na área de transferência aberta. Devolve se o Windows aceitou.
@@ -244,10 +244,17 @@ fn tecla(vk: VIRTUAL_KEY, solta: bool) -> INPUT {
 
 pub fn inserir(texto: &str) -> Insercao {
     // App como administrador: o Ctrl+V seria descartado. O texto fica copiado, marcado fora do
-    // histórico e da nuvem, e a pílula avisa; sem as marcas, não copia.
+    // histórico e da nuvem, e a pílula avisa; sem as marcas ou sem conseguir ler a área, recusa.
     if destino_bloqueado() {
         crate::caminhos::nota("colagem: app de destino como administrador");
-        return match escrever_transitorio(texto, &guardar()) {
+        let anterior = match guardar() {
+            Ok(a) => a,
+            Err(e) => {
+                crate::caminhos::nota(format!("colagem: não li a área ({e}); recusada"));
+                return Insercao::Recusado;
+            }
+        };
+        return match escrever_transitorio(texto, &anterior) {
             Ok(_) => Insercao::SoCopiado,
             Err(e) => {
                 crate::caminhos::nota(format!("colagem: não copiei ({e})"));
@@ -256,16 +263,31 @@ pub fn inserir(texto: &str) -> Insercao {
         };
     }
     // Duas colagens seguidas: a área ainda tem o nosso texto anterior; vale a reserva da primeira.
-    let guardado = {
+    // Se falhar ao ler a área (ocupada), devolve qualquer reserva e recusa sem tocar na área (M-4).
+    let (guardado, reserva_anterior) = {
         let reserva = RESERVA.lock().unwrap().take();
         match reserva {
-            Some((itens, nossa)) if unsafe { GetClipboardSequenceNumber() } == nossa => itens,
-            _ => guardar(),
+            Some((itens, nossa)) if unsafe { GetClipboardSequenceNumber() } == nossa => {
+                (itens, Some(nossa))
+            }
+            outra => match guardar() {
+                Ok(itens) => (itens, None),
+                Err(e) => {
+                    if let Some(r) = outra {
+                        *RESERVA.lock().unwrap() = Some(r);
+                    }
+                    crate::caminhos::nota(format!("colagem: não li a área ({e}); recusada"));
+                    return Insercao::Recusado;
+                }
+            },
         }
     };
     let sequencia = match escrever_transitorio(texto, &guardado) {
         Ok(s) => s,
         Err(e) => {
+            if let Some(nossa) = reserva_anterior {
+                *RESERVA.lock().unwrap() = Some((guardado, nossa));
+            }
             crate::caminhos::nota(format!("colagem: não colei ({e})"));
             return Insercao::Recusado;
         }

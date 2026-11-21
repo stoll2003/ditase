@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "pilula",
-  "description": "Pílula: só as próprias ações e o evento de estado dela. Sem acesso à ponte (histórico, documentos, ajustes).",
+  "description": "Pílula: só o comando próprio (ações e canal de estado). Sem core:event (não pode ouvir eventos da janela principal) e sem acesso à ponte.",
   "windows": ["pilula"],
-  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "allow-pilula-acao"]
+  "permissions": ["allow-pilula-acao", "allow-pilula-conectar"]
 }

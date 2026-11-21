@@ -586,6 +586,33 @@ mod testes {
         );
     }
 
+    /// M-3: a pílula não tem permissão `core:event:*` (não pode ouvir `ditado:trechos` nem outros
+    /// eventos da janela principal) nem `allow-ponte`; recebe estado só pelo canal IPC próprio.
+    #[test]
+    fn pilula_nao_pode_ouvir_eventos_da_principal_nem_chamar_ponte() {
+        let cap: Value = serde_json::from_str(include_str!("../capabilities/pilula.json")).unwrap();
+        assert_eq!(cap["windows"], json!(["pilula"]));
+        let perms: Vec<&str> = cap["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(perms, vec!["allow-pilula-acao", "allow-pilula-conectar"]);
+        assert!(
+            !perms
+                .iter()
+                .any(|p| p.starts_with("core:event") || p.contains("ponte")),
+            "capability da pílula permite evento ou ponte: {perms:?}"
+        );
+        let js = include_str!("../../pilula/pilula.js");
+        assert!(!js.contains(".listen("), "pilula.js ainda usa event.listen");
+        assert!(
+            EVENTOS.contains(&"ditado:trechos"),
+            "ditado:trechos deve estar na lista fechada de eventos da principal"
+        );
+    }
+
     mod integrada {
         use std::{
             sync::{Arc, Mutex},

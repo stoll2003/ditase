@@ -72,7 +72,9 @@ impl RelogioDeFonte {
         let pelo_relogio = (agora - duracao).max(0.0);
         let inicio = *self.inicio.get_or_insert(pelo_relogio);
         let mut t = inicio + self.amostras as f64 / crate::audio::TAXA as f64;
-        if (pelo_relogio - t).abs() > RESSINCRONIA {
+        // Só ressincroniza para a frente (parada real do dispositivo). Recuar o tempo faria o
+        // CursorDeFonte descartar fala nova como repetida (deriva de relógio ou fila acumulada).
+        if pelo_relogio - t > RESSINCRONIA {
             self.inicio = Some(pelo_relogio - self.amostras as f64 / crate::audio::TAXA as f64);
             t = pelo_relogio;
         }
@@ -159,19 +161,39 @@ struct Ativa {
     microfone: bool,
 }
 
-/// Destino da derivação do microfone da reunião para um ditado (I5). Vazio sem ditado.
-type Derivacao = Arc<Mutex<Option<crate::controlador::AoBlocoDeAudio>>>;
+/// Derivação do microfone da reunião para um ditado (I5). `geracao` muda a cada derivação: uma
+/// fonte antiga, solta depois que o ditado seguinte já derivou, não apaga a derivação nova (I-1).
+#[derive(Default)]
+struct EstadoDerivacao {
+    geracao: u64,
+    ao_bloco: Option<crate::controlador::AoBlocoDeAudio>,
+    /// Chamado quando a reunião solta o microfone com o ditado ainda derivando (I-2).
+    ao_acabar: Option<crate::controlador::AoAcabar>,
+}
+type Derivacao = Arc<Mutex<EstadoDerivacao>>;
 
-/// Fonte do ditado derivada da reunião: soltar ou parar fecha a derivação.
-struct FonteDerivada(Derivacao);
+/// Fonte do ditado derivada da reunião: soltar ou parar fecha a derivação, se ainda for a dela.
+struct FonteDerivada {
+    derivacao: Derivacao,
+    geracao: u64,
+}
+impl FonteDerivada {
+    fn fechar(&self) {
+        let mut d = self.derivacao.lock().unwrap();
+        if d.geracao == self.geracao {
+            d.ao_bloco = None;
+            d.ao_acabar = None;
+        }
+    }
+}
 impl crate::controlador::FonteAberta for FonteDerivada {
     fn parar(&mut self) {
-        self.0.lock().unwrap().take();
+        self.fechar();
     }
 }
 impl Drop for FonteDerivada {
     fn drop(&mut self) {
-        self.0.lock().unwrap().take();
+        self.fechar();
     }
 }
 
@@ -342,7 +364,7 @@ impl Lancamento {
             capturador,
             preparar,
             avisar,
-            derivacao: Arc::new(Mutex::new(None)),
+            derivacao: Arc::new(Mutex::new(EstadoDerivacao::default())),
             leitor: Mutex::new(leitor),
             fila: Arc::new(Mutex::new(Vec::new())),
             caminhos: Mutex::new(HashMap::new()),
@@ -900,7 +922,7 @@ impl Lancamento {
             let ao_bloco: AoBloco = Box::new(move |t, bloco, nivel| {
                 // Ditado durante a reunião: recebe o microfone mesmo com a reunião pausada.
                 if let Some(d) = &derivacao {
-                    if let Some(ditado) = d.lock().unwrap().as_mut() {
+                    if let Some(ditado) = d.lock().unwrap().ao_bloco.as_mut() {
                         ditado(bloco.clone(), nivel);
                     }
                 }
@@ -1039,10 +1061,26 @@ impl Lancamento {
         Some(a)
     }
 
+    /// Fecha as fontes da reunião primeiro (liberando o dispositivo de áudio) e então avisa um
+    /// ditado que estivesse derivando do microfone dela para abrir o próprio microfone ou encerrar
+    /// com o que já tem, sem ficar surdo nem gravar silêncio (I-2). O aviso roda sem nenhuma trava
+    /// do serviço.
+    fn soltar_capturas(&self, capturas: Vec<Box<dyn Send>>) {
+        drop(capturas);
+        let ao_acabar = {
+            let mut d = self.derivacao.lock().unwrap();
+            d.ao_bloco = None;
+            d.ao_acabar.take()
+        };
+        if let Some(f) = ao_acabar {
+            f();
+        }
+    }
+
     /// Fecha as fontes (falha de disco no coletor): a reunião segue para o fim com o que foi gravado.
     fn parar_capturas(&self, doc: &str) {
         if let Some(a) = self.tirar_ativa(Some(doc)) {
-            drop(a.capturas);
+            self.soltar_capturas(a.capturas);
             let _ = self
                 .leitor()
                 .mudar_estado(doc, "processando", &["gravando", "pausada"]);
@@ -1241,7 +1279,7 @@ impl Lancamento {
             .tirar_ativa(Some(id))
             .ok_or("Essa reunião não está em andamento.")?;
         let t = a.vivo.relogio.elapsed().as_secs_f64();
-        drop(a.capturas);
+        self.soltar_capturas(a.capturas);
         let _ = a.envio.send(Captado::Encerrar(t));
         let duracao = a.vivo.decorrido();
         let leitor = self.leitor();
@@ -1410,7 +1448,7 @@ impl Lancamento {
         let limite = Instant::now() + prazo;
         if let Some(a) = self.tirar_ativa(None) {
             let t = a.vivo.relogio.elapsed().as_secs_f64();
-            drop(a.capturas);
+            self.soltar_capturas(a.capturas);
             let _ = a.envio.send(Captado::Encerrar(t));
             while !a.coletor_fim.load(Ordering::Acquire) && Instant::now() < limite {
                 thread::sleep(Duration::from_millis(10));
@@ -2061,13 +2099,20 @@ impl crate::controlador::MicrofoneCompartilhado for Lancamento {
     fn derivar(
         &self,
         ao_bloco: crate::controlador::AoBlocoDeAudio,
+        ao_acabar: crate::controlador::AoAcabar,
     ) -> Option<Box<dyn crate::controlador::FonteAberta>> {
         let r = self.reuniao.lock().unwrap();
         if !r.as_ref().is_some_and(|a| a.microfone) {
             return None;
         }
-        *self.derivacao.lock().unwrap() = Some(ao_bloco);
-        Some(Box::new(FonteDerivada(self.derivacao.clone())))
+        let mut d = self.derivacao.lock().unwrap();
+        d.geracao += 1;
+        d.ao_bloco = Some(ao_bloco);
+        d.ao_acabar = Some(ao_acabar);
+        Some(Box::new(FonteDerivada {
+            derivacao: self.derivacao.clone(),
+            geracao: d.geracao,
+        }))
     }
 }
 
@@ -2123,7 +2168,7 @@ mod testes_derivacao {
         )
         .unwrap();
         assert!(
-            s.derivar(Box::new(|_, _| {})).is_none(),
+            s.derivar(Box::new(|_, _| {}), Box::new(|| {})).is_none(),
             "sem reunião não há derivação"
         );
         let id = s.iniciar_reuniao("macEMicrofone").unwrap();
@@ -2131,7 +2176,10 @@ mod testes_derivacao {
         let recebido = Arc::new(Mutex::new(0usize));
         let r = recebido.clone();
         let mut fonte = s
-            .derivar(Box::new(move |b, _| *r.lock().unwrap() += b.len()))
+            .derivar(
+                Box::new(move |b, _| *r.lock().unwrap() += b.len()),
+                Box::new(|| {}),
+            )
             .expect("derivação");
         thread::sleep(Duration::from_millis(300));
         let antes = *recebido.lock().unwrap();
@@ -2162,13 +2210,137 @@ mod testes_derivacao {
             .unwrap();
             let id = s2.iniciar_reuniao("mac").unwrap();
             assert!(
-                s2.derivar(Box::new(|_, _| {})).is_none(),
+                s2.derivar(Box::new(|_, _| {}), Box::new(|| {})).is_none(),
                 "reunião sem microfone não deriva"
             );
             s2.desligar(Duration::from_secs(2));
             id
         };
         assert!(!id2.is_empty());
+    }
+
+    /// I-1 (prova do Dev Par): o ditado 1 já parou, mas a FonteDerivada dele só é solta depois que
+    /// o ditado 2 derivou. O Drop atrasado não pode desligar a derivação do ditado 2.
+    #[test]
+    fn soltar_derivacao_antiga_nao_desliga_a_nova() {
+        let tmp = crate::caminhos::pasta_de_teste();
+        let s = Lancamento::new(
+            &tmp.path().join("t.sqlite"),
+            &tmp.path().join("Audio"),
+            MotoresDuble::novo(),
+            Arc::new(CapturaContinua),
+            Arc::new(|t: &str| t.to_string()),
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        let id = s.iniciar_reuniao("macEMicrofone").unwrap();
+        let mut f1 = s
+            .derivar(Box::new(|_, _| {}), Box::new(|| {}))
+            .expect("derivação 1");
+        f1.parar();
+        let recebido = Arc::new(Mutex::new(0usize));
+        let r = recebido.clone();
+        let _f2 = s
+            .derivar(
+                Box::new(move |b, _| *r.lock().unwrap() += b.len()),
+                Box::new(|| {}),
+            )
+            .expect("derivação 2");
+        drop(f1);
+        let antes = *recebido.lock().unwrap();
+        thread::sleep(Duration::from_millis(300));
+        let depois = *recebido.lock().unwrap();
+        s.encerrar(&id).unwrap();
+        s.desligar(Duration::from_secs(2));
+        assert!(
+            depois > antes,
+            "o ditado 2 parou de receber microfone quando a fonte do ditado 1 foi solta"
+        );
+    }
+
+    /// I-2 no serviço: encerrar a reunião avisa a derivação ativa via `ao_acabar`.
+    #[test]
+    fn encerrar_reuniao_avisa_derivacao_ativa() {
+        let tmp = crate::caminhos::pasta_de_teste();
+        let s = Lancamento::new(
+            &tmp.path().join("t.sqlite"),
+            &tmp.path().join("Audio"),
+            MotoresDuble::novo(),
+            Arc::new(CapturaContinua),
+            Arc::new(|t: &str| t.to_string()),
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        let id = s.iniciar_reuniao("macEMicrofone").unwrap();
+        let avisou = Arc::new(AtomicBool::new(false));
+        let a = avisou.clone();
+        let _f = s
+            .derivar(
+                Box::new(|_, _| {}),
+                Box::new(move || a.store(true, Ordering::Release)),
+            )
+            .expect("derivação");
+        s.encerrar(&id).unwrap();
+        assert!(
+            avisou.load(Ordering::Acquire),
+            "encerrar a reunião não avisou o ditado derivado"
+        );
+        s.desligar(Duration::from_secs(2));
+    }
+
+    /// M-5 (prova do Dev Par): relógio do dispositivo 200 ppm mais rápido que o da reunião.
+    #[test]
+    fn deriva_do_relogio_do_dispositivo_nao_descarta_fala() {
+        let mut relogio = RelogioDeFonte::default();
+        let linha = nucleo::LinhaDoTempo::new(0.0);
+        let mut cursor = nucleo::CursorDeFonte::new(0);
+        let (n, ppm) = (1600usize, 200e-6);
+        let (mut aceitas, mut entregues) = (0usize, 0usize);
+        for k in 0..36_000u64 {
+            let agora = (k + 1) as f64 * 0.1 / (1.0 + ppm);
+            let t = relogio.tempo(agora, n);
+            for e in cursor.receber(t, n, &linha) {
+                if let nucleo::Evento::Amostras(p) = e {
+                    aceitas += p.quantidade;
+                }
+            }
+            entregues += n;
+        }
+        let perdidas = entregues - aceitas;
+        assert_eq!(
+            perdidas,
+            0,
+            "o coletor descartou {perdidas} amostras ({:.2} s) de fala nova como repetidas",
+            perdidas as f64 / 16_000.0
+        );
+    }
+
+    /// M-5 (prova do Dev Par): entrega atrasada 0,5 s com blocos acumulados chegando juntos.
+    #[test]
+    fn atraso_de_entrega_com_fila_nao_descarta_fala() {
+        let mut relogio = RelogioDeFonte::default();
+        let linha = nucleo::LinhaDoTempo::new(0.0);
+        let mut cursor = nucleo::CursorDeFonte::new(0);
+        let n = 1600usize;
+        let (mut aceitas, mut entregues) = (0usize, 0usize);
+        for k in 0..40u64 {
+            let fim_real = (k + 1) as f64 * 0.1;
+            let agora = if (10..15).contains(&k) { 1.5 } else { fim_real };
+            let t = relogio.tempo(agora, n);
+            for e in cursor.receber(t, n, &linha) {
+                if let nucleo::Evento::Amostras(p) = e {
+                    aceitas += p.quantidade;
+                }
+            }
+            entregues += n;
+        }
+        let perdidas = entregues - aceitas;
+        assert_eq!(
+            perdidas,
+            0,
+            "o coletor descartou {perdidas} amostras ({:.2} s) de fala nova",
+            perdidas as f64 / 16_000.0
+        );
     }
 }
 

@@ -67,6 +67,11 @@ async fn ponte(
 }
 
 #[tauri::command]
+fn pilula_conectar(casca: State<'_, Arc<Casca>>, canal: tauri::ipc::Channel<Value>) {
+    casca.pilula.conectar(canal);
+}
+
+#[tauri::command]
 fn pilula_acao(casca: State<'_, Arc<Casca>>, acao: String) {
     if acao == "pronta" {
         casca.pilula.reenviar();
@@ -315,16 +320,12 @@ async fn procurar_atualizacao(app: AppHandle, manual: bool) {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    if let Err(e) = caminhos::preparar() {
-        nativo::sistema::alerta("Dita.se", &e);
-        std::process::exit(1);
-    }
     if teste::rodar(&args) {
         return;
     }
-    caminhos::nota(format!("abrindo Dita.se {}", env!("CARGO_PKG_VERSION")));
     tauri::Builder::default()
         // Primeiro plugin: uma segunda abertura só traz a janela da primeira para frente.
+        // A migração de caminhos roda só em `setup`, depois que a instância única está garantida (M-1).
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             mostrar_principal(app)
         }))
@@ -334,8 +335,17 @@ fn main() {
         ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .invoke_handler(tauri::generate_handler![ponte, pilula_acao])
+        .invoke_handler(tauri::generate_handler![
+            ponte,
+            pilula_acao,
+            pilula_conectar
+        ])
         .setup(|app| {
+            if let Err(e) = caminhos::preparar() {
+                nativo::sistema::alerta("Dita.se", &e);
+                std::process::exit(1);
+            }
+            caminhos::nota(format!("abrindo Dita.se {}", env!("CARGO_PKG_VERSION")));
             let inicio = std::time::Instant::now();
             let handle = app.handle().clone();
             let prefs = Arc::new(Preferencias::abrir(caminhos::preferencias()));

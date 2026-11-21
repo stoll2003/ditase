@@ -14,13 +14,15 @@ use std::{
 };
 
 const PASTA: &str = "Dita.se";
-/// Arquivos que mudam de `%APPDATA%` para `%LOCALAPPDATA%`. Os três do SQLite vão juntos.
+const BANCO: &str = "ditado.sqlite";
+/// Arquivos que mudam de `%APPDATA%` para `%LOCALAPPDATA%`. Os três do SQLite vão juntos, com
+/// `ditado.sqlite` por último: a presença dele no destino marca migração completa (M-2).
 const MIGRADOS: &[&str] = &[
-    "ditado.sqlite",
     "ditado.sqlite-wal",
     "ditado.sqlite-shm",
     "preferencias.json",
     "ditado.log",
+    BANCO,
 ];
 
 static RAIZ: OnceLock<PathBuf> = OnceLock::new();
@@ -59,9 +61,18 @@ fn antiga() -> Option<PathBuf> {
 /// Caminho real, sem links nem junções no meio: o núcleo recusa gravar áudio por caminho com link
 /// (proteção contra junções). Uma pasta `AppData` realocada por junção continua funcionando porque
 /// o app passa a usar o destino real. No Windows tira o prefixo `\\?\` que `canonicalize` põe.
+/// Se `canonicalize` falhar (por exemplo volume montado sem letra), cai no caminho original com
+/// nota no log, sem travar (M-6).
 pub fn real(p: &Path) -> PathBuf {
-    let Ok(c) = fs::canonicalize(p) else {
-        return p.to_path_buf();
+    let c = match fs::canonicalize(p) {
+        Ok(c) => c,
+        Err(e) => {
+            nota(format!(
+                "caminho: não resolvi o destino real ({}); usando o caminho original",
+                e.kind()
+            ));
+            return p.to_path_buf();
+        }
     };
     let texto = c.to_string_lossy();
     match texto.strip_prefix(r"\\?\") {
@@ -113,20 +124,39 @@ pub fn preparar() -> Result<(), String> {
 }
 
 /// Move `MIGRADOS` de `velha` para `nova` só se o banco ainda não existir no destino. Copia para
-/// nomes temporários, grava em disco, troca os nomes e só então apaga a origem: uma queda no meio
-/// deixa a origem intacta. Devolve quantos arquivos mudaram.
+/// nomes temporários, grava em disco, troca os nomes com `ditado.sqlite` por último e só então
+/// apaga a origem: uma queda no meio deixa a origem intacta e faz a próxima abertura refazer a
+/// migração com o WAL junto. Devolve quantos arquivos mudaram.
 pub fn migrar(velha: &Path, nova: &Path) -> io::Result<usize> {
-    if !velha.join(MIGRADOS[0]).is_file() || nova.join(MIGRADOS[0]).exists() {
+    migrar_com(velha, nova, |a, b| fs::rename(a, b))
+}
+
+fn migrar_com(
+    velha: &Path,
+    nova: &Path,
+    mut renomear: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> io::Result<usize> {
+    if !velha.join(BANCO).is_file() || nova.join(BANCO).exists() {
         return Ok(0);
+    }
+    // No Windows, garante que nenhuma instância antiga está com o banco aberto antes de copiar.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let _exclusivo = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(velha.join(BANCO))?;
     }
     let presentes: Vec<&str> = MIGRADOS
         .iter()
         .copied()
-        .filter(|n| velha.join(n).is_file() && !nova.join(n).exists())
+        .filter(|n| velha.join(n).is_file())
         .collect();
     fs::create_dir_all(nova)?;
     let temporario = |n: &str| nova.join(format!("{n}.migrando"));
-    let copiar = || -> io::Result<()> {
+    let mut copiar = || -> io::Result<()> {
         for n in &presentes {
             fs::copy(velha.join(n), temporario(n))?;
             // No Windows, FlushFileBuffers exige o arquivo aberto para escrita.
@@ -136,7 +166,7 @@ pub fn migrar(velha: &Path, nova: &Path) -> io::Result<usize> {
                 .sync_all()?;
         }
         for n in &presentes {
-            fs::rename(temporario(n), nova.join(n))?;
+            renomear(&temporario(n), &nova.join(n))?;
         }
         Ok(())
     };
@@ -323,5 +353,80 @@ mod testes {
             fs::read_to_string(velha.join("ditado.sqlite-wal")).unwrap(),
             "wal"
         );
+    }
+
+    /// M-2: `-wal` e `-shm` são renomeados antes de `ditado.sqlite`. Uma falha entre renomeações
+    /// desfaz o destino, mantém a origem e permite refazer tudo na abertura seguinte.
+    #[test]
+    fn falha_entre_renomeacoes_desfaz_e_permite_refazer_com_wal() {
+        let t = pasta_de_teste();
+        let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
+        fs::create_dir_all(&velha).unwrap();
+        for (n, c) in [
+            ("ditado.sqlite", "db"),
+            ("ditado.sqlite-wal", "wal"),
+            ("ditado.sqlite-shm", "shm"),
+        ] {
+            fs::write(velha.join(n), c).unwrap();
+        }
+        let mut ordem = Vec::new();
+        let r = migrar_com(&velha, &nova, |a, b| {
+            let nome = b.file_name().unwrap().to_string_lossy().to_string();
+            ordem.push(nome.clone());
+            if nome == "ditado.sqlite" {
+                return Err(io::Error::other("falha simulada antes do banco"));
+            }
+            fs::rename(a, b)
+        });
+        assert!(r.is_err());
+        assert_eq!(
+            ordem,
+            vec!["ditado.sqlite-wal", "ditado.sqlite-shm", "ditado.sqlite"]
+        );
+        assert!(velha.join("ditado.sqlite").is_file());
+        assert!(velha.join("ditado.sqlite-wal").is_file());
+        assert!(!nova.join("ditado.sqlite").exists());
+        assert!(!nova.join("ditado.sqlite-wal").exists());
+        // Próxima abertura refaz tudo.
+        assert_eq!(migrar(&velha, &nova).unwrap(), 3);
+        assert_eq!(
+            fs::read_to_string(nova.join("ditado.sqlite-wal")).unwrap(),
+            "wal"
+        );
+        assert_eq!(
+            fs::read_to_string(nova.join("ditado.sqlite")).unwrap(),
+            "db"
+        );
+    }
+
+    /// M-2: queda abrupta sem desfazer (processo morto após renomear `-wal`, antes do banco).
+    /// Na abertura seguinte o banco ainda não está no destino, então a migração roda e traz o WAL.
+    #[test]
+    fn queda_abrupta_depois_do_wal_refaz_migracao_na_proxima_abertura() {
+        let t = pasta_de_teste();
+        let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
+        fs::create_dir_all(&velha).unwrap();
+        fs::create_dir_all(&nova).unwrap();
+        fs::write(velha.join("ditado.sqlite"), "db").unwrap();
+        fs::write(velha.join("ditado.sqlite-wal"), "wal-atual").unwrap();
+        // Sobrou um -wal parcial no destino, mas o banco ainda não chegou lá.
+        fs::write(nova.join("ditado.sqlite-wal"), "wal-parcial").unwrap();
+        assert_eq!(migrar(&velha, &nova).unwrap(), 2);
+        assert_eq!(
+            fs::read_to_string(nova.join("ditado.sqlite-wal")).unwrap(),
+            "wal-atual"
+        );
+        assert_eq!(
+            fs::read_to_string(nova.join("ditado.sqlite")).unwrap(),
+            "db"
+        );
+    }
+
+    /// M-6: se `canonicalize` falhar, `real` cai no caminho original sem travar.
+    #[test]
+    fn real_cai_no_caminho_original_quando_canonicalize_falha() {
+        let t = pasta_de_teste();
+        let inexistente = t.path().join("nao-existe-ainda");
+        assert_eq!(real(&inexistente), inexistente);
     }
 }

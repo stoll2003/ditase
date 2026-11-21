@@ -5,5 +5,10 @@ commands.allow = ["ponte"]
 
 [[permission]]
 identifier = "allow-pilula-acao"
-description = "Botões da pílula: parar, cancelar, alternar, pausar e encerrar reunião."
+description = "Botões da pílula: parar, cancelar e alternar ditado."
 commands.allow = ["pilula_acao"]
+
+[[permission]]
+identifier = "allow-pilula-conectar"
+description = "Canal IPC exclusivo da pílula para receber estado, nível e avisos."
+commands.allow = ["pilula_conectar"]

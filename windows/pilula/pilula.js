@@ -59,9 +59,12 @@ window.pilula = (m) => {
 };
 mostrar("ociosa");
 
-// O estado chega por evento do app só para esta janela (sem avaliar JavaScript). Depois de
-// escutar, pede ao app que reenvie atalho e fase, que podem ter saído antes do carregamento.
-const eventos = window.__TAURI__?.event;
-if (eventos) {
-  eventos.listen("pilula", (e) => window.pilula(e.payload)).then(() => invocar("pronta"));
+// O estado chega por um canal IPC exclusivo desta janela (sem core:event:allow-listen, para que
+// a pílula nunca consiga ouvir eventos da janela principal, e sem avaliar JavaScript). Ao abrir
+// o canal, o app reenvia atalho e fase, que podem ter mudado antes do carregamento.
+const core = window.__TAURI__?.core;
+if (core?.Channel) {
+  const canal = new core.Channel();
+  canal.onmessage = (m) => window.pilula(m);
+  core.invoke("pilula_conectar", { canal });
 }

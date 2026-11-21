@@ -8,7 +8,7 @@ use std::{
 
 use serde_json::{json, Value};
 use tauri::{
-    AppHandle, Emitter, EventTarget, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
+    ipc::Channel, AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow,
     WebviewWindowBuilder,
 };
 
@@ -40,6 +40,7 @@ struct Interno {
     sempre_visivel: bool,
     ultimo_nivel: Instant,
     atalho: String,
+    canal: Option<Channel<Value>>,
 }
 
 pub struct Pilula {
@@ -80,6 +81,7 @@ impl Pilula {
                 sempre_visivel,
                 ultimo_nivel: Instant::now(),
                 atalho: atalho.to_string(),
+                canal: None,
             }),
         };
         p.enviar(json!({"tipo": "atalho", "simbolo": atalho}));
@@ -91,15 +93,19 @@ impl Pilula {
         self.app.get_webview_window(ROTULO)
     }
 
-    /// Evento estruturado só para a janela da pílula (sem avaliar JavaScript).
+    /// Canal exclusivo da pílula (M-3): sem `core:event:allow-listen`, a pílula não pode assinar
+    /// eventos da janela principal (como `ditado:trechos`), e recebe só o que sai por aqui.
     fn enviar(&self, mensagem: Value) {
-        let _ = self.app.emit_to(
-            EventTarget::WebviewWindow {
-                label: ROTULO.into(),
-            },
-            "pilula",
-            mensagem,
-        );
+        let canal = self.interno.lock().unwrap().canal.clone();
+        if let Some(c) = canal {
+            let _ = c.send(mensagem);
+        }
+    }
+
+    /// A página da pílula carregou e entregou o canal IPC dela: guarda e reenvia atalho e fase.
+    pub fn conectar(&self, canal: Channel<Value>) {
+        self.interno.lock().unwrap().canal = Some(canal);
+        self.reenviar();
     }
 
     /// A página da pílula carregou: reenvia atalho e fase (o que foi mandado antes do carregamento se perdeu).

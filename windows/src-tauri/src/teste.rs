@@ -43,17 +43,24 @@ pub fn rodar(args: &[String]) -> bool {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    let modo_captura = valor("--testar-captura");
+    let modo_arquivo = valor("--testar-arquivo");
+    if modo_captura.is_none() && modo_arquivo.is_none() {
+        return false;
+    }
+    if let Err(e) = caminhos::preparar() {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     let guardar = args.iter().any(|a| a == "--guardar-wav");
-    let resultado = if let Some(s) = valor("--testar-captura") {
-        Some((
+    let (nome, valor) = if let Some(s) = modo_captura {
+        (
             "teste-captura.json",
             captura(s.parse().unwrap_or(10.0f64).clamp(1.0, 120.0), guardar),
-        ))
+        )
     } else {
-        valor("--testar-arquivo").map(|c| ("teste-arquivo.json", arquivo(std::path::Path::new(&c))))
-    };
-    let Some((nome, valor)) = resultado else {
-        return false;
+        let c = modo_arquivo.expect("conferido acima");
+        ("teste-arquivo.json", arquivo(std::path::Path::new(&c)))
     };
     let valor = filtrar(valor);
     let texto = serde_json::to_string_pretty(&valor).unwrap_or_default();

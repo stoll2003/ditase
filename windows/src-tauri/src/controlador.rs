@@ -64,6 +64,8 @@ impl FonteAberta for Captura {
 
 /// Recebe PCM 16 kHz mono e o nível do bloco.
 pub type AoBlocoDeAudio = Box<dyn FnMut(Vec<f32>, f32) + Send>;
+/// Aviso de que a fonte derivada vai acabar (a reunião soltou o microfone).
+pub type AoAcabar = Box<dyn FnOnce() + Send>;
 
 /// Windows: microfone, app em foco, colagem e a pasta do áudio guardado.
 pub trait Sistema: Send + Sync {
@@ -109,7 +111,13 @@ impl Sistema for SistemaReal {
 /// e drivers exclusivos recusam ou derrubam a segunda abertura).
 pub trait MicrofoneCompartilhado: Send + Sync {
     /// Derivação nova, ou `None` sem reunião com microfone. Soltar a fonte devolvida encerra a derivação.
-    fn derivar(&self, ao_bloco: AoBlocoDeAudio) -> Option<Box<dyn FonteAberta>>;
+    /// `ao_acabar` é chamado quando a reunião vai soltar o microfone com o ditado ainda derivando,
+    /// com a captura da reunião ainda aberta (o ditado troca para o microfone próprio).
+    fn derivar(
+        &self,
+        ao_bloco: AoBlocoDeAudio,
+        ao_acabar: AoAcabar,
+    ) -> Option<Box<dyn FonteAberta>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,9 +141,13 @@ struct Gravacao {
     ditado: Ditado,
     inicio: Instant,
     captura: Box<dyn FonteAberta>,
+    destino: Option<Destino>,
     bomba: thread::JoinHandle<(Box<dyn SessaoDeDitado>, usize)>,
     silencio: Arc<Mutex<f64>>,
 }
+
+/// Destino compartilhado dos blocos de um ditado (derivado da reunião ou microfone próprio).
+type Destino = Arc<Mutex<Option<AoBlocoDeAudio>>>;
 
 struct Interno {
     fase: Fase,
@@ -331,20 +343,29 @@ impl Controlador {
             let _ = tx.send(bloco);
         });
         // Reunião gravando o microfone: deriva dela (I5). Senão, abre o microfone.
-        let (ao_bloco, derivada) = match self.compartilhado.get() {
+        let (ao_bloco, derivada, destino) = match self.compartilhado.get() {
             Some(m) => {
-                let parte = Arc::new(Mutex::new(Some(ao_bloco)));
+                let parte: Destino = Arc::new(Mutex::new(Some(ao_bloco)));
                 let p2 = parte.clone();
-                match m.derivar(Box::new(move |b, n| {
-                    if let Some(f) = p2.lock().unwrap().as_mut() {
-                        f(b, n)
+                let (fraco, id, p3) = (Arc::downgrade(self), d.id, parte.clone());
+                let ao_acabar: AoAcabar = Box::new(move || {
+                    if let Some(c) = fraco.upgrade() {
+                        c.reuniao_acabou(id, p3);
                     }
-                })) {
-                    Some(f) => (None, Some(f)),
-                    None => (parte.lock().unwrap().take(), None),
+                });
+                match m.derivar(
+                    Box::new(move |b, n| {
+                        if let Some(f) = p2.lock().unwrap().as_mut() {
+                            f(b, n)
+                        }
+                    }),
+                    ao_acabar,
+                ) {
+                    Some(f) => (None, Some(f), Some(parte)),
+                    None => (parte.lock().unwrap().take(), None, None),
                 }
             }
-            None => (Some(ao_bloco), None),
+            None => (Some(ao_bloco), None, None),
         };
         let aberta = match (derivada, ao_bloco) {
             (Some(f), _) => {
@@ -396,6 +417,7 @@ impl Controlador {
             ditado: d,
             inicio: Instant::now(),
             captura,
+            destino,
             bomba,
             silencio,
         });
@@ -420,6 +442,64 @@ impl Controlador {
         });
         self.mudou("estado");
         true
+    }
+
+    /// A reunião soltou o microfone com este ditado derivando dele (I-2). Abre o microfone próprio
+    /// fora da trava do controlador para não bloquear o app nem concorrer com a captura anterior.
+    /// Se o microfone não abrir, encerra com o que já tem e avisa na pílula. Nunca grava silêncio.
+    fn reuniao_acabou(self: &Arc<Self>, id: i64, destino: Destino) {
+        let mesma = {
+            let i = self.interno.lock().unwrap();
+            i.fase == Fase::Gravando && i.gravacao.as_ref().is_some_and(|g| g.ditado.id == id)
+        };
+        if !mesma {
+            return;
+        }
+        let d2 = destino.clone();
+        let proprio: AoBlocoDeAudio = Box::new(move |b, n| {
+            if let Some(f) = d2.lock().unwrap().as_mut() {
+                f(b, n)
+            }
+        });
+        match self
+            .sistema
+            .abrir_microfone(&self.prefs.microfone(), proprio)
+        {
+            Ok(mut nova) => {
+                let antiga = {
+                    let mut i = self.interno.lock().unwrap();
+                    let ainda = i.fase == Fase::Gravando
+                        && i.gravacao.as_ref().is_some_and(|g| g.ditado.id == id);
+                    if ainda {
+                        let g = i.gravacao.as_mut().expect("conferido acima");
+                        Some(std::mem::replace(&mut g.captura, nova))
+                    } else {
+                        drop(i);
+                        nova.parar();
+                        return;
+                    }
+                };
+                if let Some(mut a) = antiga {
+                    a.parar();
+                }
+                nota(format!(
+                    "ditado {id}: a reunião acabou; segue no microfone próprio"
+                ));
+            }
+            Err(e) => {
+                nota(format!(
+                    "ditado {id}: a reunião acabou e o microfone não abriu ({e}); encerrado"
+                ));
+                self.avisar_atalho(Entrada::EncerradoPorFora);
+                let c = self.clone();
+                thread::spawn(move || {
+                    c.terminar_com_aviso(
+                        true,
+                        Some("A reunião acabou e o microfone não abriu. Ditado encerrado com o que tinha"),
+                    )
+                });
+            }
+        }
     }
 
     pub fn entrar_em_maos_livres(&self) {
@@ -485,6 +565,10 @@ impl Controlador {
     }
 
     pub fn terminar(self: &Arc<Self>, colar: bool) {
+        self.terminar_com_aviso(colar, None);
+    }
+
+    fn terminar_com_aviso(self: &Arc<Self>, colar: bool, aviso_final: Option<&'static str>) {
         let gravacao = {
             let mut i = self.interno.lock().unwrap();
             if i.fase != Fase::Gravando {
@@ -493,20 +577,33 @@ impl Controlador {
             i.fase = Fase::Processando;
             i.gravacao.take()
         };
-        let Some(mut g) = gravacao else { return };
+        let Some(g) = gravacao else { return };
         let soltou = Instant::now();
-        g.captura.parar();
+        // A fonte sai já, antes de qualquer mudança para Parado (I-1).
+        let Gravacao {
+            ditado,
+            inicio,
+            mut captura,
+            destino,
+            bomba,
+            ..
+        } = g;
+        captura.parar();
+        drop(captura);
+        if let Some(d) = destino {
+            d.lock().unwrap().take();
+        }
         self.pilula.mostrar(FasePilula::Processando);
         self.mudou("estado");
         let c = self.clone();
         thread::spawn(move || {
-            let mut d = g.ditado;
-            d.duracao = soltou.duration_since(g.inicio).as_secs_f64();
-            match g.bomba.join() {
+            let mut d = ditado;
+            d.duracao = soltou.duration_since(inicio).as_secs_f64();
+            match bomba.join() {
                 Ok((sessao, _)) => {
                     let r = sessao.finalizar();
                     d.latencia = soltou.elapsed().as_secs_f64();
-                    c.concluir(d, r, colar);
+                    c.concluir(d, r, colar, aviso_final);
                 }
                 Err(_) => {
                     nota(format!("ditado {}: a gravação parou com erro", d.id));
@@ -524,13 +621,22 @@ impl Controlador {
         });
     }
 
-    fn concluir(&self, mut d: Ditado, r: crate::integracao::ResultadoDitado, colar: bool) {
+    fn concluir(
+        &self,
+        mut d: Ditado,
+        r: crate::integracao::ResultadoDitado,
+        colar: bool,
+        aviso_final: Option<&'static str>,
+    ) {
         if r.texto.is_empty() {
             if r.falhas == 0 {
                 // Silêncio de verdade: não há o que guardar.
                 let _ = self.integracao.descartar_ditado(d.id);
                 apagar_audio(&self.sistema.pasta_de_audio(), &d.audio);
-                self.pilula.avisar("Não ouvi nada", 1.6);
+                self.pilula.avisar(
+                    aviso_final.unwrap_or("Não ouvi nada"),
+                    if aviso_final.is_some() { 3.5 } else { 1.6 },
+                );
                 return;
             }
             d.estado = "falhou".into();
@@ -568,13 +674,15 @@ impl Controlador {
         } else {
             r.texto.clone()
         };
-        self.colar(&texto, r.falhas > 0);
+        self.colar(&texto, r.falhas > 0, aviso_final);
     }
 
-    fn colar(&self, texto: &str, parcial: bool) {
+    fn colar(&self, texto: &str, parcial: bool, aviso_final: Option<&'static str>) {
         match self.sistema.colar(texto) {
             Insercao::Colado => {
-                if parcial {
+                if let Some(aviso) = aviso_final {
+                    self.pilula.avisar(aviso, 3.5)
+                } else if parcial {
                     self.pilula.avisar("Parte do áudio não foi transcrita", 3.5)
                 } else {
                     self.pilula.mostrar(FasePilula::Ociosa)
@@ -600,22 +708,37 @@ impl Controlador {
             if i.fase != Fase::Gravando {
                 return;
             }
-            i.fase = Fase::Parado;
-            i.maos_livres = false;
+            // Ninguém começa outro ditado enquanto a fonte deste não saiu (I-1).
+            i.fase = Fase::Processando;
             i.gravacao.take()
         };
-        if let Some(mut g) = gravacao {
-            g.captura.parar();
-            let d = g.ditado;
+        if let Some(g) = gravacao {
+            let Gravacao {
+                ditado: d,
+                mut captura,
+                destino,
+                bomba,
+                ..
+            } = g;
+            captura.parar();
+            drop(captura);
+            if let Some(dest) = destino {
+                dest.lock().unwrap().take();
+            }
             let integracao = self.integracao.clone();
             let pasta = self.sistema.pasta_de_audio();
             thread::spawn(move || {
-                if let Ok((s, _)) = g.bomba.join() {
+                if let Ok((s, _)) = bomba.join() {
                     s.cancelar();
                 }
                 let _ = integracao.descartar_ditado(d.id);
                 apagar_audio(&pasta, &d.audio);
             });
+        }
+        {
+            let mut i = self.interno.lock().unwrap();
+            i.fase = Fase::Parado;
+            i.maos_livres = false;
         }
         self.pilula.mostrar(FasePilula::Ociosa);
         self.mudou("estado");
@@ -666,22 +789,32 @@ impl Controlador {
     pub fn desligar(&self, prazo: Duration) {
         let limite = Instant::now() + prazo;
         let g = self.interno.lock().unwrap().gravacao.take();
-        if let Some(mut g) = g {
-            g.captura.parar();
+        if let Some(g) = g {
+            let Gravacao {
+                ditado,
+                mut captura,
+                destino,
+                bomba,
+                ..
+            } = g;
+            captura.parar();
+            drop(captura);
+            if let Some(dest) = destino {
+                dest.lock().unwrap().take();
+            }
             let (tx, rx) = mpsc::channel();
-            let bomba = g.bomba;
             thread::spawn(move || {
                 let _ = tx.send(bomba.join().map(|(_, n)| n));
             });
             match rx.recv_timeout(limite.saturating_duration_since(Instant::now())) {
                 Ok(Ok(n)) => nota(format!(
                     "ditado {}: saída com {:.1} s gravados; volta pela recuperação",
-                    g.ditado.id,
+                    ditado.id,
                     n as f64 / crate::audio::TAXA as f64
                 )),
                 _ => nota(format!(
                     "ditado {}: a gravação não terminou no prazo de saída",
-                    g.ditado.id
+                    ditado.id
                 )),
             }
             let mut i = self.interno.lock().unwrap();
@@ -816,6 +949,7 @@ mod testes {
         colados: Mutex<Vec<String>>,
         aberturas: AtomicUsize,
         pasta: PathBuf,
+        microfone_falha: bool,
     }
     impl Sistema for SistemaDuble {
         fn microfone_disponivel(&self) -> bool {
@@ -827,6 +961,9 @@ mod testes {
             ao_bloco: AoBlocoDeAudio,
         ) -> Result<Box<dyn FonteAberta>, String> {
             self.aberturas.fetch_add(1, Ordering::Relaxed);
+            if self.microfone_falha {
+                return Err("dispositivo ocupado".into());
+            }
             Ok(tocar(self.pcm.clone(), ao_bloco))
         }
         fn app_em_foco(&self) -> (String, String) {
@@ -861,6 +998,7 @@ mod testes {
             colados: Mutex::new(Vec::new()),
             aberturas: AtomicUsize::new(0),
             pasta: tmp.path().join("Audio"),
+            microfone_falha: false,
         };
         std::fs::create_dir_all(&s.pasta).unwrap();
         ajustar(&mut s);
@@ -998,9 +1136,15 @@ mod testes {
     struct ReuniaoDuble {
         pcm: Vec<f32>,
         derivacoes: AtomicUsize,
+        ao_acabar: Mutex<Option<AoAcabar>>,
     }
     impl MicrofoneCompartilhado for ReuniaoDuble {
-        fn derivar(&self, ao_bloco: AoBlocoDeAudio) -> Option<Box<dyn FonteAberta>> {
+        fn derivar(
+            &self,
+            ao_bloco: AoBlocoDeAudio,
+            ao_acabar: AoAcabar,
+        ) -> Option<Box<dyn FonteAberta>> {
+            *self.ao_acabar.lock().unwrap() = Some(ao_acabar);
             self.derivacoes.fetch_add(1, Ordering::Relaxed);
             Some(tocar(self.pcm.clone(), ao_bloco))
         }
@@ -1013,6 +1157,7 @@ mod testes {
         let reuniao = Arc::new(ReuniaoDuble {
             pcm: voz(2.0, 0.5),
             derivacoes: AtomicUsize::new(0),
+            ao_acabar: Mutex::new(None),
         });
         cena.c.compartilhar_microfone(reuniao.clone());
         ditar(&cena, true);
@@ -1025,9 +1170,73 @@ mod testes {
         assert!(cena.sistema.colados.lock().unwrap()[0].contains("palavra"));
     }
 
+    /// I-2: a reunião acaba no meio do ditado. O ditado troca para o microfone próprio e o que se
+    /// fala depois entra no texto.
+    #[test]
+    fn reuniao_acaba_no_meio_e_o_ditado_segue_no_microfone_proprio() {
+        let cena = cena(voz(1.5, 0.5), |_| {});
+        let reuniao = Arc::new(ReuniaoDuble {
+            pcm: voz(1.5, 0.0),
+            derivacoes: AtomicUsize::new(0),
+            ao_acabar: Mutex::new(None),
+        });
+        cena.c.compartilhar_microfone(reuniao.clone());
+        assert!(cena.c.comecar(true));
+        thread::sleep(Duration::from_millis(200));
+        let acabar = reuniao
+            .ao_acabar
+            .lock()
+            .unwrap()
+            .take()
+            .expect("ao_acabar registrado");
+        acabar();
+        assert_eq!(
+            cena.sistema.aberturas.load(Ordering::Relaxed),
+            1,
+            "não abriu o microfone próprio"
+        );
+        assert_eq!(cena.c.fase(), Fase::Gravando, "o ditado deveria continuar");
+        thread::sleep(Duration::from_millis(300));
+        cena.c.terminar(true);
+        esperar_parado(&cena.c);
+        let colado = cena.sistema.colados.lock().unwrap()[0].clone();
+        assert!(
+            colado.split_whitespace().count() >= 5,
+            "faltou fala de uma das fontes: {colado}"
+        );
+    }
+
+    /// I-2: se o microfone próprio não abrir, o ditado termina com o que já tinha e a pílula avisa.
+    #[test]
+    fn reuniao_acaba_e_microfone_nao_abre_encerra_com_o_que_tinha() {
+        let cena = cena(Vec::new(), |s| s.microfone_falha = true);
+        let reuniao = Arc::new(ReuniaoDuble {
+            pcm: voz(1.5, 0.5),
+            derivacoes: AtomicUsize::new(0),
+            ao_acabar: Mutex::new(None),
+        });
+        cena.c.compartilhar_microfone(reuniao.clone());
+        assert!(cena.c.comecar(true));
+        thread::sleep(Duration::from_millis(300));
+        let acabar = reuniao.ao_acabar.lock().unwrap().take().unwrap();
+        acabar();
+        esperar_parado(&cena.c);
+        assert!(cena
+            .pilula
+            .avisos
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a.starts_with("A reunião acabou")));
+        assert!(
+            cena.sistema.colados.lock().unwrap()[0].contains("palavra"),
+            "perdeu o que já tinha"
+        );
+    }
+
     struct SemReuniao;
     impl MicrofoneCompartilhado for SemReuniao {
-        fn derivar(&self, _a: AoBlocoDeAudio) -> Option<Box<dyn FonteAberta>> {
+        fn derivar(&self, _a: AoBlocoDeAudio, _f: AoAcabar) -> Option<Box<dyn FonteAberta>> {
             None
         }
     }
