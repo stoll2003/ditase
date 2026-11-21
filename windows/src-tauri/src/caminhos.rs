@@ -134,21 +134,108 @@ pub fn migrar(velha: &Path, nova: &Path) -> io::Result<usize> {
 fn migrar_com(
     velha: &Path,
     nova: &Path,
+    renomear: impl FnMut(&Path, &Path) -> io::Result<()>,
+) -> io::Result<usize> {
+    migrar_travado(velha, nova, TravaDoBanco::abrir, renomear)
+}
+
+/// O banco antigo travado durante toda a migração (N-2): uma instância antiga que abra no meio
+/// não consegue abrir o SQLite e nada escreve na origem entre a cópia e a exclusão.
+trait Trava {
+    /// Copia o banco de origem para `destino` pela própria trava e grava em disco.
+    fn copiar_banco(&mut self, destino: &Path) -> io::Result<()>;
+    /// Apaga o banco de origem ainda travado. Chamado só depois que o destino está completo.
+    fn apagar_banco(self) -> io::Result<()>;
+}
+
+/// No Windows, o handle do banco aberto sem compartilhamento (`share_mode(0)`) e com direito de
+/// exclusão: a cópia lê por ele e a exclusão marca o próprio handle, que só solta no fim.
+/// Fora do Windows (testes no Mac) não há exclusão entre processos; o app do Mac não migra.
+struct TravaDoBanco {
+    arquivo: fs::File,
+    #[cfg(not(windows))]
+    caminho: PathBuf,
+}
+
+impl TravaDoBanco {
+    fn abrir(banco: &Path) -> io::Result<Self> {
+        #[cfg(windows)]
+        let arquivo = {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows::Win32::Storage::FileSystem::DELETE;
+            const GENERIC_READ: u32 = 0x8000_0000;
+            const GENERIC_WRITE: u32 = 0x4000_0000;
+            OpenOptions::new()
+                .access_mode(GENERIC_READ | GENERIC_WRITE | DELETE.0)
+                .share_mode(0)
+                .open(banco)?
+        };
+        #[cfg(not(windows))]
+        let arquivo = OpenOptions::new().read(true).write(true).open(banco)?;
+        Ok(Self {
+            arquivo,
+            #[cfg(not(windows))]
+            caminho: banco.to_path_buf(),
+        })
+    }
+}
+
+impl Trava for TravaDoBanco {
+    fn copiar_banco(&mut self, destino: &Path) -> io::Result<()> {
+        use std::io::{Seek, SeekFrom};
+        self.arquivo.seek(SeekFrom::Start(0))?;
+        let mut d = fs::File::create(destino)?;
+        io::copy(&mut self.arquivo, &mut d)?;
+        d.sync_all()
+    }
+
+    #[cfg(windows)]
+    fn apagar_banco(self) -> io::Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{
+                FileDispositionInfo, SetFileInformationByHandle, FILE_DISPOSITION_INFO,
+            },
+        };
+        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: o handle é do `File` vivo em `self`; a estrutura vive até o fim da chamada.
+        unsafe {
+            SetFileInformationByHandle(
+                HANDLE(self.arquivo.as_raw_handle()),
+                FileDispositionInfo,
+                (&info as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        }
+        .map_err(|e| io::Error::from_raw_os_error(e.code().0 & 0xFFFF))?;
+        // O arquivo some quando o último handle (este) fecha.
+        drop(self.arquivo);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    fn apagar_banco(self) -> io::Result<()> {
+        drop(self.arquivo);
+        fs::remove_file(&self.caminho)
+    }
+}
+
+/// Move `MIGRADOS` de `velha` para `nova` só se o banco ainda não existir no destino. Trava o
+/// banco de origem, copia para nomes temporários, grava em disco, troca os nomes com
+/// `ditado.sqlite` por último e só então apaga a origem, com o banco ainda travado.
+fn migrar_travado<T: Trava>(
+    velha: &Path,
+    nova: &Path,
+    travar: impl FnOnce(&Path) -> io::Result<T>,
     mut renomear: impl FnMut(&Path, &Path) -> io::Result<()>,
 ) -> io::Result<usize> {
     if !velha.join(BANCO).is_file() || nova.join(BANCO).exists() {
         return Ok(0);
     }
-    // No Windows, garante que nenhuma instância antiga está com o banco aberto antes de copiar.
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        let _exclusivo = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .share_mode(0)
-            .open(velha.join(BANCO))?;
-    }
+    // Falha aqui (instância antiga, antivírus ou indexador com o banco aberto): a migração fica
+    // para a próxima abertura e esta sessão usa a pasta antiga.
+    let mut trava = travar(&velha.join(BANCO))?;
     let presentes: Vec<&str> = MIGRADOS
         .iter()
         .copied()
@@ -158,6 +245,10 @@ fn migrar_com(
     let temporario = |n: &str| nova.join(format!("{n}.migrando"));
     let mut copiar = || -> io::Result<()> {
         for n in &presentes {
+            if *n == BANCO {
+                trava.copiar_banco(&temporario(n))?;
+                continue;
+            }
             fs::copy(velha.join(n), temporario(n))?;
             // No Windows, FlushFileBuffers exige o arquivo aberto para escrita.
             fs::OpenOptions::new()
@@ -182,8 +273,12 @@ fn migrar_com(
         }
         return Err(e);
     }
-    for n in &presentes {
+    for n in presentes.iter().filter(|n| **n != BANCO) {
         let _ = fs::remove_file(velha.join(n));
+    }
+    // Por último o banco, pela trava: até aqui nenhuma instância antiga abriu a origem.
+    if let Err(e) = trava.apagar_banco() {
+        nota(format!("migração: a origem do banco ficou ({e})"));
     }
     let _ = fs::remove_dir(velha);
     Ok(presentes.len())
@@ -416,6 +511,111 @@ mod testes {
             fs::read_to_string(nova.join("ditado.sqlite-wal")).unwrap(),
             "wal-atual"
         );
+        assert_eq!(
+            fs::read_to_string(nova.join("ditado.sqlite")).unwrap(),
+            "db"
+        );
+    }
+
+    /// N-2: a trava do banco vale do começo ao fim. Nenhuma cópia, renomeação ou exclusão roda
+    /// sem ela, e o banco de origem sai pela própria trava, antes de ela soltar.
+    #[test]
+    fn trava_do_banco_fica_aberta_durante_toda_a_migracao() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct TravaEspia {
+            travada: Arc<AtomicBool>,
+            apagou_travada: Arc<AtomicBool>,
+            interna: TravaDoBanco,
+        }
+        impl Trava for TravaEspia {
+            fn copiar_banco(&mut self, destino: &Path) -> io::Result<()> {
+                assert!(self.travada.load(Ordering::Acquire));
+                self.interna.copiar_banco(destino)
+            }
+            fn apagar_banco(self) -> io::Result<()> {
+                self.apagou_travada
+                    .store(self.travada.load(Ordering::Acquire), Ordering::Release);
+                let TravaEspia {
+                    travada, interna, ..
+                } = self;
+                let r = interna.apagar_banco();
+                travada.store(false, Ordering::Release);
+                r
+            }
+        }
+        let t = pasta_de_teste();
+        let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
+        fs::create_dir_all(&velha).unwrap();
+        for (n, c) in [
+            ("ditado.sqlite", "db"),
+            ("ditado.sqlite-wal", "wal"),
+            ("preferencias.json", "{}"),
+        ] {
+            fs::write(velha.join(n), c).unwrap();
+        }
+        let travada = Arc::new(AtomicBool::new(false));
+        let apagou_travada = Arc::new(AtomicBool::new(false));
+        let (t1, t2, a1) = (travada.clone(), travada.clone(), apagou_travada.clone());
+        let mut renomeados = 0;
+        let n = migrar_travado(
+            &velha,
+            &nova,
+            move |b| {
+                t1.store(true, Ordering::Release);
+                Ok(TravaEspia {
+                    travada: t1,
+                    apagou_travada: a1,
+                    interna: TravaDoBanco::abrir(b)?,
+                })
+            },
+            |a, b| {
+                assert!(t2.load(Ordering::Acquire), "renomeou sem a trava");
+                renomeados += 1;
+                fs::rename(a, b)
+            },
+        )
+        .unwrap();
+        assert_eq!((n, renomeados), (3, 3));
+        assert!(
+            apagou_travada.load(Ordering::Acquire),
+            "o banco de origem saiu depois de soltar a trava"
+        );
+        assert!(!travada.load(Ordering::Acquire));
+        assert_eq!(
+            fs::read_to_string(nova.join("ditado.sqlite")).unwrap(),
+            "db"
+        );
+        assert!(!velha.exists());
+    }
+
+    /// N-2 no Windows real: durante a migração (entre as renomeações) ninguém consegue abrir o
+    /// banco de origem. Antes, o handle exclusivo soltava antes da cópia e esta abertura passava.
+    #[cfg(windows)]
+    #[test]
+    fn banco_de_origem_fica_exclusivo_durante_a_migracao() {
+        let t = pasta_de_teste();
+        let (velha, nova) = (t.path().join("Roaming"), t.path().join("Local"));
+        fs::create_dir_all(&velha).unwrap();
+        fs::write(velha.join("ditado.sqlite"), "db").unwrap();
+        fs::write(velha.join("ditado.sqlite-wal"), "wal").unwrap();
+        let banco = velha.join("ditado.sqlite");
+        let mut tentativas = 0;
+        migrar_com(&velha, &nova, |a, b| {
+            tentativas += 1;
+            let r = OpenOptions::new().read(true).write(true).open(&banco);
+            assert_eq!(
+                r.err().and_then(|e| e.raw_os_error()),
+                Some(32),
+                "o banco de origem abriu no meio da migração"
+            );
+            fs::rename(a, b)
+        })
+        .unwrap();
+        assert_eq!(tentativas, 2);
+        assert!(!banco.exists());
         assert_eq!(
             fs::read_to_string(nova.join("ditado.sqlite")).unwrap(),
             "db"

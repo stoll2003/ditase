@@ -7,6 +7,7 @@ mod audio;
 mod caminhos;
 mod controlador;
 mod decodificacao;
+mod emenda;
 mod integracao;
 mod lancamento;
 mod motores_locais;

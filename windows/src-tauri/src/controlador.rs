@@ -15,6 +15,7 @@ use crate::{
     atalho::{Acoes, Atalho, Entrada},
     audio::{self, Captura, EscritorWav, Fonte},
     caminhos::{self, nota},
+    emenda::{Destino, Emenda, FimDaDerivacao},
     integracao::{Ditado, Integracao, SessaoDeDitado},
     nativo::{self, Insercao},
     pilula::{Fase as FasePilula, Pilula},
@@ -64,8 +65,15 @@ impl FonteAberta for Captura {
 
 /// Recebe PCM 16 kHz mono e o nível do bloco.
 pub type AoBlocoDeAudio = Box<dyn FnMut(Vec<f32>, f32) + Send>;
-/// Aviso de que a fonte derivada vai acabar (a reunião soltou o microfone).
-pub type AoAcabar = Box<dyn FnOnce() + Send>;
+/// Aviso de que a reunião vai soltar o microfone com o ditado ainda derivando. Devolve o que fazer
+/// depois que ela soltar (segunda tentativa de abrir o microfone próprio), se houver.
+pub type AoAcabar = Box<dyn FnOnce() -> Option<DepoisDeSoltar> + Send>;
+/// Segunda fase do aviso: roda depois que a reunião fechou a captura e a derivação.
+pub type DepoisDeSoltar = Box<dyn FnOnce() + Send>;
+
+/// Quanto o ditado espera o primeiro bloco do microfone próprio, com a derivação ainda viva, antes
+/// de soltar a derivação (N-1). Sem bloco nesse prazo, troca assim mesmo e registra no log.
+const SOBREPOSICAO: Duration = Duration::from_millis(500);
 
 /// Windows: microfone, app em foco, colagem e a pasta do áudio guardado.
 pub trait Sistema: Send + Sync {
@@ -112,7 +120,10 @@ impl Sistema for SistemaReal {
 pub trait MicrofoneCompartilhado: Send + Sync {
     /// Derivação nova, ou `None` sem reunião com microfone. Soltar a fonte devolvida encerra a derivação.
     /// `ao_acabar` é chamado quando a reunião vai soltar o microfone com o ditado ainda derivando,
-    /// com a captura da reunião ainda aberta (o ditado troca para o microfone próprio).
+    /// com a captura da reunião ainda aberta e a derivação ainda entregando blocos: o ditado abre o
+    /// microfone próprio e emenda as duas fontes pelo relógio (N-1). Depois que `ao_acabar` volta,
+    /// a reunião fecha a captura, solta o callback da derivação e, se recebeu um [`DepoisDeSoltar`]
+    /// (o microfone próprio não abriu com o dispositivo ocupado), chama-o sem nenhuma trava.
     fn derivar(
         &self,
         ao_bloco: AoBlocoDeAudio,
@@ -145,9 +156,6 @@ struct Gravacao {
     bomba: thread::JoinHandle<(Box<dyn SessaoDeDitado>, usize)>,
     silencio: Arc<Mutex<f64>>,
 }
-
-/// Destino compartilhado dos blocos de um ditado (derivado da reunião ou microfone próprio).
-type Destino = Arc<Mutex<Option<AoBlocoDeAudio>>>;
 
 struct Interno {
     fase: Fase,
@@ -346,19 +354,14 @@ impl Controlador {
         let (ao_bloco, derivada, destino) = match self.compartilhado.get() {
             Some(m) => {
                 let parte: Destino = Arc::new(Mutex::new(Some(ao_bloco)));
-                let p2 = parte.clone();
-                let (fraco, id, p3) = (Arc::downgrade(self), d.id, parte.clone());
-                let ao_acabar: AoAcabar = Box::new(move || {
-                    if let Some(c) = fraco.upgrade() {
-                        c.reuniao_acabou(id, p3);
-                    }
-                });
+                let emenda = Arc::new(Mutex::new(Emenda::new(parte.clone(), Instant::now())));
+                let (fraco, id, e2) = (Arc::downgrade(self), d.id, emenda.clone());
+                let ao_acabar: AoAcabar =
+                    Box::new(move || fraco.upgrade().and_then(|c| c.reuniao_acabou(id, e2)));
+                // Soltar este callback (reunião acabou ou o ditado trocou de fonte) fecha a derivação.
+                let fim = FimDaDerivacao(emenda);
                 match m.derivar(
-                    Box::new(move |b, n| {
-                        if let Some(f) = p2.lock().unwrap().as_mut() {
-                            f(b, n)
-                        }
-                    }),
+                    Box::new(move |b, n| fim.0.lock().unwrap().derivado(b, n, Instant::now())),
                     ao_acabar,
                 ) {
                     Some(f) => (None, Some(f), Some(parte)),
@@ -444,48 +447,47 @@ impl Controlador {
         true
     }
 
-    /// A reunião soltou o microfone com este ditado derivando dele (I-2). Abre o microfone próprio
-    /// fora da trava do controlador para não bloquear o app nem concorrer com a captura anterior.
-    /// Se o microfone não abrir, encerra com o que já tem e avisa na pílula. Nunca grava silêncio.
-    fn reuniao_acabou(self: &Arc<Self>, id: i64, destino: Destino) {
-        let mesma = {
-            let i = self.interno.lock().unwrap();
-            i.fase == Fase::Gravando && i.gravacao.as_ref().is_some_and(|g| g.ditado.id == id)
-        };
-        if !mesma {
+    fn gravando_ditado(&self, id: i64) -> bool {
+        let i = self.interno.lock().unwrap();
+        i.fase == Fase::Gravando && i.gravacao.as_ref().is_some_and(|g| g.ditado.id == id)
+    }
+
+    /// A reunião vai soltar o microfone com este ditado derivando dele (I-2, N-1). Chamado com a
+    /// captura da reunião ainda aberta: abre o microfone próprio, mantém as duas fontes até o
+    /// primeiro bloco dele e só então solta a derivação; a [`Emenda`] corta pelo relógio. Se o
+    /// microfone não abrir agora (dispositivo exclusivo ocupado pela reunião), devolve a segunda
+    /// tentativa para depois que a reunião soltar. Nunca grava silêncio.
+    fn reuniao_acabou(
+        self: &Arc<Self>,
+        id: i64,
+        emenda: Arc<Mutex<Emenda>>,
+    ) -> Option<DepoisDeSoltar> {
+        if !self.gravando_ditado(id) {
+            return None;
+        }
+        match self.trocar_para_proprio(id, &emenda) {
+            Ok(()) => None,
+            Err(e) => {
+                nota(format!(
+                    "ditado {id}: microfone próprio não abriu com a reunião aberta ({e}); tento depois que ela soltar"
+                ));
+                let c = self.clone();
+                Some(Box::new(move || c.depois_de_soltar(id, emenda)))
+            }
+        }
+    }
+
+    /// Segunda tentativa, com o microfone já solto pela reunião. A fala dita enquanto ele abre se
+    /// perde: a pílula avisa. Se nem assim abrir, encerra com o que já tem e avisa.
+    fn depois_de_soltar(self: &Arc<Self>, id: i64, emenda: Arc<Mutex<Emenda>>) {
+        if !self.gravando_ditado(id) {
             return;
         }
-        let d2 = destino.clone();
-        let proprio: AoBlocoDeAudio = Box::new(move |b, n| {
-            if let Some(f) = d2.lock().unwrap().as_mut() {
-                f(b, n)
-            }
-        });
-        match self
-            .sistema
-            .abrir_microfone(&self.prefs.microfone(), proprio)
-        {
-            Ok(mut nova) => {
-                let antiga = {
-                    let mut i = self.interno.lock().unwrap();
-                    let ainda = i.fase == Fase::Gravando
-                        && i.gravacao.as_ref().is_some_and(|g| g.ditado.id == id);
-                    if ainda {
-                        let g = i.gravacao.as_mut().expect("conferido acima");
-                        Some(std::mem::replace(&mut g.captura, nova))
-                    } else {
-                        drop(i);
-                        nova.parar();
-                        return;
-                    }
-                };
-                if let Some(mut a) = antiga {
-                    a.parar();
-                }
-                nota(format!(
-                    "ditado {id}: a reunião acabou; segue no microfone próprio"
-                ));
-            }
+        match self.trocar_para_proprio(id, &emenda) {
+            Ok(()) => self.pilula.avisar(
+                "Troquei de microfone: um trecho curto pode ter ficado de fora",
+                3.0,
+            ),
             Err(e) => {
                 nota(format!(
                     "ditado {id}: a reunião acabou e o microfone não abriu ({e}); encerrado"
@@ -500,6 +502,51 @@ impl Controlador {
                 });
             }
         }
+    }
+
+    /// Abre o microfone próprio na emenda, espera o primeiro bloco (até [`SOBREPOSICAO`]) e troca a
+    /// fonte do ditado. Soltar a fonte antiga fecha a derivação, que fixa o corte da emenda. Abre
+    /// fora da trava do controlador para não bloquear o app.
+    fn trocar_para_proprio(
+        self: &Arc<Self>,
+        id: i64,
+        emenda: &Arc<Mutex<Emenda>>,
+    ) -> Result<(), String> {
+        let e2 = emenda.clone();
+        let proprio: AoBlocoDeAudio =
+            Box::new(move |b, n| e2.lock().unwrap().proprio(b, n, Instant::now()));
+        let mut nova = self
+            .sistema
+            .abrir_microfone(&self.prefs.microfone(), proprio)?;
+        let limite = Instant::now() + SOBREPOSICAO;
+        while !emenda.lock().unwrap().proprio_chegou() && Instant::now() < limite {
+            thread::sleep(Duration::from_millis(5));
+        }
+        if !emenda.lock().unwrap().proprio_chegou() {
+            nota(format!(
+                "ditado {id}: o microfone próprio não entregou áudio em {} ms; troca assim mesmo",
+                SOBREPOSICAO.as_millis()
+            ));
+        }
+        let antiga = {
+            let mut i = self.interno.lock().unwrap();
+            let ainda =
+                i.fase == Fase::Gravando && i.gravacao.as_ref().is_some_and(|g| g.ditado.id == id);
+            if !ainda {
+                // `terminar` levou a gravação enquanto o microfone abria.
+                drop(i);
+                nova.parar();
+                return Ok(());
+            }
+            let g = i.gravacao.as_mut().expect("conferido acima");
+            std::mem::replace(&mut g.captura, nova)
+        };
+        let mut antiga = antiga;
+        antiga.parar();
+        nota(format!(
+            "ditado {id}: a reunião acabou; segue no microfone próprio"
+        ));
+        Ok(())
     }
 
     pub fn entrar_em_maos_livres(&self) {
@@ -925,21 +972,28 @@ mod testes {
             }
         }
     }
-    fn tocar(pcm: Vec<f32>, mut ao_bloco: AoBlocoDeAudio) -> Box<dyn FonteAberta> {
+    fn tocar(pcm: Vec<f32>, ao_bloco: AoBlocoDeAudio) -> FonteDuble {
+        tocar_com(pcm, false, ao_bloco)
+    }
+    /// `tempo_real`: cada bloco de 100 ms chega 100 ms depois do anterior, como num microfone.
+    fn tocar_com(pcm: Vec<f32>, tempo_real: bool, mut ao_bloco: AoBlocoDeAudio) -> FonteDuble {
         let parar = Arc::new(AtomicBool::new(false));
         let p = parar.clone();
         let fio = thread::spawn(move || {
             for b in pcm.chunks(1600) {
+                if tempo_real {
+                    thread::sleep(Duration::from_millis(100));
+                }
                 if p.load(Ordering::Acquire) {
                     break;
                 }
                 ao_bloco(b.to_vec(), 0.3);
             }
         });
-        Box::new(FonteDuble {
+        FonteDuble {
             parar,
             fio: Some(fio),
-        })
+        }
     }
 
     struct SistemaDuble {
@@ -950,6 +1004,8 @@ mod testes {
         aberturas: AtomicUsize,
         pasta: PathBuf,
         microfone_falha: bool,
+        /// Microfone em tempo real ouvindo o "mundo" de `fonte_do_mundo`, com atraso de abertura.
+        mundo: Option<(Instant, Duration)>,
     }
     impl Sistema for SistemaDuble {
         fn microfone_disponivel(&self) -> bool {
@@ -964,7 +1020,12 @@ mod testes {
             if self.microfone_falha {
                 return Err("dispositivo ocupado".into());
             }
-            Ok(tocar(self.pcm.clone(), ao_bloco))
+            if let Some((t0, atraso)) = self.mundo {
+                // Abertura lenta, como o WASAPI ou um headset trocando de perfil.
+                thread::sleep(atraso);
+                return Ok(Box::new(fonte_do_mundo(t0, ao_bloco)));
+            }
+            Ok(Box::new(tocar(self.pcm.clone(), ao_bloco)))
         }
         fn app_em_foco(&self) -> (String, String) {
             ("notepad.exe".into(), "notepad".into())
@@ -999,6 +1060,7 @@ mod testes {
             aberturas: AtomicUsize::new(0),
             pasta: tmp.path().join("Audio"),
             microfone_falha: false,
+            mundo: None,
         };
         std::fs::create_dir_all(&s.pasta).unwrap();
         ajustar(&mut s);
@@ -1137,6 +1199,43 @@ mod testes {
         pcm: Vec<f32>,
         derivacoes: AtomicUsize,
         ao_acabar: Mutex<Option<AoAcabar>>,
+        parar: Mutex<Option<Arc<AtomicBool>>>,
+        tempo_real: bool,
+    }
+    impl ReuniaoDuble {
+        fn novo(pcm: Vec<f32>) -> Arc<Self> {
+            Arc::new(Self {
+                pcm,
+                derivacoes: AtomicUsize::new(0),
+                ao_acabar: Mutex::new(None),
+                parar: Mutex::new(None),
+                tempo_real: false,
+            })
+        }
+        /// Microfone da reunião em tempo real: o que a emenda corta pelo relógio precisa disso.
+        fn em_tempo_real(pcm: Vec<f32>) -> Arc<Self> {
+            Arc::new(Self {
+                tempo_real: true,
+                ..Arc::into_inner(Self::novo(pcm)).unwrap()
+            })
+        }
+        /// Como `Lancamento::soltar_capturas`: avisa com a derivação viva, fecha a derivação e
+        /// roda a segunda fase.
+        fn acabar(&self) {
+            let f = self
+                .ao_acabar
+                .lock()
+                .unwrap()
+                .take()
+                .expect("ao_acabar registrado");
+            let depois = f();
+            if let Some(p) = self.parar.lock().unwrap().take() {
+                p.store(true, Ordering::Release);
+            }
+            if let Some(d) = depois {
+                d();
+            }
+        }
     }
     impl MicrofoneCompartilhado for ReuniaoDuble {
         fn derivar(
@@ -1146,7 +1245,9 @@ mod testes {
         ) -> Option<Box<dyn FonteAberta>> {
             *self.ao_acabar.lock().unwrap() = Some(ao_acabar);
             self.derivacoes.fetch_add(1, Ordering::Relaxed);
-            Some(tocar(self.pcm.clone(), ao_bloco))
+            let fonte = tocar_com(self.pcm.clone(), self.tempo_real, ao_bloco);
+            *self.parar.lock().unwrap() = Some(fonte.parar.clone());
+            Some(Box::new(fonte))
         }
     }
 
@@ -1154,11 +1255,7 @@ mod testes {
     #[test]
     fn ditado_durante_reuniao_usa_o_microfone_da_reuniao() {
         let cena = cena(Vec::new(), |_| {});
-        let reuniao = Arc::new(ReuniaoDuble {
-            pcm: voz(2.0, 0.5),
-            derivacoes: AtomicUsize::new(0),
-            ao_acabar: Mutex::new(None),
-        });
+        let reuniao = ReuniaoDuble::novo(voz(2.0, 0.5));
         cena.c.compartilhar_microfone(reuniao.clone());
         ditar(&cena, true);
         assert_eq!(reuniao.derivacoes.load(Ordering::Relaxed), 1);
@@ -1175,21 +1272,11 @@ mod testes {
     #[test]
     fn reuniao_acaba_no_meio_e_o_ditado_segue_no_microfone_proprio() {
         let cena = cena(voz(1.5, 0.5), |_| {});
-        let reuniao = Arc::new(ReuniaoDuble {
-            pcm: voz(1.5, 0.0),
-            derivacoes: AtomicUsize::new(0),
-            ao_acabar: Mutex::new(None),
-        });
+        let reuniao = ReuniaoDuble::em_tempo_real(voz(3.0, 0.0));
         cena.c.compartilhar_microfone(reuniao.clone());
         assert!(cena.c.comecar(true));
-        thread::sleep(Duration::from_millis(200));
-        let acabar = reuniao
-            .ao_acabar
-            .lock()
-            .unwrap()
-            .take()
-            .expect("ao_acabar registrado");
-        acabar();
+        thread::sleep(Duration::from_millis(1100));
+        reuniao.acabar();
         assert_eq!(
             cena.sistema.aberturas.load(Ordering::Relaxed),
             1,
@@ -1201,7 +1288,8 @@ mod testes {
         esperar_parado(&cena.c);
         let colado = cena.sistema.colados.lock().unwrap()[0].clone();
         assert!(
-            colado.split_whitespace().count() >= 5,
+            // Só a derivação daria 2 palavras e só o microfone próprio, no máximo 3.
+            colado.split_whitespace().count() >= 4,
             "faltou fala de uma das fontes: {colado}"
         );
     }
@@ -1210,16 +1298,11 @@ mod testes {
     #[test]
     fn reuniao_acaba_e_microfone_nao_abre_encerra_com_o_que_tinha() {
         let cena = cena(Vec::new(), |s| s.microfone_falha = true);
-        let reuniao = Arc::new(ReuniaoDuble {
-            pcm: voz(1.5, 0.5),
-            derivacoes: AtomicUsize::new(0),
-            ao_acabar: Mutex::new(None),
-        });
+        let reuniao = ReuniaoDuble::em_tempo_real(voz(1.5, 0.5));
         cena.c.compartilhar_microfone(reuniao.clone());
         assert!(cena.c.comecar(true));
-        thread::sleep(Duration::from_millis(300));
-        let acabar = reuniao.ao_acabar.lock().unwrap().take().unwrap();
-        acabar();
+        thread::sleep(Duration::from_millis(700));
+        reuniao.acabar();
         esperar_parado(&cena.c);
         assert!(cena
             .pilula
@@ -1228,9 +1311,10 @@ mod testes {
             .unwrap()
             .iter()
             .any(|a| a.starts_with("A reunião acabou")));
+        let colado = cena.sistema.colados.lock().unwrap()[0].clone();
         assert!(
-            cena.sistema.colados.lock().unwrap()[0].contains("palavra"),
-            "perdeu o que já tinha"
+            colado.to_lowercase().contains("palavra"),
+            "perdeu o que já tinha: {colado:?}"
         );
     }
 
@@ -1239,6 +1323,205 @@ mod testes {
         fn derivar(&self, _a: AoBlocoDeAudio, _f: AoAcabar) -> Option<Box<dyn FonteAberta>> {
             None
         }
+    }
+
+    /// A fala do "mundo": a amostra global `k` (desde `t0`) vale `k mod 32000`, gravada no WAV de
+    /// 16 bits sem perda. Lacuna e repetição aparecem como saltos na sequência.
+    fn amostra_do_mundo(k: u64) -> f32 {
+        ((k % 32_000) as f32 + 0.5) / 32_767.0
+    }
+    fn indice(t0: Instant) -> u64 {
+        (t0.elapsed().as_secs_f64() * audio::TAXA as f64) as u64
+    }
+
+    /// Fonte em tempo real: a cada ~10 ms entrega as amostras do mundo desde a última entrega.
+    fn fonte_do_mundo(t0: Instant, mut ao_bloco: AoBlocoDeAudio) -> FonteDuble {
+        let parar = Arc::new(AtomicBool::new(false));
+        let p = parar.clone();
+        let fio = thread::spawn(move || {
+            let mut k = indice(t0);
+            while !p.load(Ordering::Acquire) {
+                thread::sleep(Duration::from_millis(10));
+                let fim = indice(t0);
+                ao_bloco((k..fim).map(amostra_do_mundo).collect(), 0.5);
+                k = fim;
+            }
+        });
+        FonteDuble {
+            parar,
+            fio: Some(fio),
+        }
+    }
+
+    /// Capturador da reunião em tempo real: o microfone ouve o mesmo mundo; o áudio do sistema
+    /// fica mudo. Soltar o guarda para a fonte.
+    struct CapturaDoMundo(Instant);
+    impl crate::lancamento::Capturador for CapturaDoMundo {
+        fn abrir(
+            &self,
+            fonte: Fonte,
+            relogio: Instant,
+            mut ao_bloco: crate::lancamento::AoBloco,
+        ) -> Result<Box<dyn Send>, String> {
+            struct Guarda(FonteDuble);
+            impl Drop for Guarda {
+                fn drop(&mut self) {
+                    self.0.parar();
+                }
+            }
+            let t0 = if fonte == Fonte::Microfone {
+                self.0
+            } else {
+                // Sem fonte do mundo para o sistema: um relógio no futuro não entrega nada.
+                Instant::now() + Duration::from_secs(3600)
+            };
+            Ok(Box::new(Guarda(fonte_do_mundo(
+                t0,
+                Box::new(move |b, n| {
+                    if b.is_empty() {
+                        return;
+                    }
+                    let fim = relogio.elapsed().as_secs_f64();
+                    ao_bloco(fim - b.len() as f64 / audio::TAXA as f64, b, n)
+                }),
+            ))))
+        }
+    }
+
+    /// Saltos na sequência do mundo gravada no WAV: (amostras faltando, amostras repetidas).
+    fn lacunas_e_repeticoes(wav: &std::path::Path) -> (u64, u64, usize) {
+        let bytes = std::fs::read(wav).unwrap();
+        let k: Vec<u64> = bytes[44..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b) as u64)
+            .collect();
+        let (mut falta, mut repete) = (0, 0);
+        for par in k.windows(2) {
+            let d = (par[1] + 32_000 - par[0]) % 32_000;
+            if d == 0 || d > 16_000 {
+                repete += (32_000 - d) % 32_000 + 1;
+            } else {
+                falta += d - 1;
+            }
+        }
+        (falta, repete, k.len())
+    }
+
+    /// N-1, de ponta a ponta com o serviço de reuniões real: a reunião acaba no meio de um ditado
+    /// derivado e o microfone próprio leva 150 ms para abrir. A fala do mundo chega inteira ao
+    /// ditado, sem lacuna nem repetição na emenda (tolerância de 10 ms para o agendamento das
+    /// threads). Antes, a reunião fechava a captura antes de avisar e os 150 ms se perdiam.
+    #[test]
+    fn reuniao_acaba_no_meio_e_a_emenda_nao_perde_nem_duplica() {
+        let t0 = Instant::now();
+        let cena = cena(Vec::new(), |s| {
+            s.mundo = Some((t0, Duration::from_millis(150)))
+        });
+        let tmp = crate::caminhos::pasta_de_teste();
+        let reuniao = crate::lancamento::Lancamento::new(
+            &tmp.path().join("r.sqlite"),
+            &tmp.path().join("ReunioesAudio"),
+            MotoresDuble::novo(),
+            Arc::new(CapturaDoMundo(t0)),
+            Arc::new(|t: &str| t.to_string()),
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        cena.c.compartilhar_microfone(reuniao.clone());
+        let id = reuniao.iniciar_reuniao("macEMicrofone").unwrap();
+        thread::sleep(Duration::from_millis(100));
+        assert!(cena.c.comecar(true));
+        thread::sleep(Duration::from_millis(400));
+        reuniao.encerrar(&id).unwrap();
+        assert_eq!(cena.sistema.aberturas.load(Ordering::Relaxed), 1);
+        assert_eq!(cena.c.fase(), Fase::Gravando, "o ditado deveria continuar");
+        thread::sleep(Duration::from_millis(400));
+        cena.c.terminar(false);
+        esperar_parado(&cena.c);
+        reuniao.desligar(Duration::from_secs(2));
+        let h = cena.c.integracao.historico(10, "").unwrap();
+        let wav = cena.sistema.pasta.join(h[0]["audio"].as_str().unwrap());
+        let (falta, repete, total) = lacunas_e_repeticoes(&wav);
+        assert!(total > 12_000, "ditado curto demais: {total} amostras");
+        assert!(
+            falta <= 160 && repete <= 160,
+            "emenda com {falta} amostras faltando e {repete} repetidas"
+        );
+    }
+
+    /// N-1: com o microfone recusando a segunda abertura enquanto a reunião o segura, a troca
+    /// acontece depois que a reunião solta, e a pílula avisa que um trecho pode ter ficado de fora.
+    #[test]
+    fn microfone_ocupado_pela_reuniao_abre_depois_e_avisa() {
+        struct OcupadoUmaVez {
+            dentro: SistemaDuble,
+            tentativas: AtomicUsize,
+        }
+        impl Sistema for OcupadoUmaVez {
+            fn microfone_disponivel(&self) -> bool {
+                true
+            }
+            fn abrir_microfone(
+                &self,
+                n: &str,
+                ao_bloco: AoBlocoDeAudio,
+            ) -> Result<Box<dyn FonteAberta>, String> {
+                if self.tentativas.fetch_add(1, Ordering::Relaxed) == 0 {
+                    return Err("dispositivo ocupado".into());
+                }
+                self.dentro.abrir_microfone(n, ao_bloco)
+            }
+            fn app_em_foco(&self) -> (String, String) {
+                self.dentro.app_em_foco()
+            }
+            fn colar(&self, texto: &str) -> Insercao {
+                self.dentro.colar(texto)
+            }
+            fn pasta_de_audio(&self) -> PathBuf {
+                self.dentro.pasta_de_audio()
+            }
+        }
+        let tmp = crate::caminhos::pasta_de_teste();
+        let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
+        let integracao = Arc::new(
+            Integracao::abrir(&tmp.path().join("d.sqlite"), MotoresDuble::novo()).unwrap(),
+        );
+        let pasta = tmp.path().join("Audio");
+        std::fs::create_dir_all(&pasta).unwrap();
+        let sistema = Arc::new(OcupadoUmaVez {
+            dentro: SistemaDuble {
+                pcm: voz(1.5, 0.5),
+                microfone: true,
+                colagem: Insercao::Colado,
+                colados: Mutex::new(Vec::new()),
+                aberturas: AtomicUsize::new(0),
+                pasta,
+                microfone_falha: false,
+                mundo: None,
+            },
+            tentativas: AtomicUsize::new(0),
+        });
+        let pilula = Arc::new(PilulaDuble::default());
+        let c = Controlador::new(prefs, integracao, pilula.clone(), sistema.clone(), |_| {});
+        let reuniao = ReuniaoDuble::em_tempo_real(voz(3.0, 0.0));
+        c.compartilhar_microfone(reuniao.clone());
+        assert!(c.comecar(true));
+        thread::sleep(Duration::from_millis(200));
+        reuniao.acabar();
+        assert_eq!(sistema.tentativas.load(Ordering::Relaxed), 2);
+        assert_eq!(c.fase(), Fase::Gravando, "o ditado deveria continuar");
+        assert!(pilula
+            .avisos
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| a.starts_with("Troquei de microfone")));
+        thread::sleep(Duration::from_millis(300));
+        c.terminar(true);
+        esperar_parado(&c);
+        assert!(sistema.dentro.colados.lock().unwrap()[0].contains("palavra"));
     }
 
     #[test]

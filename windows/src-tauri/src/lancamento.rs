@@ -1061,18 +1061,20 @@ impl Lancamento {
         Some(a)
     }
 
-    /// Fecha as fontes da reunião primeiro (liberando o dispositivo de áudio) e então avisa um
-    /// ditado que estivesse derivando do microfone dela para abrir o próprio microfone ou encerrar
-    /// com o que já tem, sem ficar surdo nem gravar silêncio (I-2). O aviso roda sem nenhuma trava
-    /// do serviço.
+    /// Avisa um ditado que estivesse derivando do microfone da reunião com a captura ainda aberta,
+    /// para ele abrir o microfone próprio e emendar pelo relógio sem perder a fala dita enquanto o
+    /// microfone abre (N-1). Só depois fecha as fontes da reunião e solta a derivação. Se o
+    /// microfone próprio não abriu com o dispositivo ocupado, a segunda tentativa roda com ele já
+    /// livre; se nem assim, o ditado encerra com o que tem e avisa (I-2). Nada disso roda sob
+    /// trava do serviço.
     fn soltar_capturas(&self, capturas: Vec<Box<dyn Send>>) {
+        let ao_acabar = self.derivacao.lock().unwrap().ao_acabar.take();
+        let depois = ao_acabar.and_then(|f| f());
         drop(capturas);
-        let ao_acabar = {
-            let mut d = self.derivacao.lock().unwrap();
-            d.ao_bloco = None;
-            d.ao_acabar.take()
-        };
-        if let Some(f) = ao_acabar {
+        // Fora da trava: soltar o callback fecha a derivação na emenda do ditado.
+        let derivado = self.derivacao.lock().unwrap().ao_bloco.take();
+        drop(derivado);
+        if let Some(f) = depois {
             f();
         }
     }
@@ -2168,7 +2170,7 @@ mod testes_derivacao {
         )
         .unwrap();
         assert!(
-            s.derivar(Box::new(|_, _| {}), Box::new(|| {})).is_none(),
+            s.derivar(Box::new(|_, _| {}), Box::new(|| None)).is_none(),
             "sem reunião não há derivação"
         );
         let id = s.iniciar_reuniao("macEMicrofone").unwrap();
@@ -2178,7 +2180,7 @@ mod testes_derivacao {
         let mut fonte = s
             .derivar(
                 Box::new(move |b, _| *r.lock().unwrap() += b.len()),
-                Box::new(|| {}),
+                Box::new(|| None),
             )
             .expect("derivação");
         thread::sleep(Duration::from_millis(300));
@@ -2210,7 +2212,7 @@ mod testes_derivacao {
             .unwrap();
             let id = s2.iniciar_reuniao("mac").unwrap();
             assert!(
-                s2.derivar(Box::new(|_, _| {}), Box::new(|| {})).is_none(),
+                s2.derivar(Box::new(|_, _| {}), Box::new(|| None)).is_none(),
                 "reunião sem microfone não deriva"
             );
             s2.desligar(Duration::from_secs(2));
@@ -2235,7 +2237,7 @@ mod testes_derivacao {
         .unwrap();
         let id = s.iniciar_reuniao("macEMicrofone").unwrap();
         let mut f1 = s
-            .derivar(Box::new(|_, _| {}), Box::new(|| {}))
+            .derivar(Box::new(|_, _| {}), Box::new(|| None))
             .expect("derivação 1");
         f1.parar();
         let recebido = Arc::new(Mutex::new(0usize));
@@ -2243,7 +2245,7 @@ mod testes_derivacao {
         let _f2 = s
             .derivar(
                 Box::new(move |b, _| *r.lock().unwrap() += b.len()),
-                Box::new(|| {}),
+                Box::new(|| None),
             )
             .expect("derivação 2");
         drop(f1);
@@ -2277,13 +2279,75 @@ mod testes_derivacao {
         let _f = s
             .derivar(
                 Box::new(|_, _| {}),
-                Box::new(move || a.store(true, Ordering::Release)),
+                Box::new(move || {
+                    a.store(true, Ordering::Release);
+                    None
+                }),
             )
             .expect("derivação");
         s.encerrar(&id).unwrap();
         assert!(
             avisou.load(Ordering::Acquire),
             "encerrar a reunião não avisou o ditado derivado"
+        );
+        s.desligar(Duration::from_secs(2));
+    }
+
+    /// N-1 no serviço: o aviso chega com a captura da reunião ainda aberta e a derivação ainda
+    /// entregando blocos; a captura só fecha e a derivação só solta depois que o aviso volta, e a
+    /// segunda fase roda por último. Antes, a captura fechava primeiro e a fala dita enquanto o
+    /// microfone próprio abria se perdia.
+    #[test]
+    fn encerrar_avisa_com_a_captura_ainda_aberta_e_solta_depois() {
+        struct Solto(Arc<Mutex<Vec<&'static str>>>);
+        impl Drop for Solto {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().push("solto");
+            }
+        }
+        let tmp = crate::caminhos::pasta_de_teste();
+        let s = Lancamento::new(
+            &tmp.path().join("t.sqlite"),
+            &tmp.path().join("Audio"),
+            MotoresDuble::novo(),
+            Arc::new(CapturaContinua),
+            Arc::new(|t: &str| t.to_string()),
+            Arc::new(|_, _| {}),
+        )
+        .unwrap();
+        let id = s.iniciar_reuniao("macEMicrofone").unwrap();
+        let recebido = Arc::new(Mutex::new(0usize));
+        let ordem = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+        let guarda = Solto(ordem.clone());
+        let (r, r2, o1, o2) = (
+            recebido.clone(),
+            recebido.clone(),
+            ordem.clone(),
+            ordem.clone(),
+        );
+        let _f = s
+            .derivar(
+                Box::new(move |b, _| {
+                    let _ = &guarda;
+                    *r.lock().unwrap() += b.len();
+                }),
+                Box::new(move || {
+                    let antes = *r2.lock().unwrap();
+                    thread::sleep(Duration::from_millis(150));
+                    let depois = *r2.lock().unwrap();
+                    o1.lock().unwrap().push(if depois > antes {
+                        "aviso com captura aberta"
+                    } else {
+                        "aviso com captura fechada"
+                    });
+                    Some(Box::new(move || o2.lock().unwrap().push("depois")))
+                }),
+            )
+            .expect("derivação");
+        s.encerrar(&id).unwrap();
+        assert_eq!(
+            *ordem.lock().unwrap(),
+            vec!["aviso com captura aberta", "solto", "depois"]
         );
         s.desligar(Duration::from_secs(2));
     }
