@@ -7,10 +7,11 @@ use windows::{
     core::HSTRING,
     Win32::{
         Media::MediaFoundation::{
-            IMFMediaBuffer, IMFSample, MFAudioFormat_Float, MFCreateMediaType,
+            IMFMediaBuffer, IMFSample, IMFSourceReader, MFAudioFormat_Float, MFCreateMediaType,
             MFCreateSourceReaderFromURL, MFMediaType_Audio, MFShutdown, MFStartup, MFSTARTUP_FULL,
             MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_MAJOR_TYPE,
-            MF_MT_SUBTYPE, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ALL_STREAMS,
+            MF_MT_SUBTYPE, MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED,
+            MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READER_ALL_STREAMS,
             MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_VERSION,
         },
         System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED},
@@ -56,14 +57,18 @@ pub fn decodificar(caminho: &Path) -> Result<Vec<f32>, String> {
         leitor
             .SetCurrentMediaType(audio, None, &pedido)
             .map_err(erro)?;
-        let atual = leitor.GetCurrentMediaType(audio).map_err(erro)?;
-        let taxa = atual
-            .GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)
-            .map_err(erro)?;
-        let canais = atual
-            .GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)
-            .map_err(erro)?
-            .max(1) as usize;
+        let ler_formato = |leitor: &IMFSourceReader| -> Result<(u32, usize), String> {
+            let atual = leitor.GetCurrentMediaType(audio).map_err(erro)?;
+            let taxa = atual
+                .GetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND)
+                .map_err(erro)?;
+            let canais = atual
+                .GetUINT32(&MF_MT_AUDIO_NUM_CHANNELS)
+                .map_err(erro)?
+                .max(1) as usize;
+            Ok((taxa, canais))
+        };
+        let (mut taxa, mut canais) = ler_formato(&leitor)?;
         let mut reamostrar = Reamostrador::new(taxa);
         let mut saida = Vec::new();
         loop {
@@ -81,6 +86,14 @@ pub fn decodificar(caminho: &Path) -> Result<Vec<f32>, String> {
                 .map_err(erro)?;
             if bandeiras & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 break;
+            }
+            if bandeiras & MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED.0 as u32 != 0 {
+                let (nova_taxa, novos_canais) = ler_formato(&leitor)?;
+                if nova_taxa != taxa {
+                    taxa = nova_taxa;
+                    reamostrar = Reamostrador::new(taxa);
+                }
+                canais = novos_canais;
             }
             let Some(amostra) = amostra else { continue };
             let buffer: IMFMediaBuffer = amostra.ConvertToContiguousBuffer().map_err(erro)?;
