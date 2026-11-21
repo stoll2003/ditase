@@ -74,7 +74,12 @@ Add-Type -Namespace QaDialogo -Name Win32 -MemberDefinition @'
 public static extern System.IntPtr SendMessage(System.IntPtr h, uint msg, System.IntPtr w, string l);
 [System.Runtime.InteropServices.DllImport("user32.dll")]
 public static extern System.IntPtr SendMessage(System.IntPtr h, uint msg, System.IntPtr w, System.IntPtr l);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool IsWindow(System.IntPtr h);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool IsWindowVisible(System.IntPtr h);
 '@
+$hDialogo = [IntPtr]$janela.Current.NativeWindowHandle
 $abrir = $janela.FindFirst($TS::Descendants, (New-Object System.Windows.Automation.AndCondition(
     (Cond $AE::AutomationIdProperty '1'), (Cond $AE::ClassNameProperty 'Button'))))
 $hCampo = [IntPtr]$campo.Current.NativeWindowHandle
@@ -86,7 +91,9 @@ if ($hCampo -ne [IntPtr]::Zero -and $hAbrir -ne [IntPtr]::Zero) {
     # Mensagens nativas do próprio controle do diálogo: WM_SETTEXT no campo e BM_CLICK em Abrir.
     [void][QaDialogo.Win32]::SendMessage($hCampo, 0x000C, [IntPtr]::Zero, $caminho)
     Start-Sleep -Milliseconds 200
-    [void][QaDialogo.Win32]::SendMessage($hAbrir, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+    # Run 44877843973: BM_CLICK não fechou (diálogo sem foco no runner; a doc avisa que BM_CLICK
+    # pode falhar em diálogo inativo). WM_COMMAND(IDOK, BN_CLICKED) vai direto ao procedimento do diálogo.
+    [void][QaDialogo.Win32]::SendMessage($hDialogo, 0x0111, [IntPtr]1, $hAbrir)
 } elseif ($campo.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
     $vp.SetValue($caminho)
     Start-Sleep -Milliseconds 200
@@ -110,10 +117,13 @@ if ($hCampo -ne [IntPtr]::Zero -and $hAbrir -ne [IntPtr]::Zero) {
 # Confirma que o diálogo fechou (o app recebeu o arquivo).
 $fimFechar = (Get-Date).AddSeconds(10)
 do {
-    $aberto = $false
-    try { $null = $janela.Current.Name; $aberto = -not $janela.Current.IsOffscreen } catch { $aberto = $false }
+    $aberto = [QaDialogo.Win32]::IsWindow($hDialogo) -and [QaDialogo.Win32]::IsWindowVisible($hDialogo)
     if (-not $aberto) { break }
     Start-Sleep -Milliseconds 250
 } while ((Get-Date) -lt $fimFechar)
-if ($aberto) { Gravar-Arvore $janela; throw 'O diálogo continuou aberto depois de enviar o caminho.' }
+if ($aberto) {
+    $buf = New-Object System.Text.StringBuilder 1024
+    Gravar-Arvore $janela
+    throw "O diálogo continuou aberto depois de enviar o caminho (hwnd=$hDialogo, campo=$hCampo)."
+}
 Write-Host "Arquivo selecionado no diálogo nativo: $caminho"
