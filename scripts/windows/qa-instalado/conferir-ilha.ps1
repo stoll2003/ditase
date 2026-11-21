@@ -380,7 +380,7 @@ try {
         $m = Esperar-Tamanho $ilha 92 7 8
         $dR = $false; $tipoR = [QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$dR)
         $cR = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$cR)
-        $novas = if ($logApp -and (Test-Path $logApp)) { @(Get-Content -LiteralPath $logApp | Select-Object -Skip $linhasAntes | Where-Object { $_ -match 'ilha:' }) } else { @() }
+        $novas = if ($logApp -and (Test-Path $logApp)) { @(Get-Content -LiteralPath $logApp | Select-Object -Skip $linhasAntes | Where-Object { $_ -match 'ilha:' } | ForEach-Object { [string]$_ }) } else { @() }
         $retentativa = @($novas | Where-Object { $_ -match 'ilha: retentativa:.*-> Recriar' })
         $limite = @($novas | Where-Object { $_ -match 'limite atingido' })
         $escFinal = [Math]::Round($m[0].escala * 100)
