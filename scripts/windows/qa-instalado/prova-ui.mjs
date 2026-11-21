@@ -82,8 +82,10 @@ async function descobrirAlvoPrincipal(timeoutMs = 60_000) {
       const resp = await fetch(`http://127.0.0.1:${porta}/json`);
       if (resp.ok) {
         const alvos = await resp.json();
+        // Só a página do app (tauri.localhost / tauri://localhost), nunca a pílula nem about:blank.
+        const doApp = (u) => /^(https?:\/\/tauri\.localhost|tauri:\/\/localhost)/.test(u);
         const principal = alvos.find(
-          (a) => a.type === "page" && a.webSocketDebuggerUrl && !String(a.url || "").includes("pilula")
+          (a) => a.type === "page" && a.webSocketDebuggerUrl && doApp(String(a.url || "")) && !String(a.url).includes("pilula")
         );
         if (principal) return principal;
         ultimoErro = `alvos sem página principal: ${JSON.stringify(alvos.map((a) => a.url))}`;
@@ -433,6 +435,17 @@ async function main() {
   try {
     const alvo = await descobrirAlvoPrincipal();
     cdp = await ClienteCdp.conectar(alvo.webSocketDebuggerUrl);
+    relatorio.alvoCdp = alvo.url;
+    // Página carregada e ponte injetada. Se a página carregou e o invoke não veio, é erro de ponte.
+    const pagina = await esperarCondicao(60_000, "página do app carregada", () =>
+      cdp.avaliar(`document.readyState === "complete" ? { url: location.href, invoke: typeof (window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke) } : null`)
+    ).catch((e) => { throw new ErroDeProva("pagina_nao_carregou", e.message, e.detalhe); });
+    relatorio.pagina = pagina;
+    if (pagina.invoke !== "function") {
+      await esperarCondicao(10_000, "invoke do Tauri", () =>
+        cdp.avaliar(`typeof (window.__TAURI__?.core?.invoke ?? window.__TAURI_INTERNALS__?.invoke) === "function"`)
+      ).catch(() => { throw new ErroDeProva("ponte_ausente", `página ${pagina.url} carregada sem invoke do Tauri`); });
+    }
     const versao = await consultarPonte(cdp, "estado").then((e) => e?.versao ?? null);
     relatorio.versaoApp = versao;
 
