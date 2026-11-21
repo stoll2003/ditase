@@ -354,7 +354,7 @@ async function faseTransicao(cdp, relatorio) {
 
 async function faseArquivos(cdp, relatorio, chaves) {
   await irPara(cdp, "Arquivos");
-  const dialogo = rodarProcesso("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT_DIALOGO, "-Arquivo", WAV]);
+  const dialogo = rodarProcesso("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT_DIALOGO, "-Arquivo", WAV, "-ArvoreSaida", path.join(SAIDA, "dialogo-arvore.txt")]);
   const clique = await clicarBotaoPorTexto(cdp, "Escolher arquivo");
   if (!clique.ok) throw new ErroDeProva("ui_controle_ausente", "Escolher arquivo não clicável", clique);
   try {

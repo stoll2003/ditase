@@ -1,4 +1,4 @@
-# Endpoint de saída de áudio virtual para a etapa de Reunião no runner (sem placa de som).
+﻿# Endpoint de saída de áudio virtual para a etapa de Reunião no runner (sem placa de som).
 # VB-CABLE pacote 45: o catálogo do driver Windows 10 x64 é assinado pela Microsoft
 # ("Microsoft Windows Hardware Compatibility Publisher"). Nada de bcdedit, test signing, política de
 # CI, Secure Boot ou TrustedPublisher: se o Windows recusar a assinatura, a etapa só registra o limite.
