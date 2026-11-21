@@ -907,7 +907,33 @@ fn banco_e_audio_em_caminho_com_acento() {
 }
 
 #[test]
-fn abertura_e_limpeza_recusam_juncao_no_ancestral_da_raiz() {
+fn raiz_atras_de_link_no_ancestral_funciona() {
+    // Pasta do usuário redirecionada (OneDrive, perfil corporativo) ou /var no macOS.
+    let tmp = comum::tempdir();
+    let externa = tmp.path().join("externa");
+    fs::create_dir(&externa).unwrap();
+    let pai = tmp.path().join("redirecionada");
+    ligar_pasta(&externa, &pai);
+    let disco = DiscoDeBlocos::new(pai.join("Audio"));
+    disco.preparar_raiz().unwrap();
+    let bloco = disco
+        .gravar(
+            IdBloco {
+                documento: novo_uuid(),
+                fonte: FonteDeAudio::Mac,
+                geracao: 0,
+                seq: 0,
+            },
+            0,
+            &[0.1; 320],
+        )
+        .unwrap();
+    assert_eq!(disco.ler(&bloco).unwrap(), vec![0.1; 320]);
+    assert!(externa.join("Audio").is_dir());
+}
+
+#[test]
+fn abertura_e_limpeza_recusam_link_dentro_da_raiz() {
     let tmp = comum::tempdir();
     let externa = tmp.path().join("externa");
     let destino_real = DiscoDeBlocos::new(externa.join("Audio"));
@@ -925,13 +951,13 @@ fn abertura_e_limpeza_recusam_juncao_no_ancestral_da_raiz() {
             &[0.1; 320],
         )
         .unwrap();
-    let pai = tmp.path().join("redirecionada");
-    ligar_pasta(&externa, &pai);
-    let disco = DiscoDeBlocos::new(pai.join("Audio"));
+    let disco = DiscoDeBlocos::new(tmp.path().join("app").join("Audio"));
+    fs::create_dir_all(&disco.raiz).unwrap();
+    // A pasta da reunião dentro da raiz é um link para fora.
+    ligar_pasta(&externa.join("Audio").join(&doc), &disco.raiz.join(&doc));
     let mut a = ArmazemLancamento::new(tmp.path().join("teste.sqlite")).unwrap();
     let r = a.preparar_abertura(&disco);
     assert_eq!(r.adotados, 0);
-    assert_eq!(r.falhas.len(), 1);
     assert!(!a.existe_documento(&doc).unwrap());
     assert!(disco.pasta(&doc).is_err());
     disco.remover_pasta(&doc);
