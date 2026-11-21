@@ -162,11 +162,24 @@ function Checar($nome, $ok, $detalhe, [switch]$Opcional) {
     Write-Host ("[{0}] {1} {2}" -f ($(if ($ok) { 'ok' } else { 'FALHA' })), $nome, ($detalhe | ConvertTo-Json -Compress -Depth 4))
 }
 
-function Achar-Ilha {
+function Listar-Candidatas {
     foreach ($h in [QaIlha]::JanelasDo([uint32]$ProcessoApp)) {
         $ex = [QaIlha]::GetWindowLong($h, -20)
-        if (($ex -band 0x08000000) -ne 0) { return $h }  # WS_EX_NOACTIVATE: só a ilha tem.
+        if (($ex -band 0x08000000) -eq 0) { continue }
+        $r = New-Object QaIlha+RECT; [void][QaIlha]::GetWindowRect($h, [ref]$r)
+        $dummy = $false; $tipo = [QaIlha]::Regiao($h, 0, 0, [ref]$dummy)
+        [pscustomobject]@{ hwnd = $h; classe = [QaIlha]::Classe($h); exStyle = ('0x{0:X8}' -f $ex); visivel = [QaIlha]::IsWindowVisible($h)
+            regiao = $tipo; x = $r.L; y = $r.T; w = $r.R - $r.L; h = $r.B - $r.T }
     }
+}
+
+# A ilha é a janela visível do processo com WS_EX_NOACTIVATE E região de recorte (só ela recebe
+# SetWindowRgn). Run 44885109477: há outra janela NOACTIVATE de 18-24 px em (0,0), e o patch de
+# escala recria a ilha (hwnd novo); por isso a prova procura de novo a cada medição.
+function Achar-Ilha {
+    $c = @(Listar-Candidatas)
+    $comRegiao = @($c | Where-Object { $_.visivel -and $_.regiao -ge 2 } | Sort-Object { $_.w * $_.h } -Descending)
+    if ($comRegiao.Count) { return $comRegiao[0].hwnd }
     return [IntPtr]::Zero
 }
 
@@ -222,6 +235,8 @@ function Recortar($m, $nome) {
 function Esperar-Tamanho($h, $wLog, $hLog, $segundos) {
     $fim = (Get-Date).AddSeconds($segundos)
     do {
+        $novo = Achar-Ilha
+        if ($novo -ne [IntPtr]::Zero) { $h = $novo; $script:ilha = $novo }
         $m = Medir $h
         $e = Esperado $m $wLog $hLog
         if ($m.visivel -and (Bate $m $e)) { return @($m, $e, $true) }
@@ -343,6 +358,8 @@ try {
             $rel.limites += "Escala $pct% não aplicada pelo sistema na sessão (sistema=$sistema%, monitor=$dpiMon%)."
         } elseif (-not $item.ok) { $falhas++ }
         Write-Host ("escala {0}%: código {1}, sistema {2}%, monitor {3}%, ilha {4}%, ok={5}" -f $pct, $rc, $sistema, $dpiMon, $aplicada, $item.ok)
+        # O patch limita a 2 recriações a cada 20 s (antilaço); troca de escala espaçada como um usuário.
+        Start-Sleep -Seconds 5
     }
     # Abertura já em cada escala acima de 100% (caso mais comum): reinicia o app instalado.
     $altas = @($possiveis | Where-Object { $_ -gt 100 })
@@ -378,6 +395,7 @@ try {
 
 try { if ($np -and -not $np.HasExited) { Stop-Process -Id $np.Id -Force } } catch {}
 Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$rel.janelasNoActivate = @(Listar-Candidatas | ForEach-Object { $_ | Select-Object @{n='hwnd';e={[int64]$_.hwnd}}, classe, exStyle, visivel, regiao, x, y, w, h })
 $rel.falhas = $falhas
 $rel | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $Saida 'ilha.json') -Encoding UTF8
 exit ([int]($falhas -gt 0))
