@@ -127,6 +127,8 @@ try {
         "--porta=$PortaCdp",
         "--modo=$Modo",
         "--esperado=$Esperado",
+        "--ditado=$(if ($ConferirIlha) { '1' } else { '0' })",
+        "--desk=$(Join-Path $PSScriptRoot 'acao-desktop.ps1')",
         "--perfil-webview=$(Join-Path $env:LOCALAPPDATA 'se.dita.app')",
         "--prazo-modelo-ms=$($PrazoModeloMinutos * 60000)",
         "--wav=$wav",

@@ -28,6 +28,8 @@ const REF = arg("ref");
 const SAIDA = arg("saida");
 const SCRIPT_DIALOGO = arg("dialogo");
 const TEM_AUDIO = arg("tem-audio", "0") === "1";
+const DITADO = arg("ditado", "0") === "1";
+const SCRIPT_DESK = arg("desk");
 const PRAZO_MODELO_MS = Number(arg("prazo-modelo-ms", String(20 * 60_000)));
 const FOLGA_APOS_DISCO_MS = Number(arg("folga-ms", "8000"));
 const PERFIL_WEBVIEW = arg("perfil-webview"); // pasta de dados do WebView2 (DevToolsActivePort)
@@ -408,6 +410,93 @@ async function gravarPilula(rotulo) {
   };
 }
 
+function acaoDesk(args) {
+  return rodarProcesso("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT_DESK, ...args]).then((r) => r.out.trim());
+}
+
+async function conectarPilula() {
+  const porta = portaDoPerfil() ?? PORTA;
+  const alvos = await (await fetch(`http://127.0.0.1:${porta}/json`)).json();
+  const alvo = alvos.find((a) => a.type === "page" && String(a.url || "").includes("pilula") && a.webSocketDebuggerUrl);
+  if (!alvo) throw new ErroDeProva("pilula_ausente", "alvo CDP da pílula não encontrado");
+  return ClienteCdp.conectar(alvo.webSocketDebuggerUrl);
+}
+
+/** Centro físico (px de tela) do controle visível da pílula cujo rótulo casa com `padrao`. */
+function controleNaPilula(cp, padrao, excluir = "cancelar") {
+  return cp.avaliar(`(() => {
+    const re = new RegExp(${JSON.stringify(padrao)}, "i"), ex = new RegExp(${JSON.stringify(excluir)}, "i");
+    const vis = (e) => { const r = e.getBoundingClientRect(), c = getComputedStyle(e);
+      return r.width > 0 && r.height > 0 && c.visibility !== "hidden" && Number(c.opacity) > 0.05 && !e.closest("[hidden]"); };
+    const el = [...document.querySelectorAll("button,[role=button]")].filter(vis).find((e) => {
+      const t = [e.getAttribute("aria-label"), e.title, e.textContent].join(" ");
+      return re.test(t) && !ex.test(t);
+    });
+    if (!el) return null;
+    const r = el.getBoundingClientRect(), d = devicePixelRatio;
+    return { x: Math.round((screenX + r.left + r.width / 2) * d), y: Math.round((screenY + r.top + r.height / 2) * d),
+      rotulo: (el.getAttribute("aria-label") || el.title || el.textContent).trim().slice(0, 40), cursor: getComputedStyle(el).cursor };
+  })()`);
+}
+
+/**
+ * Fluxo real do ditado (aceite do arco, decisão do Founder): Bloco de Notas em primeiro plano,
+ * Ditar (mãos livres) com o mouse real, fala sintética pelo VB-CABLE (CABLE Output = microfone),
+ * Parar e colar, e filmagem da faixa de cima da tela + screencast da pílula até o texto aparecer.
+ */
+async function faseDitado(relatorio, chaves) {
+  const et = (relatorio.etapas.ditado = { entradas: JSON.parse((await acaoDesk(["entrada"])) || "[]") });
+  const np = JSON.parse(await acaoDesk(["notepad"]));
+  et.blocoDeNotas = np;
+  const cp = await conectarPilula();
+  try {
+    const jan = await cp.avaliar(`({ sx: screenX, sy: screenY, w: innerWidth, h: innerHeight, d: devicePixelRatio, tela: screen.width })`);
+    const d = jan.d, cx = Math.round((jan.sx + jan.w / 2) * d);
+    const faixa = { x: 0, y: 0, w: Math.round(jan.tela * d), h: Math.round(300 * d) };
+    const pastaFilme = path.join(SAIDA, "ditado-tela");
+    const sinal = path.join(SAIDA, "ditado-parar.sinal");
+    const filme = rodarProcesso("powershell", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT_DESK, "filmar",
+      "-X", String(faixa.x), "-Y", String(faixa.y), "-W", String(faixa.w), "-H", String(faixa.h), "-Pasta", pastaFilme, "-Parar", sinal, "-Fps", "12"]);
+    const screencast = await gravarPilula("ditado").catch((e) => ({ parar: async () => ({ erro: String(e) }) }));
+    const t0 = Date.now() / 1000;
+    const marcos = (et.marcos = []);
+    const marco = (nome, extra = {}) => marcos.push({ nome, t: Number((Date.now() / 1000).toFixed(3)), ...extra });
+
+    await acaoDesk(["mover", "-X", String(cx), "-Y", String(Math.round(jan.sy * d) + 2)]);
+    const ditar = await esperarCondicao(5000, "botão Ditar visível na pílula", () => controleNaPilula(cp, "ditar"));
+    marco("hover_aberta", { ditar });
+    const c1 = JSON.parse(await acaoDesk(["clicar", "-X", String(ditar.x), "-Y", String(ditar.y)]));
+    marco("clique_ditar", c1);
+    const parar = await esperarCondicao(8000, "botão Parar e colar (gravando em mãos livres)", () => controleNaPilula(cp, "parar"));
+    marco("gravando", { parar });
+    await rodarProcesso("powershell", ["-NoProfile", "-Command", `(New-Object Media.SoundPlayer '${WAV.replace(/'/g, "''")}').PlaySync()`]);
+    marco("fala_terminou");
+    const parar2 = (await controleNaPilula(cp, "parar")) || parar;
+    const c2 = JSON.parse(await acaoDesk(["clicar", "-X", String(parar2.x), "-Y", String(parar2.y)]));
+    marco("clique_parar_e_colar", c2);
+
+    let ultimo = "", estavelDesde = 0;
+    const texto = await esperarCondicao(4 * 60_000, "texto colado e estável no Bloco de Notas", async () => {
+      const r = JSON.parse(await acaoDesk(["texto", "-Janela", String(np.hwnd)]));
+      if (!r.texto) return null;
+      if (!ultimo) marco("texto_apareceu", { primeiroPlano: r.primeiroPlano });
+      if (r.texto !== ultimo) { ultimo = r.texto; estavelDesde = Date.now(); return null; }
+      return Date.now() - estavelDesde > 2500 ? r.texto : null;
+    });
+    marco("texto_estavel");
+    await esperar(3000);
+    fs.writeFileSync(sinal, "parar");
+    await filme.catch(() => {});
+    et.screencastPilula = await screencast.parar();
+    try { et.filmeTela = JSON.parse(fs.readFileSync(path.join(pastaFilme, "quadros.json"), "utf8").replace(/^\uFEFF/, "")); delete et.filmeTela.tempos; } catch {}
+    const conf = conferirPalavras(texto, chaves, 0.5);
+    Object.assign(et, conf, { duracaoS: Number((Date.now() / 1000 - t0).toFixed(1)), amostra: texto.slice(0, 300) });
+    return conf.passou;
+  } finally {
+    cp.fechar();
+  }
+}
+
 async function faseArquivos(cdp, relatorio, chaves) {
   await irPara(cdp, "Arquivos");
   const gravacao = await gravarPilula("arquivos").catch((e) => ({ parar: async () => ({ erro: String(e) }) }));
@@ -520,6 +609,10 @@ async function main() {
       } else {
         const reuOk = await faseReuniao(cdp, relatorio, chaves);
         relatorio.veredito = reuOk ? "corrigido_completo" : "produto_reuniao_texto_abaixo_do_limite";
+        if (reuOk && DITADO) {
+          const ditOk = await faseDitado(relatorio, chaves);
+          if (!ditOk) relatorio.veredito = "produto_ditado_texto_abaixo_do_limite";
+        }
       }
     }
   } catch (err) {
