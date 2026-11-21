@@ -8,9 +8,10 @@
 //! no recorte nativo (`CreateEllipticRgn` + `SetWindowRgn`), para que o clique fora da curva atravesse
 //! para a janela de baixo.
 use std::{
+    collections::VecDeque,
     sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, Weak,
     },
     time::{Duration, Instant},
 };
@@ -205,6 +206,82 @@ pub fn dentro_da_meia_elipse(w: f64, h: f64, px: f64, py: f64) -> bool {
     dx * dx + dy * dy <= 1.0
 }
 
+/// Retângulo físico `(x, y, w, h)`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub type Retangulo = (i32, i32, i32, i32);
+
+/// O que fazer quando a tela muda com o app aberto.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Conserto {
+    Nada,
+    /// Posição ou tamanho fora do certo: reaplica `SetWindowPos` + recorte.
+    Reaplicar,
+    /// A janela ficou presa num DPI diferente do monitor (o WebView2 desenharia na escala errada):
+    /// recria a janela, que nasce com o DPI atual.
+    Recriar,
+}
+
+/// Decide o conserto comparando o DPI da janela com o do monitor e os retângulos pedido, real e
+/// calculado para a tela de agora. DPI `0` significa leitura indisponível e não decide nada.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn decidir_conserto(
+    dpi_janela: u32,
+    dpi_monitor: u32,
+    esperado: Option<Retangulo>,
+    real: Option<Retangulo>,
+    calculado: Option<Retangulo>,
+) -> Conserto {
+    if dpi_janela != 0 && dpi_monitor != 0 && dpi_janela != dpi_monitor {
+        return Conserto::Recriar;
+    }
+    match (calculado, esperado) {
+        (Some(c), Some(e)) if c != e || real.is_some_and(|r| r != e) => Conserto::Reaplicar,
+        (Some(_), None) => Conserto::Reaplicar,
+        _ => Conserto::Nada,
+    }
+}
+
+/// No máximo `max` ações por `janela` de tempo: impede laço se outro código insistir em mover a ilha.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Debug)]
+pub struct Limite {
+    janela: Duration,
+    max: usize,
+    marcas: VecDeque<Instant>,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl Limite {
+    pub fn novo(janela: Duration, max: usize) -> Self {
+        Self {
+            janela,
+            max,
+            marcas: VecDeque::new(),
+        }
+    }
+
+    pub fn permitir(&mut self, agora: Instant) -> bool {
+        while self
+            .marcas
+            .front()
+            .is_some_and(|t| agora.duration_since(*t) >= self.janela)
+        {
+            self.marcas.pop_front();
+        }
+        if self.marcas.len() >= self.max {
+            return false;
+        }
+        self.marcas.push_back(agora);
+        true
+    }
+}
+
+/// Atrasos da conferência depois de um aviso de tela: o primeiro roda depois do `SetWindowPos`
+/// que o tao faz ao fim do `WM_DPICHANGED`; o segundo pega a área de trabalho atualizada tarde.
+pub const ATRASOS_CONFERENCIA: [Duration; 2] =
+    [Duration::from_millis(120), Duration::from_millis(700)];
+
 /// Construtores puros das mensagens do protocolo da aba (testáveis sem janela).
 pub fn msg_fase(fase: Fase) -> Value {
     json!({"tipo": "fase", "fase": fase.id()})
@@ -239,6 +316,18 @@ struct Interno {
     /// para que uma reabertura rápida invalide o vigia anterior antes do próximo ciclo.
     vigia_geracao_ativa: Arc<AtomicU64>,
     vigia_proxima_geracao: u64,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    limite_reaplicar: Limite,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    limite_recriar: Limite,
+}
+
+fn modo_da_fase(i: &Interno) -> ModoJanela {
+    match i.fase {
+        Fase::Ociosa => modo_ocioso_padrao(i),
+        Fase::Gravando | Fase::Processando => ModoJanela::Compacta,
+        Fase::MaosLivres => ModoJanela::Aberta,
+    }
 }
 
 /// Atualiza `modo` e a geração do vigia de cursor num único lugar (I-3):
@@ -297,36 +386,55 @@ fn modo_para_atividade_ociosa(i: &Interno) -> ModoJanela {
 pub struct Pilula {
     app: AppHandle,
     interno: Mutex<Interno>,
+    eu: OnceLock<Weak<Pilula>>,
+    recriando: AtomicBool,
+    geracao_conferencia: AtomicU64,
+}
+
+/// Cria a janela da ilha: transparente, sem foco, fora da barra de tarefas, escondida até o
+/// primeiro `SetWindowPos`. Também usada para recriá-la quando o DPI dela fica preso.
+fn construir_janela(app: &AppHandle, eu: Weak<Pilula>) -> Option<WebviewWindow> {
+    let (lw, lh) = ModoJanela::Repouso.dimensoes_padrao();
+    let janela = WebviewWindowBuilder::new(app, ROTULO, WebviewUrl::App("pilula.html".into()))
+        .title("Dita.se")
+        .inner_size(lw, lh)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false)
+        .on_navigation(crate::navegacao_permitida)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        .build();
+    let j = match janela {
+        Ok(j) => j,
+        Err(e) => {
+            crate::caminhos::nota(format!("ilha: não abriu ({e})"));
+            return None;
+        }
+    };
+    #[cfg(windows)]
+    if let Ok(h) = j.hwnd() {
+        crate::nativo::janela::sem_foco(h.0 as isize);
+        crate::nativo::janela::registrar_ilha(h.0 as isize);
+    }
+    // O tao trata o WM_DPICHANGED chamando este evento e, logo depois, faz o próprio SetWindowPos,
+    // que sobrescreveria a ilha: por isso a conferência roda adiada, e não aqui dentro.
+    j.on_window_event(move |ev| {
+        if let tauri::WindowEvent::ScaleFactorChanged { .. } = ev {
+            if let Some(p) = eu.upgrade() {
+                p.reconferir("escala");
+            }
+        }
+    });
+    Some(j)
 }
 
 impl Pilula {
     pub fn criar(app: &AppHandle, sempre_visivel: bool, atalho: &str) -> Arc<Self> {
-        let (lw, lh) = ModoJanela::Repouso.dimensoes_padrao();
-        let janela = WebviewWindowBuilder::new(app, ROTULO, WebviewUrl::App("pilula.html".into()))
-            .title("Dita.se")
-            .inner_size(lw, lh)
-            .resizable(false)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .always_on_top(true)
-            .skip_taskbar(true)
-            .focused(false)
-            .visible(false)
-            .on_navigation(crate::navegacao_permitida)
-            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-            .build();
-
-        if let Err(e) = &janela {
-            crate::caminhos::nota(format!("pílula: não abriu ({e})"));
-        }
-        #[cfg(windows)]
-        if let Ok(ref j) = janela {
-            if let Ok(h) = j.hwnd() {
-                crate::nativo::janela::sem_foco(h.0 as isize);
-            }
-        }
-
         let p = Arc::new(Self {
             app: app.clone(),
             interno: Mutex::new(Interno {
@@ -343,28 +451,184 @@ impl Pilula {
                 canal: None,
                 vigia_geracao_ativa: Arc::new(AtomicU64::new(0)),
                 vigia_proxima_geracao: 0,
+                limite_reaplicar: Limite::novo(Duration::from_secs(3), 8),
+                limite_recriar: Limite::novo(Duration::from_secs(20), 2),
             }),
+            eu: OnceLock::new(),
+            recriando: AtomicBool::new(false),
+            geracao_conferencia: AtomicU64::new(0),
         });
+        let _ = p.eu.set(Arc::downgrade(&p));
+        let _ = construir_janela(app, Arc::downgrade(&p));
 
-        // Recalcular posição quando a escala do monitor mudar (seção 3.4).
-        if let Ok(j) = janela {
-            let p_escala = p.clone();
-            j.on_window_event(move |ev| {
-                if let tauri::WindowEvent::ScaleFactorChanged { .. } = ev {
-                    p_escala.aplicar_janela();
+        // Tela cheia (EVENT_SYSTEM_FOREGROUND) e mudanças de tela (WM_DISPLAYCHANGE,
+        // WM_SETTINGCHANGE, deriva da posição): tudo por evento, zero consulta em repouso.
+        let p_cheia = Arc::downgrade(&p);
+        let p_tela = Arc::downgrade(&p);
+        crate::nativo::janela::observar(
+            Arc::new(move |ativa| {
+                if let Some(p) = p_cheia.upgrade() {
+                    p.definir_tela_cheia(ativa);
                 }
-            });
-        }
-
-        // Observar tela cheia por EVENT_SYSTEM_FOREGROUND (zero polling em repouso).
-        let p_tela = p.clone();
-        crate::nativo::janela::observar_tela_cheia(Arc::new(move |ativa| {
-            p_tela.definir_tela_cheia(ativa);
-        }));
+            }),
+            Arc::new(move |motivo| {
+                if let Some(p) = p_tela.upgrade() {
+                    p.reconferir(motivo);
+                }
+            }),
+        );
 
         p.enviar(json!({"tipo": "atalho", "simbolo": atalho}));
         p.mostrar(Fase::Ociosa);
+        // Abertura em DPI alto: o WM_DPICHANGED inicial do tao pode chegar depois do primeiro
+        // posicionamento; a conferência adiada corrige.
+        p.reconferir("abertura");
         p
+    }
+
+    /// Agenda a conferência da ilha depois de um aviso de tela. Avisos em rajada se juntam: só a
+    /// conferência do aviso mais recente roda no primeiro atraso.
+    pub fn reconferir(&self, motivo: &'static str) {
+        let Some(eu) = self.eu.get().cloned() else {
+            return;
+        };
+        let geracao = self.geracao_conferencia.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = std::thread::Builder::new()
+            .name("ditase.ilha.tela".into())
+            .spawn(move || {
+                for (n, atraso) in ATRASOS_CONFERENCIA.iter().enumerate() {
+                    std::thread::sleep(*atraso);
+                    let Some(p) = eu.upgrade() else {
+                        return;
+                    };
+                    if n == 0 && p.geracao_conferencia.load(Ordering::Acquire) != geracao {
+                        continue;
+                    }
+                    p.conferir(motivo);
+                }
+            });
+    }
+
+    #[cfg(not(windows))]
+    fn conferir(&self, _motivo: &'static str) {}
+
+    /// Compara a ilha com a tela de agora e conserta (reaplica ou recria), com limite contra laço.
+    #[cfg(windows)]
+    fn conferir(&self, motivo: &'static str) {
+        if self.recriando.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(j) = self.janela() else {
+            return;
+        };
+        let (visivel, (w_log, h_log)) = {
+            let i = self.interno.lock().unwrap();
+            (Self::deve_estar_visivel(&i), i.geometria)
+        };
+        if !visivel {
+            return;
+        }
+        let Ok(h) = j.hwnd() else {
+            return;
+        };
+        let hwnd = h.0 as isize;
+        let monitores = coletar_monitores(&j);
+        let calculado = escolher_topo(&monitores, w_log, h_log).map(|p| (p.x, p.y, p.w, p.h));
+        let dpi_janela = crate::nativo::janela::dpi_da_janela(hwnd);
+        let dpi_monitor = crate::nativo::janela::dpi_do_monitor(hwnd);
+        let esperado = crate::nativo::janela::retangulo_esperado();
+        let real = crate::nativo::janela::retangulo(hwnd);
+        let conserto = decidir_conserto(dpi_janela, dpi_monitor, esperado, real, calculado);
+        if conserto == Conserto::Nada && motivo != "abertura" {
+            return;
+        }
+        let permitido = {
+            let mut i = self.interno.lock().unwrap();
+            match conserto {
+                Conserto::Nada => true,
+                Conserto::Reaplicar => i.limite_reaplicar.permitir(Instant::now()),
+                Conserto::Recriar => i.limite_recriar.permitir(Instant::now()),
+            }
+        };
+        let telas: Vec<String> = monitores
+            .iter()
+            .map(|m| {
+                format!(
+                    "{}x{}@{},{} area {},{} {}x{} escala {}{}",
+                    m.w,
+                    m.h,
+                    m.x,
+                    m.y,
+                    m.work_x,
+                    m.work_y,
+                    m.work_w,
+                    m.work_h,
+                    m.escala,
+                    if m.principal { " principal" } else { "" }
+                )
+            })
+            .collect();
+        crate::caminhos::nota(format!(
+            "ilha: {motivo}: dpi janela {dpi_janela} monitor {dpi_monitor}; pedido {esperado:?} \
+             real {real:?} calculado {calculado:?}; telas [{}] -> {conserto:?}{}",
+            telas.join("; "),
+            if permitido {
+                ""
+            } else {
+                " (limite atingido, ignorado)"
+            }
+        ));
+        if !permitido {
+            return;
+        }
+        match conserto {
+            Conserto::Nada => {}
+            Conserto::Reaplicar => self.aplicar_janela(),
+            Conserto::Recriar => self.recriar(),
+        }
+    }
+
+    /// Recria a janela da ilha (o DPI de uma janela só é escolhido na criação ou num
+    /// `WM_DPICHANGED`; se o Windows não mandou, a janela nova nasce com o DPI do monitor).
+    #[cfg_attr(not(windows), allow(dead_code))]
+    fn recriar(&self) {
+        if self.recriando.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let Some(eu) = self.eu.get().cloned() else {
+            self.recriando.store(false, Ordering::Release);
+            return;
+        };
+        let _ = std::thread::Builder::new()
+            .name("ditase.ilha.recriar".into())
+            .spawn(move || {
+                let Some(p) = eu.upgrade() else {
+                    return;
+                };
+                {
+                    // A página nova volta ao repouso e reconecta o canal; o estado do ditado
+                    // (fase, download, progresso) é reenviado em `conectar`.
+                    let mut i = p.interno.lock().unwrap();
+                    i.canal = None;
+                    i.aviso_ate = None;
+                    let modo = modo_da_fase(&i);
+                    let _ = atualizar_modo_e_vigia(&mut i, modo);
+                }
+                if let Some(j) = p.janela() {
+                    let _ = j.destroy();
+                }
+                for _ in 0..60 {
+                    if p.janela().is_none() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let criada = construir_janela(&p.app, eu.clone()).is_some();
+                crate::caminhos::nota(format!("ilha: janela recriada ({criada})"));
+                p.recriando.store(false, Ordering::Release);
+                p.aplicar_janela();
+                p.reconferir("recriada");
+            });
     }
 
     fn janela(&self) -> Option<WebviewWindow> {
@@ -522,11 +786,7 @@ impl Pilula {
             if fase != Fase::Ociosa {
                 i.aviso_ate = None;
             }
-            let modo = match fase {
-                Fase::Ociosa => modo_ocioso_padrao(&i),
-                Fase::Gravando | Fase::Processando => ModoJanela::Compacta,
-                Fase::MaosLivres => ModoJanela::Aberta,
-            };
+            let modo = modo_da_fase(&i);
             atualizar_modo_e_vigia(&mut i, modo)
         };
         self.aplicar_janela();
@@ -954,6 +1214,131 @@ mod testes {
         }
     }
 
+    fn tela_runner(w: i32, h: i32, escala: f64) -> RetanguloMonitor {
+        RetanguloMonitor {
+            x: 0,
+            y: 0,
+            w,
+            h,
+            work_x: 0,
+            work_y: 0,
+            work_w: w,
+            work_h: h - 40,
+            escala,
+            principal: true,
+        }
+    }
+
+    fn ret(p: PosicaoIlha) -> Retangulo {
+        (p.x, p.y, p.w, p.h)
+    }
+
+    /// Defeito 1 do runner: 1024x768 -> 1920x1080 a 100% deixava a ilha em x=466.
+    #[test]
+    fn troca_de_resolucao_reaplica_no_centro_novo() {
+        let antes = ret(escolher_topo(&[tela_runner(1024, 768, 1.0)], 92.0, 7.0).unwrap());
+        assert_eq!(antes, (466, 0, 92, 7));
+        let depois = ret(escolher_topo(&[tela_runner(1920, 1080, 1.0)], 92.0, 7.0).unwrap());
+        assert_eq!(depois, (914, 0, 92, 7));
+        assert_eq!(
+            decidir_conserto(96, 96, Some(antes), Some(antes), Some(depois)),
+            Conserto::Reaplicar
+        );
+    }
+
+    /// Defeito 2: escala trocada com o app aberto e a janela presa em 96 DPI.
+    #[test]
+    fn janela_presa_em_dpi_antigo_e_recriada() {
+        for (dpi, escala, esperado) in [
+            (120, 1.25, (903, 0, 115, 9)),
+            (144, 1.5, (891, 0, 138, 11)),
+            (168, 1.75, (880, 0, 161, 12)),
+        ] {
+            let calc = ret(escolher_topo(&[tela_runner(1920, 1080, escala)], 92.0, 7.0).unwrap());
+            assert_eq!(calc, esperado, "escala {escala}");
+            let antigo = Some((466, 0, 92, 7));
+            assert_eq!(
+                decidir_conserto(96, dpi, antigo, antigo, Some(calc)),
+                Conserto::Recriar
+            );
+            // Depois de recriada (DPI certo), só falta posicionar.
+            assert_eq!(
+                decidir_conserto(dpi, dpi, None, Some((0, 0, 24, 24)), Some(calc)),
+                Conserto::Reaplicar
+            );
+        }
+    }
+
+    /// Defeito 3: abertura em 175% com a ilha 24x24 em (0,0) depois do SetWindowPos do tao.
+    #[test]
+    fn deriva_depois_do_tao_e_reaplicada() {
+        let calc = ret(escolher_topo(&[tela_runner(1920, 1080, 1.75)], 92.0, 7.0).unwrap());
+        assert_eq!(calc, (880, 0, 161, 12));
+        assert_eq!(
+            decidir_conserto(168, 168, Some(calc), Some((0, 0, 24, 24)), Some(calc)),
+            Conserto::Reaplicar
+        );
+        assert_eq!(
+            decidir_conserto(168, 168, Some(calc), Some(calc), Some(calc)),
+            Conserto::Nada
+        );
+    }
+
+    #[test]
+    fn leitura_de_dpi_indisponivel_nao_recria() {
+        let r = Some((466, 0, 92, 7));
+        assert_eq!(decidir_conserto(0, 168, r, r, r), Conserto::Nada);
+        assert_eq!(decidir_conserto(96, 0, r, r, r), Conserto::Nada);
+        assert_eq!(decidir_conserto(96, 96, r, r, None), Conserto::Nada);
+    }
+
+    #[test]
+    fn limite_impede_laco_e_libera_depois_da_janela() {
+        let mut l = Limite::novo(Duration::from_secs(3), 2);
+        let t0 = Instant::now();
+        assert!(l.permitir(t0));
+        assert!(l.permitir(t0 + Duration::from_millis(10)));
+        assert!(!l.permitir(t0 + Duration::from_millis(20)));
+        assert!(l.permitir(t0 + Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn conferencia_roda_depois_do_tao_e_de_novo_mais_tarde() {
+        assert!(ATRASOS_CONFERENCIA[0] >= Duration::from_millis(50));
+        assert!(ATRASOS_CONFERENCIA[1] > ATRASOS_CONFERENCIA[0]);
+    }
+
+    /// Os gatilhos existem no código: escala só agenda (não posiciona dentro do WM_DPICHANGED do
+    /// tao), e a camada nativa ouve resolução, configuração, deriva e DPI.
+    #[test]
+    fn gatilhos_de_tela_estao_ligados() {
+        let pilula = include_str!("pilula.rs");
+        let producao = pilula
+            .split("#[cfg(test)]\nmod testes")
+            .next()
+            .unwrap_or(pilula);
+        let trecho = producao
+            .split("WindowEvent::ScaleFactorChanged")
+            .nth(1)
+            .and_then(|t| t.split("Some(j)").next())
+            .unwrap_or("");
+        assert!(trecho.contains("reconferir(\"escala\")"));
+        assert!(!trecho.contains("aplicar_janela"));
+        assert!(producao.contains("reconferir(\"abertura\")"));
+        let nativo = include_str!("nativo/win_janela.rs");
+        for exigido in [
+            "WM_DISPLAYCHANGE",
+            "WM_SETTINGCHANGE",
+            "WM_DPICHANGED",
+            "EVENT_OBJECT_LOCATIONCHANGE",
+            "GetDpiForWindow",
+            "GetDpiForMonitor",
+            "GetCurrentProcessId",
+        ] {
+            assert!(nativo.contains(exigido), "falta {exigido}");
+        }
+    }
+
     #[test]
     fn protocolo_de_modo_aceita_geometria_exata_e_recusa_absurdos() {
         assert_eq!(interpretar_modo("aberta"), Some((ModoJanela::Aberta, None)));
@@ -1062,6 +1447,8 @@ mod testes {
             canal: None,
             vigia_geracao_ativa: Arc::new(AtomicU64::new(0)),
             vigia_proxima_geracao: 0,
+            limite_reaplicar: Limite::novo(Duration::from_secs(3), 8),
+            limite_recriar: Limite::novo(Duration::from_secs(20), 2),
         }
     }
 

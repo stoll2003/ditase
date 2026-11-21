@@ -70,7 +70,24 @@ pub mod janela {
     pub fn cursor_fora_da_janela(_hwnd: isize) -> bool {
         false
     }
-    pub fn observar_tela_cheia(_cb: Arc<dyn Fn(bool) + Send + Sync>) {}
+    pub fn observar(
+        _tela_cheia: Arc<dyn Fn(bool) + Send + Sync>,
+        _tela: Arc<dyn Fn(&'static str) + Send + Sync>,
+    ) {
+    }
+    pub fn registrar_ilha(_hwnd: isize) {}
+    pub fn retangulo_esperado() -> Option<(i32, i32, i32, i32)> {
+        None
+    }
+    pub fn retangulo(_hwnd: isize) -> Option<(i32, i32, i32, i32)> {
+        None
+    }
+    pub fn dpi_da_janela(_hwnd: isize) -> u32 {
+        96
+    }
+    pub fn dpi_do_monitor(_hwnd: isize) -> u32 {
+        96
+    }
 }
 
 #[cfg(not(windows))]
