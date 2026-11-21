@@ -113,6 +113,12 @@ jobs:
         if: steps.modo.outputs.tauri == 'true'
         run: npm ci --prefix scripts/windows/tauri-cli --ignore-scripts --no-audit --no-fund
 
+      # O build.rs do ditase monta windows/app-dist (interface + pílula); o CLI do Tauri
+      # confere essa pasta antes de compilar, então o Cargo roda primeiro.
+      - name: Compilar o app (gera windows/app-dist)
+        if: steps.modo.outputs.tauri == 'true'
+        run: cargo build --locked --release -p ditase
+
       - name: Build Tauri (NSIS por usuário, sem assinatura do atualizador)
         if: steps.modo.outputs.tauri == 'true'
         working-directory: windows
