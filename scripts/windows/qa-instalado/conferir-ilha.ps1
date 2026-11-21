@@ -191,8 +191,10 @@ function Medir($h) {
     $mi = New-Object QaIlha+MONITORINFO; $mi.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($mi)
     [void][QaIlha]::GetMonitorInfo($mon, [ref]$mi)
     [ordered]@{
+        t = [Math]::Round([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() / 1000.0, 3)  # mesmo relógio do ditado.log
         visivel = [QaIlha]::IsWindowVisible($h)
         modoDpi = [QaIlha]::ModoDpi($h)
+        regiaoTipo = $(& { $x = $false; [QaIlha]::Regiao($h, 0, 0, [ref]$x) })
         x = $r.L; y = $r.T; w = $r.R - $r.L; h = $r.B - $r.T
         escala = [QaIlha]::GetDpiForWindow($h) / 96.0
         workX = $mi.rcWork.L; workY = $mi.rcWork.T; workW = $mi.rcWork.R - $mi.rcWork.L
