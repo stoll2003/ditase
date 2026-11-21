@@ -366,6 +366,33 @@ try {
         # O patch limita a 2 recriações a cada 20 s (antilaço); troca de escala espaçada como um usuário.
         Start-Sleep -Seconds 11
     }
+    # Rajada (patch v2 do Dev Front): trocas a cada ~6,5 s até a 3ª cair no limite antilaço de 2
+    # recriações em 20 s. Passa se o app registrar "ilha: retentativa: ... -> Recriar" e a ilha ficar
+    # na escala final sem nova troca.
+    $rajada = @(125, 150, 175) | Where-Object { $_ -le $info[3] }
+    if ($rajada.Count -eq 3) {
+        Start-Sleep -Seconds 21  # zera a janela do limite
+        $logApp = if ($env:DITASE_RAIZ) { Join-Path $env:DITASE_RAIZ 'ditado.log' } else { '' }
+        $linhasAntes = if ($logApp -and (Test-Path $logApp)) { @(Get-Content -LiteralPath $logApp).Count } else { 0 }
+        $t0 = Get-Date
+        foreach ($pct in $rajada) { [void][QaIlha]::DefinirEscala($pct); Start-Sleep -Milliseconds 6500 }
+        Start-Sleep -Seconds 22  # o limite libera ~20 s depois da 1ª recriação; sem nova troca
+        $m = Esperar-Tamanho $ilha 92 7 8
+        $dR = $false; $tipoR = [QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$dR)
+        $cR = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$cR)
+        $novas = if ($logApp -and (Test-Path $logApp)) { @(Get-Content -LiteralPath $logApp | Select-Object -Skip $linhasAntes | Where-Object { $_ -match 'ilha:' }) } else { @() }
+        $retentativa = @($novas | Where-Object { $_ -match 'ilha: retentativa:.*-> Recriar' })
+        $limite = @($novas | Where-Object { $_ -match 'limite atingido' })
+        $escFinal = [Math]::Round($m[0].escala * 100)
+        $rel.rajada = [ordered]@{ duracaoS = [int]((Get-Date) - $t0).TotalSeconds; medido = $m[0]; esperado = $m[1]; regiaoTipo = $tipoR
+            limiteAtingido = $limite.Count; retentativas = $retentativa.Count; linhasIlha = $novas }
+        Checar 'rajada_limite_e_retentativa' (($limite.Count -ge 1) -and ($retentativa.Count -ge 1) -and $m[2] -and ($escFinal -eq 175) -and $dR -and -not $cR) ([ordered]@{
+            limiteAtingido = $limite.Count; retentativas = $retentativa.Count; escalaFinal = $escFinal; medido = $m[0]; esperado = $m[1]; recorteOk = ($dR -and -not $cR) })
+        Recortar $m[0] 'ilha-rajada-175.png'
+    } else {
+        $rel.limites += 'Rajada não executada: o monitor não aceita 125, 150 e 175%.'
+    }
+
     # Abertura já em cada escala acima de 100% (caso mais comum): reinicia o app instalado.
     $altas = @($possiveis | Where-Object { $_ -gt 100 })
     if ($Executavel) {
