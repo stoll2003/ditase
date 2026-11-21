@@ -192,16 +192,45 @@ pub struct DiscoDeBlocos {
     pub raiz: PathBuf,
     escrita: Escrita,
 }
+/// Fixa a raiz no caminho real do pai. Links e junções acima da raiz são do sistema ou da
+/// política do perfil (/var no macOS, AppData redirecionado ou OneDrive no Windows) e ficam
+/// resolvidos aqui, uma vez. Da raiz para dentro, nenhum link ou ponto de reparse é seguido.
+fn raiz_real(raiz: PathBuf) -> PathBuf {
+    let (Some(pai), Some(nome)) = (raiz.parent(), raiz.file_name()) else {
+        return raiz;
+    };
+    if pai.as_os_str().is_empty() {
+        return raiz;
+    }
+    match fs::canonicalize(pai) {
+        Ok(real) => sem_prefixo_verbatim(real).join(nome),
+        Err(_) => raiz,
+    }
+}
+/// `canonicalize` no Windows devolve `\\?\C:\...`; tira o prefixo quando é um disco comum.
+fn sem_prefixo_verbatim(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let t = p.to_string_lossy();
+        if let Some(resto) = t.strip_prefix(r"\\?\") {
+            let b = resto.as_bytes();
+            if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+                return PathBuf::from(resto);
+            }
+        }
+    }
+    p
+}
 impl DiscoDeBlocos {
     pub fn new(raiz: PathBuf) -> Self {
-        Self {
-            raiz,
-            escrita: std::sync::Arc::new(Self::escrita_duravel),
-        }
+        Self::com_escrita(raiz, std::sync::Arc::new(Self::escrita_duravel))
     }
     /// Como `new`, com outra função de gravação (Swift `init(raiz:escrita:)`).
     pub fn com_escrita(raiz: PathBuf, escrita: Escrita) -> Self {
-        Self { raiz, escrita }
+        Self {
+            raiz: raiz_real(raiz),
+            escrita,
+        }
     }
     /// Temporário privado (0600), sincronização do arquivo, renomeação e sincronização da pasta.
     pub fn escrita_duravel(dados: &[u8], destino: &Path) -> io::Result<()> {
