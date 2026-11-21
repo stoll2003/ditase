@@ -19,8 +19,8 @@ use std::sync::{
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
-        CreateEllipticRgn, DeleteObject, MonitorFromWindow, SetWindowRgn, HGDIOBJ,
-        MONITOR_DEFAULTTOPRIMARY,
+        CreateEllipticRgn, CreateRectRgn, DeleteObject, GetWindowRgn, MonitorFromWindow,
+        PtInRegion, SetWindowRgn, COMPLEXREGION, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY,
     },
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentProcessId},
     UI::{
@@ -91,6 +91,30 @@ pub fn dpi_do_monitor(hwnd: isize) -> u32 {
             0
         }
     }
+}
+
+/// Tipo da região da janela (`GetWindowRgn`: 0 sem região, 1 vazia, 2 retângulo, 3 complexa) e
+/// se o canto inferior esquerdo está fora dela (como deve estar na meia elipse).
+pub fn estado_da_regiao(hwnd: isize) -> (i32, bool) {
+    unsafe {
+        let rgn = CreateRectRgn(0, 0, 0, 0);
+        if rgn.is_invalid() {
+            return (0, false);
+        }
+        let tipo = GetWindowRgn(HWND(hwnd as *mut _), rgn).0;
+        let canto_fora = match retangulo(hwnd) {
+            Some((_, _, _, h)) if tipo != 0 => !PtInRegion(rgn, 0, h - 1).as_bool(),
+            _ => false,
+        };
+        let _ = DeleteObject(HGDIOBJ(rgn.0));
+        (tipo, canto_fora)
+    }
+}
+
+/// Verdadeiro quando a região é a meia elipse: complexa e com o canto inferior esquerdo fora.
+pub fn regiao_eliptica(hwnd: isize) -> bool {
+    let (tipo, canto_fora) = estado_da_regiao(hwnd);
+    tipo == COMPLEXREGION.0 && canto_fora
 }
 
 /// Posiciona, redimensiona e opcionalmente mostra a ilha numa única chamada nativa,

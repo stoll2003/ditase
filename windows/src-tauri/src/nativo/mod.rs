@@ -88,6 +88,12 @@ pub mod janela {
     pub fn dpi_do_monitor(_hwnd: isize) -> u32 {
         96
     }
+    pub fn estado_da_regiao(_hwnd: isize) -> (i32, bool) {
+        (3, true)
+    }
+    pub fn regiao_eliptica(_hwnd: isize) -> bool {
+        true
+    }
 }
 
 #[cfg(not(windows))]

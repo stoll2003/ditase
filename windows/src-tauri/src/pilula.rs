@@ -231,9 +231,15 @@ pub fn decidir_conserto(
     esperado: Option<Retangulo>,
     real: Option<Retangulo>,
     calculado: Option<Retangulo>,
+    regiao_eliptica: bool,
 ) -> Conserto {
     if dpi_janela != 0 && dpi_monitor != 0 && dpi_janela != dpi_monitor {
         return Conserto::Recriar;
+    }
+    // Achado do Par: depois de recriar, a região às vezes volta a ser retângulo (tipo 2) sem mudar
+    // o retângulo da janela; os cantos passariam a engolir o clique.
+    if calculado.is_some() && esperado.is_some() && !regiao_eliptica {
+        return Conserto::Reaplicar;
     }
     match (calculado, esperado) {
         (Some(c), Some(e)) if c != e || real.is_some_and(|r| r != e) => Conserto::Reaplicar,
@@ -292,6 +298,22 @@ impl Limite {
 /// que o tao faz ao fim do `WM_DPICHANGED`; o segundo pega a área de trabalho atualizada tarde.
 pub const ATRASOS_CONFERENCIA: [Duration; 2] =
     [Duration::from_millis(120), Duration::from_millis(700)];
+
+/// Depois de abrir ou recriar a janela, conferências extras: o WebView2 termina de montar mais
+/// tarde, e é nessa janela de tempo que a região já foi vista voltando a retângulo.
+pub const ATRASOS_DEPOIS_DE_CRIAR: [Duration; 4] = [
+    Duration::from_millis(120),
+    Duration::from_millis(700),
+    Duration::from_millis(2000),
+    Duration::from_millis(5000),
+];
+
+pub fn atrasos_para(motivo: &str) -> &'static [Duration] {
+    match motivo {
+        "abertura" | "recriada" => &ATRASOS_DEPOIS_DE_CRIAR,
+        _ => &ATRASOS_CONFERENCIA,
+    }
+}
 
 /// Construtores puros das mensagens do protocolo da aba (testáveis sem janela).
 pub fn msg_fase(fase: Fase) -> Value {
@@ -509,8 +531,10 @@ impl Pilula {
         let _ = std::thread::Builder::new()
             .name("ditase.ilha.tela".into())
             .spawn(move || {
-                for (n, atraso) in ATRASOS_CONFERENCIA.iter().enumerate() {
-                    std::thread::sleep(*atraso);
+                let mut decorrido = Duration::ZERO;
+                for (n, atraso) in atrasos_para(motivo).iter().enumerate() {
+                    std::thread::sleep(atraso.saturating_sub(decorrido));
+                    decorrido = *atraso;
                     let Some(p) = eu.upgrade() else {
                         return;
                     };
@@ -573,7 +597,10 @@ impl Pilula {
         let dpi_monitor = crate::nativo::janela::dpi_do_monitor(hwnd);
         let esperado = crate::nativo::janela::retangulo_esperado();
         let real = crate::nativo::janela::retangulo(hwnd);
-        let conserto = decidir_conserto(dpi_janela, dpi_monitor, esperado, real, calculado);
+        let (tipo_regiao, canto_fora) = crate::nativo::janela::estado_da_regiao(hwnd);
+        let eliptica = crate::nativo::janela::regiao_eliptica(hwnd);
+        let conserto =
+            decidir_conserto(dpi_janela, dpi_monitor, esperado, real, calculado, eliptica);
         if conserto == Conserto::Nada && motivo != "abertura" {
             return;
         }
@@ -616,7 +643,8 @@ impl Pilula {
             .collect();
         crate::caminhos::nota(format!(
             "ilha: {motivo}: dpi janela {dpi_janela} monitor {dpi_monitor}; pedido {esperado:?} \
-             real {real:?} calculado {calculado:?}; telas [{}] -> {conserto:?}{}",
+             real {real:?} calculado {calculado:?}; regiao tipo {tipo_regiao} canto fora \
+             {canto_fora}; telas [{}] -> {conserto:?}{}",
             telas.join("; "),
             if permitido {
                 ""
@@ -1290,7 +1318,7 @@ mod testes {
         let depois = ret(escolher_topo(&[tela_runner(1920, 1080, 1.0)], 92.0, 7.0).unwrap());
         assert_eq!(depois, (914, 0, 92, 7));
         assert_eq!(
-            decidir_conserto(96, 96, Some(antes), Some(antes), Some(depois)),
+            decidir_conserto(96, 96, Some(antes), Some(antes), Some(depois), true),
             Conserto::Reaplicar
         );
     }
@@ -1307,12 +1335,12 @@ mod testes {
             assert_eq!(calc, esperado, "escala {escala}");
             let antigo = Some((466, 0, 92, 7));
             assert_eq!(
-                decidir_conserto(96, dpi, antigo, antigo, Some(calc)),
+                decidir_conserto(96, dpi, antigo, antigo, Some(calc), true),
                 Conserto::Recriar
             );
             // Depois de recriada (DPI certo), só falta posicionar.
             assert_eq!(
-                decidir_conserto(dpi, dpi, None, Some((0, 0, 24, 24)), Some(calc)),
+                decidir_conserto(dpi, dpi, None, Some((0, 0, 24, 24)), Some(calc), true),
                 Conserto::Reaplicar
             );
         }
@@ -1324,21 +1352,54 @@ mod testes {
         let calc = ret(escolher_topo(&[tela_runner(1920, 1080, 1.75)], 92.0, 7.0).unwrap());
         assert_eq!(calc, (880, 0, 161, 12));
         assert_eq!(
-            decidir_conserto(168, 168, Some(calc), Some((0, 0, 24, 24)), Some(calc)),
+            decidir_conserto(168, 168, Some(calc), Some((0, 0, 24, 24)), Some(calc), true),
             Conserto::Reaplicar
         );
         assert_eq!(
-            decidir_conserto(168, 168, Some(calc), Some(calc), Some(calc)),
+            decidir_conserto(168, 168, Some(calc), Some(calc), Some(calc), true),
+            Conserto::Nada
+        );
+    }
+
+    /// Achado do Par (run 44888186295): depois de recriar, retângulo certo mas região tipo 2.
+    #[test]
+    fn regiao_retangular_com_retangulo_certo_e_reaplicada() {
+        let r = Some((891, 0, 138, 11));
+        assert_eq!(
+            decidir_conserto(144, 144, r, r, r, false),
+            Conserto::Reaplicar
+        );
+        assert_eq!(decidir_conserto(144, 144, r, r, r, true), Conserto::Nada);
+        // DPI preso continua pedindo recriação antes de tudo.
+        assert_eq!(
+            decidir_conserto(144, 168, r, r, r, false),
+            Conserto::Recriar
+        );
+        // Escondida (sem retângulo pedido): nada a recortar.
+        assert_eq!(
+            decidir_conserto(144, 144, None, None, None, false),
             Conserto::Nada
         );
     }
 
     #[test]
+    fn depois_de_criar_confere_tambem_mais_tarde() {
+        assert_eq!(
+            atrasos_para("recriada").last(),
+            Some(&Duration::from_millis(5000))
+        );
+        assert_eq!(atrasos_para("abertura").len(), 4);
+        assert_eq!(atrasos_para("configuracao"), &ATRASOS_CONFERENCIA[..]);
+        let nativo = include_str!("nativo/win_janela.rs");
+        assert!(nativo.contains("GetWindowRgn") && nativo.contains("PtInRegion"));
+    }
+
+    #[test]
     fn leitura_de_dpi_indisponivel_nao_recria() {
         let r = Some((466, 0, 92, 7));
-        assert_eq!(decidir_conserto(0, 168, r, r, r), Conserto::Nada);
-        assert_eq!(decidir_conserto(96, 0, r, r, r), Conserto::Nada);
-        assert_eq!(decidir_conserto(96, 96, r, r, None), Conserto::Nada);
+        assert_eq!(decidir_conserto(0, 168, r, r, r, true), Conserto::Nada);
+        assert_eq!(decidir_conserto(96, 0, r, r, r, true), Conserto::Nada);
+        assert_eq!(decidir_conserto(96, 96, r, r, None, true), Conserto::Nada);
     }
 
     #[test]
