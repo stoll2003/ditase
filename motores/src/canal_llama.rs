@@ -212,13 +212,25 @@ mod testes {
             let mut canal = rustls::StreamOwned::new(tls, socket);
             let mut recebeu = false;
             let mut leitor = BufReader::new(&mut canal);
+            let mut tamanho = 0usize;
             loop {
                 let mut linha = String::new();
                 match leitor.read_line(&mut linha) {
                     Ok(0) | Err(_) => return false,
                     Ok(_) if linha == "\r\n" => break,
-                    _ => recebeu |= linha.trim_end().to_ascii_lowercase() == esperado,
+                    _ => {
+                        let l = linha.trim_end().to_ascii_lowercase();
+                        if let Some(v) = l.strip_prefix("content-length:") {
+                            tamanho = v.trim().parse().unwrap_or(0);
+                        }
+                        recebeu |= l == esperado;
+                    }
                 }
+            }
+            // Lê o corpo antes de responder: fechar com dados não lidos gera RST e corta a resposta.
+            let mut corpo = vec![0; tamanho];
+            if std::io::Read::read_exact(&mut leitor, &mut corpo).is_err() {
+                return false;
             }
             let _ = canal.write_all(resposta.as_bytes());
             let _ = canal.flush();
