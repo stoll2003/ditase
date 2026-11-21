@@ -1,6 +1,7 @@
 ﻿param(
     [Parameter(Mandatory = $true)][int]$ProcessoApp,
     [Parameter(Mandatory = $true)][string]$Saida,
+    [string]$Executavel = '',
     [int[]]$Escalas = @(100, 125, 150, 175, 200, 250)
 )
 
@@ -83,6 +84,10 @@ public static class QaIlha {
     [DllImport("user32.dll")] static extern int QueryDisplayConfig(uint f, ref uint np, [Out] PATH_INFO[] p, ref uint nm, [Out] MODE_INFO[] m, IntPtr t);
     [DllImport("user32.dll")] static extern int DisplayConfigGetDeviceInfo(ref DPI_GET g);
     [DllImport("user32.dll")] static extern int DisplayConfigSetDeviceInfo(ref DPI_SET s);
+    [DllImport("user32.dll")] public static extern IntPtr GetWindowDpiAwarenessContext(IntPtr h);
+    [DllImport("user32.dll")] public static extern int GetAwarenessFromDpiAwarenessContext(IntPtr c);
+    // 0 = sem DPI, 1 = sistema, 2 = por monitor (v1 ou v2).
+    public static int ModoDpi(IntPtr h) { return GetAwarenessFromDpiAwarenessContext(GetWindowDpiAwarenessContext(h)); }
     [DllImport("shcore.dll")] public static extern int GetDpiForMonitor(IntPtr m, int t, out uint x, out uint y);
     [DllImport("user32.dll")] public static extern IntPtr MonitorFromWindow(IntPtr h, uint f);
     public static uint DpiDoMonitor(IntPtr h) { uint x, y; GetDpiForMonitor(MonitorFromWindow(h, 2), 0, out x, out y); return x; }
@@ -174,6 +179,7 @@ function Medir($h) {
     [void][QaIlha]::GetMonitorInfo($mon, [ref]$mi)
     [ordered]@{
         visivel = [QaIlha]::IsWindowVisible($h)
+        modoDpi = [QaIlha]::ModoDpi($h)
         x = $r.L; y = $r.T; w = $r.R - $r.L; h = $r.B - $r.T
         escala = [QaIlha]::GetDpiForWindow($h) / 96.0
         workX = $mi.rcWork.L; workY = $mi.rcWork.T; workW = $mi.rcWork.R - $mi.rcWork.L
@@ -337,6 +343,29 @@ try {
             $rel.limites += "Escala $pct% não aplicada pelo sistema na sessão (sistema=$sistema%, monitor=$dpiMon%)."
         } elseif (-not $item.ok) { $falhas++ }
         Write-Host ("escala {0}%: código {1}, sistema {2}%, monitor {3}%, ilha {4}%, ok={5}" -f $pct, $rc, $sistema, $dpiMon, $aplicada, $item.ok)
+    }
+    # Abertura já em escala alta (caso mais comum): reinicia o app instalado com a escala trocada.
+    $alta = @($possiveis | Where-Object { $_ -gt 100 } | Sort-Object -Descending | Select-Object -First 1)
+    if ($Executavel -and $alta) {
+        $pctAlta = $alta[0]
+        [void][QaIlha]::DefinirEscala($pctAlta)
+        Start-Sleep -Milliseconds 1500
+        Stop-Process -Id $ProcessoApp -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        $novo = Start-Process -FilePath $Executavel -PassThru
+        $script:ProcessoApp = $novo.Id
+        $ilha = [IntPtr]::Zero; $fimN = (Get-Date).AddSeconds(30)
+        while ($ilha -eq [IntPtr]::Zero -and (Get-Date) -lt $fimN) { Start-Sleep -Milliseconds 300; $ilha = Achar-Ilha }
+        if ($ilha -eq [IntPtr]::Zero) {
+            Checar "abertura_em_$pctAlta" $false ([ordered]@{ motivo = 'ilha não apareceu após reiniciar' })
+        } else {
+            $m = Esperar-Tamanho $ilha 92 7 20
+            $d1 = $false; [void][QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$d1)
+            $d2 = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$d2)
+            Checar "abertura_em_$pctAlta" ($m[2] -and $d1 -and -not $d2) ([ordered]@{ medido = $m[0]; esperado = $m[1]; recorteOk = ($d1 -and -not $d2) })
+            Recortar $m[0] ("ilha-abertura-{0}.png" -f $pctAlta)
+        }
+        Stop-Process -Id $script:ProcessoApp -Force -ErrorAction SilentlyContinue
     }
     [void][QaIlha]::DefinirEscala($orig)
     if ($res) { [void][QaIlha]::RestaurarResolucao() }

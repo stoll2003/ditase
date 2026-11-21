@@ -166,7 +166,7 @@ try {
     if ($ConferirIlha -and -not $procApp.HasExited) {
         Write-Host 'Conferindo a ilha instalada (posição, foco, cantos e escalas)...'
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'conferir-ilha.ps1') `
-            -ProcessoApp $procApp.Id -Saida (Join-Path $Saida 'ilha')
+            -ProcessoApp $procApp.Id -Saida (Join-Path $Saida 'ilha') -Executavel $Executavel
         $codigoIlha = $LASTEXITCODE
     } elseif ($ConferirIlha) {
         $codigoIlha = 1
