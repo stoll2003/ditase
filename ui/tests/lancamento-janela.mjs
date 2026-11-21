@@ -7,6 +7,8 @@ const reuniao = {
   fonte: "macEMicrofone",
 };
 let pronto = false;
+let progresso = 0;
+const motivo = () => `Baixando o modelo de fala: ${progresso}%`;
 let microfone = "negada";
 let erroEstado;
 let leituras = 0;
@@ -35,13 +37,14 @@ window.__TAURI__ = {
     switch (metodo) {
       case "estado": return JSON.stringify({
         fase: "parado", permissoes: { microfone }, atalho: { simbolo: "Ctrl" },
-        reconhecedor: { estado: pronto ? "pronto" : "carregando" },
+        reconhecedor: { estado: pronto ? "pronto" : "carregando", detalhe: pronto ? "" : motivo() },
       });
       case "lancamento.estado":
         leituras++;
         if (erroEstado) throw erroEstado;
         return JSON.stringify({
           disponivel: pronto,
+          ...(pronto ? {} : { motivoIndisponibilidade: motivo() }),
           permissoes: { audioSistema: "concedida", microfone },
           arquivos: arquivoSalvo ? [leve(arquivo)] : [],
           anteriores: reuniaoSalva ? [leve(reuniao)] : [],
@@ -88,6 +91,10 @@ try {
   location.hash = "#/arquivos";
   await import("/src/main.tsx");
   await esperar("Arquivos não exibiu o estado inicial", () => leituras > 0 && botao("Escolher arquivo")?.disabled);
+  await esperar("Arquivos não mostrou o download em 0%", () => temTexto(motivo()));
+  progresso = 40;
+  emitir("estado"); // O carregador só publica "estado"; o reconhecedor segue "carregando".
+  await esperar("O percentual do download ficou congelado na tela", () => temTexto(motivo()));
   pronto = true;
   emitir("estado"); // É o único assunto publicado pelo carregador da v1.0.1.
   await esperar("Arquivos ficou desabilitado após o Parakeet pronto", () => botao("Escolher arquivo")?.disabled === false);
@@ -112,7 +119,7 @@ try {
   erroEstado = undefined;
   botao("Tentar carregar de novo").click();
   await esperar("A nova tentativa não reabilitou Arquivos", () => botao("Escolher arquivo")?.disabled === false);
-  resultado.textContent = "PASSOU: modelo, arquivo, microfone, reunião, falha da ponte e nova tentativa.";
+  resultado.textContent = "PASSOU: percentual do download, modelo, arquivo, microfone, reunião, falha da ponte e nova tentativa.";
   resultado.dataset.estado = "passou";
 } catch (erro) {
   resultado.textContent = "FALHOU: " + erro.message;

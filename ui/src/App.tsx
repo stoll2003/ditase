@@ -33,12 +33,15 @@ export default function App() {
     useDados<Lancamento>("lancamento.estado", {}, ["lancamento"], mesclarLancamento);
   const win = plataforma() === "windows";
   const estadoDaFala = estado?.reconhecedor.estado;
+  // O motivo ("Baixando o modelo de fala: 42%") muda sem mudar o estado, que segue "carregando".
+  const detalheDaFala = estado?.reconhecedor.detalhe;
   const permissaoDoMicrofone = estado?.permissoes.microfone;
   // No Windows, a carga do reconhecedor e a volta dos ajustes de privacidade publicam "estado".
-  // Só as mudanças que interessam às duas telas pedem outra leitura do acervo.
+  // Só as mudanças que interessam às duas telas pedem outra leitura do acervo (o carregador
+  // limita o progresso a uma publicação a cada 500 ms).
   useEffect(() => {
     if (win && estadoDaFala) recarregarLancamento();
-  }, [win, estadoDaFala, permissaoDoMicrofone, recarregarLancamento]);
+  }, [win, estadoDaFala, detalheDaFala, permissaoDoMicrofone, recarregarLancamento]);
   const [destaque, destacar] = useState<string>();
   useEffect(() => {
     const receber = (evento: Event) => {
