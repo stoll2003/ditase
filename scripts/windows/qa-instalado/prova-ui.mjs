@@ -29,6 +29,8 @@ const SAIDA = arg("saida");
 const SCRIPT_DIALOGO = arg("dialogo");
 const TEM_AUDIO = arg("tem-audio", "0") === "1";
 const DITADO = arg("ditado", "0") === "1";
+const IA4B = arg("ia4b", "0") === "1";
+const MODELO_4B = "Qwen3.5-4B-Q4_K_M.gguf";
 const SCRIPT_DESK = arg("desk");
 const PRAZO_MODELO_MS = Number(arg("prazo-modelo-ms", String(20 * 60_000)));
 const FOLGA_APOS_DISCO_MS = Number(arg("folga-ms", "8000"));
@@ -497,6 +499,64 @@ async function faseDitado(relatorio, chaves) {
   }
 }
 
+/**
+ * Modelo 4B pelo app instalado (critérios A2-A4): padrão no perfil novo, download pela tela de Ajustes
+ * com cancelar no meio e continuar até instalar (o app confere o SHA-256). Depois disso a limpeza do
+ * ditado e o resumo da reunião rodam com o 4B real (A5), nas fases seguintes.
+ */
+async function faseModelo4B(cdp, relatorio) {
+  const et = (relatorio.etapas.modelo4b = { marcos: [] });
+  const marco = (nome, extra = {}) => et.marcos.push({ nome, t: Number((Date.now() / 1000).toFixed(3)), ...extra });
+  const est0 = await consultarPonte(cdp, "estado");
+  const aj0 = await consultarPonte(cdp, "ajustes.ler");
+  et.padrao = { modeloIA: est0.modeloIA, prefModelo: aj0?.valores?.modelo, limpezaIA: aj0?.valores?.limpezaIA, modeloPadrao: aj0?.modeloPadrao };
+  const padraoOk = est0?.modeloIA?.arquivo === MODELO_4B && aj0?.valores?.modelo === MODELO_4B && aj0?.modeloPadrao === MODELO_4B;
+  if (!padraoOk) throw new ErroDeProva("produto_modelo_padrao", "perfil novo não está com o 4B por padrão", et.padrao);
+
+  await irPara(cdp, "Ajustes");
+  relatorio.screenshots.push(await cdp.screenshot("06-ajustes-modelo-4b.png"));
+  const b1 = await clicarBotaoPorTexto(cdp, "Baixar modelo");
+  if (!b1.ok) throw new ErroDeProva("ui_controle_ausente", "Baixar modelo não clicável em Ajustes", b1);
+  marco("baixar");
+  const parcial = await esperarCondicao(5 * 60_000, "download do 4B passar de 15%", async () => {
+    const m = (await consultarPonte(cdp, "estado")).modeloIA;
+    if (m.estado === "falhou") throw new ErroDeProva("produto_download_falhou", m.detalhe || "download falhou", m);
+    return m.estado === "baixando" && m.feito / m.tamanho > 0.15 ? m : null;
+  });
+  marco("parcial", { feito: parcial.feito, tamanho: parcial.tamanho });
+  relatorio.screenshots.push(await cdp.screenshot("07-ajustes-baixando.png"));
+  const bc = await clicarBotaoPorTexto(cdp, "Cancelar");
+  if (!bc.ok) throw new ErroDeProva("ui_controle_ausente", "Cancelar download não clicável", bc);
+  const cancelado = await esperarCondicao(30_000, "download cancelado com parcial guardado", async () => {
+    const m = (await consultarPonte(cdp, "estado")).modeloIA;
+    return m.estado !== "baixando" && m.estado !== "conferindo" && (m.feito || 0) > 0 ? m : null;
+  });
+  marco("cancelado", { estado: cancelado.estado, feito: cancelado.feito });
+  const retomar = await esperarCondicao(10_000, "botão Continuar download", () =>
+    cdp.avaliar(`Array.from(document.querySelectorAll("button")).some(b => /Continuar download/.test(b.textContent || ""))`));
+  relatorio.screenshots.push(await cdp.screenshot("08-ajustes-continuar.png"));
+  const bcont = await clicarBotaoPorTexto(cdp, "Continuar download");
+  if (!retomar || !bcont.ok) throw new ErroDeProva("produto_sem_retomada", "sem botão para continuar o download", bcont);
+  marco("continuar");
+  // A retomada tem de começar do parcial, não do zero.
+  const pos = await esperarCondicao(60_000, "download retomado", async () => {
+    const m = (await consultarPonte(cdp, "estado")).modeloIA;
+    return m.estado === "baixando" ? m : null;
+  });
+  et.retomouDe = { parcial: cancelado.feito, primeiroDepois: pos.feito, doZero: pos.feito < cancelado.feito * 0.5 };
+  const fim = await esperarCondicao(15 * 60_000, "4B instalado (SHA conferido)", async () => {
+    const m = (await consultarPonte(cdp, "estado")).modeloIA;
+    if (m.estado === "falhou") throw new ErroDeProva("produto_download_falhou", m.detalhe || "download falhou", m);
+    return m.estado === "instalado" ? m : null;
+  });
+  marco("instalado");
+  const aj1 = await consultarPonte(cdp, "ajustes.ler");
+  et.final = { modeloIA: fim, prefModelo: aj1?.valores?.modelo, modelos: aj1?.modelos, limpador: (await consultarPonte(cdp, "estado")).limpador };
+  relatorio.screenshots.push(await cdp.screenshot("09-ajustes-instalado.png"));
+  if (et.retomouDe.doZero) throw new ErroDeProva("produto_retomada_do_zero", "o download recomeçou do zero", et.retomouDe);
+  return true;
+}
+
 async function faseArquivos(cdp, relatorio, chaves) {
   await irPara(cdp, "Arquivos");
   const gravacao = await gravarPilula("arquivos").catch((e) => ({ parar: async () => ({ erro: String(e) }) }));
@@ -558,6 +618,18 @@ async function faseReuniao(cdp, relatorio, chaves) {
     if (main.includes("Carregando transcrição") || main.includes("Encerrando")) return null;
     return main;
   });
+  if (IA4B) {
+    // A5: resumo real com o 4B; espera o resumo sair (ou o erro aparecer) por até 5 min.
+    const t0 = Date.now();
+    const r = await esperarCondicao(5 * 60_000, "resumo da reunião", async () => {
+      const m = await cdp.avaliar(`document.querySelector("main")?.innerText || ""`);
+      if (m.includes("Gerado localmente")) return { gerado: true, trecho: m.slice(m.indexOf("Resumo"), m.indexOf("Resumo") + 400) };
+      if (/Resumo local não gerado|não consegui|falhou/i.test(m) && Date.now() - t0 > 90_000) return { gerado: false, trecho: m.slice(0, 400) };
+      return null;
+    }).catch((e) => ({ gerado: false, erro: String(e.message || e) }));
+    relatorio.etapas.resumo_4b = { ...r, segundos: Number(((Date.now() - t0) / 1000).toFixed(1)) };
+    relatorio.screenshots.push(await cdp.screenshot("05b-reuniao-resumo.png"));
+  }
   const conf = conferirPalavras(texto, chaves, 0.5);
   relatorio.etapas.reuniao_ui = { ...conf, amostra: texto.slice(0, 400) };
   relatorio.screenshots.push(await cdp.screenshot("05-reuniao-transcricao.png"));
@@ -600,6 +672,9 @@ async function main() {
     const transicao = await faseTransicao(cdp, relatorio);
     relatorio.veredito = transicao;
 
+    if (transicao === "transicao_ok" && MODO === "completo" && IA4B) {
+      await faseModelo4B(cdp, relatorio);
+    }
     if (transicao === "transicao_ok" && MODO === "completo") {
       const arqOk = await faseArquivos(cdp, relatorio, chaves);
       if (!arqOk) relatorio.veredito = "produto_arquivo_texto_abaixo_do_limite";

@@ -11,7 +11,9 @@
     [int]$PortaCdp = 9222,
     [int]$PrazoModeloMinutos = 20,
     # Ilha (1.0.2): liga pilulaSempreVisivel no perfil isolado e roda conferir-ilha.ps1 com o app aberto.
-    [switch]$ConferirIlha
+    [switch]$ConferirIlha,
+    # Modelo 4B (próxima entrega): padrão, download com cancelar/continuar e inferência real.
+    [switch]$ProvaIA
 )
 
 $ErrorActionPreference = 'Stop'
@@ -127,6 +129,7 @@ try {
         "--porta=$PortaCdp",
         "--modo=$Modo",
         "--esperado=$Esperado",
+        "--ia4b=$(if ($ProvaIA) { '1' } else { '0' })",
         "--ditado=$(if ($ConferirIlha) { '1' } else { '0' })",
         "--desk=$(Join-Path $PSScriptRoot 'acao-desktop.ps1')",
         "--perfil-webview=$(Join-Path $env:LOCALAPPDATA 'se.dita.app')",

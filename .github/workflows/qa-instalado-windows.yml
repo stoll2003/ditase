@@ -90,7 +90,7 @@ jobs:
     needs: ref
     if: needs.ref.outputs.candidato != ''
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
@@ -172,7 +172,7 @@ jobs:
         shell: powershell
         run: |
           .\scripts\windows\qa-instalado\executar-qa-instalado.ps1 `
-            -Instalador $env:INSTALADOR -Saida "$env:RUNNER_TEMP\qa-candidato" -Modo completo -Esperado corrigido -ConferirIlha
+            -Instalador $env:INSTALADOR -Saida "$env:RUNNER_TEMP\qa-candidato" -Modo completo -Esperado corrigido -ConferirIlha -ProvaIA
 
       - name: Resumo
         if: always()
