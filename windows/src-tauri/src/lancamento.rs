@@ -478,11 +478,15 @@ impl Lancamento {
                 v
             })
             .collect();
+        let fala = self.motores.fala(false);
         let mut v = json!({
             "arquivos": arquivos, "anteriores": anteriores, "recuperaveis": recuperaveis,
             "permissoes": {"audioSistema": "concedida", "microfone": if microfone { "concedida" } else { "negada" }},
-            "disponivel": self.motores.fala_disponivel(),
+            "disponivel": fala.is_ok(),
         });
+        if let Err(erro) = fala {
+            v["motivoIndisponibilidade"] = json!(erro.to_string());
+        }
         if let Some(r) = reuniao {
             v["reuniao"] = r;
         }

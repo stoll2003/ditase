@@ -118,7 +118,8 @@ type Escutar = (evento: string, f: (e: { payload: unknown }) => void) => Promise
 
 /** Eventos do app (mesma lista de `EVENTOS` em `windows/src-tauri/src/ponte.rs`). */
 const EVENTOS = ["ditado", "ditado:progresso", "ditado:trechos", "ditado:resultado", "ditado:intervalos", "ditado:arquivos-soltos"];
-let eventosLigados = false;
+let ligacaoDoDitado: Promise<void> | undefined;
+let ditadoLigado = false;
 
 /**
  * No Windows o app manda eventos estruturados do Tauri, só para a janela principal, em vez de
@@ -126,13 +127,16 @@ let eventosLigados = false;
  * resto da interface não muda.
  */
 function ligarEventosDoTauri() {
-  if (eventosLigados) return;
+  if (ligacaoDoDitado) return ligacaoDoDitado;
   const escutar = (window as unknown as { __TAURI__?: { event?: { listen?: Escutar } } }).__TAURI__?.event?.listen;
   if (!escutar) return;
-  eventosLigados = true;
-  for (const nome of EVENTOS) {
-    void escutar(nome, (e) => window.dispatchEvent(new CustomEvent(nome, { detail: e.payload })));
+  const ligar = (nome: string) => escutar(nome, (e) => window.dispatchEvent(new CustomEvent(nome, { detail: e.payload })));
+  ligacaoDoDitado = ligar("ditado").then(() => { ditadoLigado = true; });
+  void ligacaoDoDitado.catch(() => console.error("Falha ao assinar atualizações do Dita.se."));
+  for (const nome of EVENTOS.slice(1)) {
+    void ligar(nome).catch(() => console.error("Falha ao assinar o evento " + nome));
   }
+  return ligacaoDoDitado;
 }
 
 function nativo(): Nativo | undefined {
@@ -156,12 +160,20 @@ export async function chamar<T>(metodo: string, params: Record<string, unknown> 
 
 /** Chama `aoMudar` quando o app avisa que o assunto mudou. Devolve a função que cancela. */
 export function ouvir(assuntos: string[], aoMudar: () => void): () => void {
-  if (tauri()) ligarEventosDoTauri();
+  let ativo = true;
+  const ligacao = tauri() ? ligarEventosDoTauri() : undefined;
+  // O primeiro snapshot pode ser anterior ao registro assíncrono do listener no host.
+  if (!ditadoLigado && ligacao && assuntos.length) {
+    void ligacao.then(() => { if (ativo) aoMudar(); }, () => {});
+  }
   const tratar = (evento: Event) => {
     if (assuntos.includes((evento as CustomEvent<string>).detail)) aoMudar();
   };
   window.addEventListener("ditado", tratar);
-  return () => window.removeEventListener("ditado", tratar);
+  return () => {
+    ativo = false;
+    window.removeEventListener("ditado", tratar);
+  };
 }
 
 // App.tsx escuta alguns eventos direto na janela: liga a ponte de eventos já ao carregar.

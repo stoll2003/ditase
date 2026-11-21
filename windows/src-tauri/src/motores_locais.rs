@@ -406,11 +406,6 @@ impl Motores for MotoresLocais {
         }
     }
 
-    /// Só com o SHA-256 conferido (marcador do `BaixadorDeModelo`): arquivo com o tamanho certo não basta.
-    fn fala_disponivel(&self) -> bool {
-        instalado(&self.pasta, &PARAKEET)
-    }
-
     fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>> {
         let mut d = self.falantes.lock().unwrap();
         if d.is_none() && instalado(&self.pasta, &FALANTES) {
@@ -689,7 +684,7 @@ mod testes {
         let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
         let m = MotoresLocais::novo(tmp.path().to_path_buf(), prefs, Arc::new(|| {}));
         assert!(
-            !m.fala_disponivel(),
+            !instalado(tmp.path(), &PARAKEET),
             "fala sem conferência contou como disponível"
         );
         assert!(
@@ -720,7 +715,6 @@ mod testes {
         let tmp = std::env::temp_dir().join(format!("ditase-motores-{}", std::process::id()));
         let prefs = Arc::new(Preferencias::abrir(tmp.join("p.json")));
         let m = MotoresLocais::novo(tmp.clone(), prefs, Arc::new(|| {}));
-        assert!(!m.fala_disponivel());
         assert!(m.fala(false).is_err());
         assert_eq!(m.estado_reconhecedor().0, "parado");
         assert_eq!(m.modelo_ia()["estado"], "indisponivel");

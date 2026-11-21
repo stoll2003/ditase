@@ -29,7 +29,16 @@ const paginas: { id: string; nome: string; icone: Icon }[] = [
 export default function App() {
   const [pagina, irPara] = useHash("inicio");
   const { dados: estado } = useDados<Estado>("estado", {}, ["estado"]);
-  const { dados: lance, setDados: atualizarLancamento } = useDados<Lancamento>("lancamento.estado", {}, ["lancamento"], mesclarLancamento);
+  const { dados: lance, erro: erroLancamento, recarregar: recarregarLancamento, setDados: atualizarLancamento } =
+    useDados<Lancamento>("lancamento.estado", {}, ["lancamento"], mesclarLancamento);
+  const win = plataforma() === "windows";
+  const estadoDaFala = estado?.reconhecedor.estado;
+  const permissaoDoMicrofone = estado?.permissoes.microfone;
+  // No Windows, a carga do reconhecedor e a volta dos ajustes de privacidade publicam "estado".
+  // Só as mudanças que interessam às duas telas pedem outra leitura do acervo.
+  useEffect(() => {
+    if (win && estadoDaFala) recarregarLancamento();
+  }, [win, estadoDaFala, permissaoDoMicrofone, recarregarLancamento]);
   const [destaque, destacar] = useState<string>();
   useEffect(() => {
     const receber = (evento: Event) => {
@@ -77,7 +86,7 @@ export default function App() {
   const ninho = useRef(0);
   const mola = useRef<number | undefined>(undefined);
   const [arrastando, arrastar] = useState(false);
-  const disponivel = lance?.disponivel === true;
+  const disponivel = !erroLancamento && lance?.disponivel === true;
   const ativo = lance?.arquivos.find(arquivoEmCurso);
   const reuniao = lance?.reuniao;
   const fila = lance?.arquivos.filter((a) => arquivoEmCurso(a) || a.fase === "naFila").length ?? 0;
@@ -131,7 +140,6 @@ export default function App() {
   }, [atual, disponivel]);
   useEffect(() => () => window.clearTimeout(mola.current), []);
   const deArquivo = (event: DragEvent) => event.dataTransfer.types.includes("Files");
-  const win = plataforma() === "windows";
 
   return (
     // Com "user", quem pediu movimento reduzido no sistema fica sem deslocamento e sem escala: só fades.
@@ -220,9 +228,10 @@ export default function App() {
           className="mx-auto max-w-[52rem] px-8 pt-9 pb-12"
         >
           {atual === "inicio" && <Inicio estado={estado} irPara={irPara} />}
-          {atual === "reuniao" && <Reuniao dados={lance} ditando={estado?.fase === "gravando"} />}
-          {atual === "arquivos" && <Arquivos arquivos={lance?.arquivos ?? []} selecionar={escolher}
-            arrastando={arrastando} destaque={destaque} disponivel={disponivel} />}
+          {atual === "reuniao" && <Reuniao dados={lance} ditando={estado?.fase === "gravando"}
+            erro={erroLancamento} recarregar={recarregarLancamento} />}
+          {atual === "arquivos" && <Arquivos dados={lance} selecionar={escolher} arrastando={arrastando}
+            destaque={destaque} erro={erroLancamento} recarregar={recarregarLancamento} />}
           {atual === "insights" && <Insights />}
           {atual === "dicionario" && <Dicionario />}
           {atual === "ajustes" && <Ajustes estado={estado} />}

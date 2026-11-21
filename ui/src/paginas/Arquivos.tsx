@@ -3,6 +3,7 @@ import { chamar } from "@/lib/ponte";
 import { ArrowClockwise, CaretDown, CaretUp, DotsThree, FileAudio, FileVideo, FolderOpen, Trash, X } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
 import { Cabecalho } from "@/componentes/Cabecalho";
+import { ErroDeLeitura } from "@/componentes/ErroDeLeitura";
 import { Copiar, Exportar, Transcricao } from "@/componentes/Transcricao";
 import { acaoLocal, executar } from "@/lib/acoes-lancamento";
 import { Button, IconButton } from "@/components/ui/action-button";
@@ -11,7 +12,7 @@ import { ProgressBar } from "@/components/ui/progress-bar";
 import { StatusPill, type StatusTone } from "@/components/ui/status-pill";
 import { IconTile, Panel, Shell, ShellHeader } from "@/components/ui/surface";
 import { SearchField } from "@/components/ui/text-field";
-import { arquivoEmCurso, blocos, documentoCompleto, extensao, tempo, textoDoDocumento, type Arquivo, type FaseArquivo } from "@/lib/lancamento";
+import { arquivoEmCurso, blocos, documentoCompleto, extensao, tempo, textoDoDocumento, type Arquivo, type FaseArquivo, type Lancamento } from "@/lib/lancamento";
 import { cn } from "@/lib/utils";
 import { plural } from "@/lib/formato";
 import { plataforma } from "@/lib/plataforma";
@@ -37,8 +38,11 @@ function ArquivoCard({ arquivo, aberto, alternar }: { arquivo: Arquivo; aberto: 
 type Cartao = { arquivo: Arquivo; aberto: boolean; alternar: () => void; bruto: boolean; mostrarBruto: (valor: boolean) => void };
 
 function ArquivoAberto(props: Cartao) {
-  const { dados } = useDados<Arquivo | null>("lancamento.documento", { id: props.arquivo.id }, ["lancamento"]);
-  return <ConteudoArquivo {...props} arquivo={dados ?? props.arquivo} />;
+  const { dados, erro, recarregar } = useDados<Arquivo | null>("lancamento.documento", { id: props.arquivo.id }, ["lancamento"]);
+  return <>
+    <ConteudoArquivo {...props} arquivo={dados ?? props.arquivo} />
+    {erro && <ErroDeLeitura erro={erro} recarregar={recarregar} />}
+  </>;
 }
 
 function ConteudoArquivo({ arquivo, aberto, alternar, bruto, mostrarBruto }: Cartao) {
@@ -81,9 +85,11 @@ function ConteudoArquivo({ arquivo, aberto, alternar, bruto, mostrarBruto }: Car
   </Shell>;
 }
 
-export function Arquivos({ arquivos, selecionar, arrastando, destaque, disponivel }: {
-  arquivos: Arquivo[]; selecionar: () => void; arrastando: boolean; destaque?: string; disponivel: boolean;
+export function Arquivos({ dados, selecionar, arrastando, destaque, erro, recarregar }: {
+  dados?: Lancamento; selecionar: () => void; arrastando: boolean; destaque?: string; erro?: string; recarregar: () => void;
 }) {
+  const arquivos = dados?.arquivos ?? [];
+  const disponivel = !erro && dados?.disponivel === true;
   const [abertos, atualizar] = useState(() => new Set<string>());
   const [busca, pesquisar] = useState("");
   const fila = arquivos.filter((a) => arquivoEmCurso(a) || a.fase === "naFila");
@@ -103,7 +109,9 @@ export function Arquivos({ arquivos, selecionar, arrastando, destaque, disponive
   return <>
     <Cabecalho titulo="Arquivos" apoio={win ? "Transcreva gravações de áudio ou vídeo e separe quem falou em cada trecho. Tudo roda neste computador." : "Transcreva gravações de áudio ou vídeo e separe quem falou em cada trecho. Tudo roda neste Mac."}
       lado={<Button icon={FolderOpen} variant="primary" onClick={selecionar} disabled={!disponivel}>Escolher arquivo</Button>} />
-    {!disponivel && <p role="status" className="mb-4 text-sm text-muted-foreground">A transcrição de arquivos está indisponível nesta versão do motor.</p>}
+    {erro ? <ErroDeLeitura erro={erro} recarregar={recarregar} /> : !disponivel && <p role="status" className="mb-4 text-sm text-muted-foreground">
+      {dados ? dados.motivoIndisponibilidade ?? "A transcrição de arquivos está indisponível nesta versão do motor." : "Carregando arquivos…"}
+    </p>}
     <button type="button" onClick={selecionar} disabled={!disponivel} className={cn(
       "mb-6 flex w-full items-center gap-3 rounded-xl border border-dashed border-foreground/15 bg-foreground/[0.02] px-4 text-left hover:border-foreground/25 focus-visible:ring-2 focus-visible:ring-ring",
       arquivos.length ? "min-h-13 justify-between py-2" : "min-h-54 flex-col justify-center p-8 text-center",

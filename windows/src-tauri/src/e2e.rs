@@ -170,9 +170,6 @@ impl Motores for MotoresDaProva {
     fn fala(&self, esperar: bool) -> Result<Arc<dyn Fala>, FalaIndisponivel> {
         self.app.fala(esperar)
     }
-    fn fala_disponivel(&self) -> bool {
-        self.app.fala_disponivel()
-    }
     fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>> {
         self.app.falantes()
     }

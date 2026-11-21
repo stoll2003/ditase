@@ -206,6 +206,8 @@ fn abrir_principal(app: &AppHandle) -> tauri::Result<()> {
             }
         }
         WindowEvent::Focused(true) => {
+            // A permissão pode ter mudado enquanto os Ajustes do Windows estavam em foco.
+            ponte::emitir(&app2, "estado");
             if let Some(c) = app2.try_state::<Arc<Casca>>() {
                 if let Some(b) = c.bandeja.get() {
                     b.janela_aberta();
@@ -472,8 +474,8 @@ fn main() {
             )?;
             b.definir_falta_permissao(!audio::microfone_disponivel());
             let _ = casca.bandeja.set(b);
-            motores.preparar_fala();
             app.manage(casca);
+            motores.preparar_fala();
             caminhos::nota(format!(
                 "abertura: serviços prontos em {} ms",
                 inicio.elapsed().as_millis()

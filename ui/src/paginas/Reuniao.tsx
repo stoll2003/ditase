@@ -3,6 +3,7 @@ import { ArrowDown, Clock, Copy, DotsThree, Microphone, Pause, Play, Stop, Users
 import { useEffect, useRef, useState } from "react";
 import { useReducedMotion } from "motion/react";
 import { Cabecalho, Secao } from "@/componentes/Cabecalho";
+import { ErroDeLeitura } from "@/componentes/ErroDeLeitura";
 import { Copiar, EditarNome, Exportar, Transcricao } from "@/componentes/Transcricao";
 import { acaoLocal, executar } from "@/lib/acoes-lancamento";
 import { chamar } from "@/lib/ponte";
@@ -130,11 +131,14 @@ function ReuniaoSalva({ reuniao, finalizando = false }: { reuniao: DadosReuniao;
 }
 
 function ReuniaoArquivada({ reuniao }: { reuniao: DadosReuniao }) {
-  const { dados } = useDados<DadosReuniao | null>("lancamento.documento", { id: reuniao.id }, ["lancamento"]);
+  const { dados, erro, recarregar } = useDados<DadosReuniao | null>("lancamento.documento", { id: reuniao.id }, ["lancamento"]);
+  if (erro) return <ErroDeLeitura erro={erro} recarregar={recarregar} />;
   return dados ? <ReuniaoSalva reuniao={dados} /> : <p role="status">Carregando transcrição…</p>;
 }
 
-export function Reuniao({ dados, ditando }: { dados?: Lancamento; ditando: boolean }) {
+export function Reuniao({ dados, ditando, erro, recarregar }: {
+  dados?: Lancamento; ditando: boolean; erro?: string; recarregar: () => void;
+}) {
   const win = plataforma() === "windows";
   const [fonte, mudarFonte] = useState<FonteReuniao>("macEMicrofone");
   const [selecionada, selecionar] = useState<string>();
@@ -147,9 +151,13 @@ export function Reuniao({ dados, ditando }: { dados?: Lancamento; ditando: boole
   const aberta = anteriores.find((r) => r.id === selecionada) ?? anteriores[0];
   return <>
     <Cabecalho titulo="Reunião" apoio={win ? "Transcreve chamadas deste computador junto com a sua voz e gera um resumo local ao terminar, sem entrar como participante na chamada." : "Transcreve chamadas deste Mac junto com a sua voz e gera um resumo local ao terminar, sem entrar como participante na chamada."}
-      lado={!atual && <Button variant="primary" icon={Microphone} disabled={!dados?.disponivel || !pronta || ditando} onClick={() => { selecionar(undefined); void acaoLocal("iniciar", { fonte }); }}>Começar reunião</Button>} />
+      lado={!atual && <Button variant="primary" icon={Microphone} disabled={!!erro || !dados?.disponivel || !pronta || ditando} onClick={() => { selecionar(undefined); void acaoLocal("iniciar", { fonte }); }}>Começar reunião</Button>} />
+    {erro && <ErroDeLeitura erro={erro} recarregar={recarregar} />}
     {atual ? atual.fase === "finalizando" ? <ReuniaoSalva reuniao={atual} finalizando /> : <AoVivo key={atual.id} reuniao={atual} />
-      : !dados?.disponivel ? <p role="status" className="text-sm text-muted-foreground">A captura de reuniões está indisponível nesta versão do motor.</p>
+      : erro ? null
+      : !dados?.disponivel ? <p role="status" className="text-sm text-muted-foreground">
+        {dados ? dados.motivoIndisponibilidade ?? "A captura de reuniões está indisponível nesta versão do motor." : "Carregando reuniões…"}
+      </p>
         : <>
           {(!audio || (fonte !== "mac" && !mic)) && <div className="mb-4 grid gap-2">
             {!audio && <Permissao qual="audioSistema" />}

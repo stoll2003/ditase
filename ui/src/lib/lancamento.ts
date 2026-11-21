@@ -17,7 +17,7 @@ export type Reuniao = Documento & {
 };
 export type Lancamento = {
   arquivos: Arquivo[]; reuniao?: Reuniao; anteriores: Reuniao[]; recuperaveis?: Reuniao[];
-  permissoes: { audioSistema: string; microfone: string }; disponivel: boolean; avisoMigracao?: string;
+  permissoes: { audioSistema: string; microfone: string }; disponivel: boolean; motivoIndisponibilidade?: string; avisoMigracao?: string;
 };
 export type IntervalosReuniao = Pick<Reuniao, "id" | "lacunas" | "pendentes">;
 export type LoteReuniao = Pick<Reuniao, "id" | "trechos" | "vozes" | "duracao" | "atraso">;

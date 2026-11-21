@@ -57,8 +57,6 @@ pub trait Motores: Send + Sync {
     /// Reconhecedor carregado. `esperar`: bloqueia enquanto o modelo ainda carrega (arquivos em fila).
     /// O erro é um texto para mostrar à pessoa ("Baixando o modelo de fala: 40%").
     fn fala(&self, esperar: bool) -> Result<Arc<dyn Fala>, FalaIndisponivel>;
-    /// Os arquivos do modelo de fala estão no disco (mesmo que ainda carregando).
-    fn fala_disponivel(&self) -> bool;
     /// Separação de falantes, quando o modelo existe.
     fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>>;
     /// Limpeza por IA do ditado, só quando ligada nos ajustes e com modelo e servidor presentes.
@@ -650,9 +648,6 @@ pub mod dubles {
             } else {
                 self.fala.clone()
             })
-        }
-        fn fala_disponivel(&self) -> bool {
-            true
         }
         fn falantes(&self) -> Option<Arc<dyn IdentificadorDeFalantes>> {
             self.com_falantes
