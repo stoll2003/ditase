@@ -521,6 +521,18 @@ impl Bandeja {
         self.aplicar();
     }
 
+    pub fn definir_falta_permissao(&self, falta: bool) {
+        let mudou = {
+            let mut s = self.estado.lock().unwrap();
+            let antes = s.falta_permissao;
+            s.falta_permissao = falta;
+            antes != falta
+        };
+        if mudou {
+            self.aplicar();
+        }
+    }
+
     pub fn definir_reuniao(&self, fase: FaseReuniaoBandeja) {
         self.estado.lock().unwrap().reuniao = Some(fase);
         self.aplicar();
@@ -650,6 +662,16 @@ mod testes {
 
         s.carregando_reconhecedor = true;
         assert_eq!(resolver_estado(&s, agora).0, IconeBandeja::Aviso);
+
+        s.falta_permissao = true;
+        assert_eq!(
+            resolver_estado(&s, agora),
+            (
+                IconeBandeja::Aviso,
+                "Dita.se: falta permissão do microfone".into()
+            )
+        );
+        s.falta_permissao = false;
 
         s.baixando_pct = Some(42);
         assert_eq!(

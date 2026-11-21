@@ -1,0 +1,181 @@
+# Prova de ponta a ponta no Windows com os modelos reais: arquivo (wav e m4a pelo Media
+# Foundation), reunião com pausa e microfone, resumo pelo llama-server e recuperação de reunião
+# interrompida, pelo mesmo caminho do app (MotoresLocais, Lancamento, ProcessadorDeArquivo,
+# coletor e processador da reunião). Áudio só do corpus sintético versionado; nada privado.
+# Detalhes e limites em windows/src-tauri/src/e2e.rs.
+name: Windows (ponta a ponta)
+
+on:
+  push:
+    branches: [windows, "win-*", "v1*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  # GGUF pequeno e público só para provar o resumo (o app usa o Qwen 2B do catálogo).
+  GGUF_NOME: qwen2.5-0.5b-instruct-q4_k_m.gguf
+  GGUF_URL: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+  GGUF_SHA256: 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
+  GGUF_TAMANHO: "491400032"
+
+jobs:
+  e2e:
+    name: Windows (ponta a ponta)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-x64-e2e-v1
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      # Mesmo cache e script do CI: sherpa-onnx e llama.cpp b12359 conferidos por SHA-256.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vendor-cache
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows/preparar-vendor.ps1') }}
+
+      - name: Preparar sherpa-onnx e llama-server verificados
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1
+
+      # Modelos: Parakeet (script do job de WER), falantes (baixados e conferidos pelo próprio app
+      # durante a prova) e o GGUF pequeno. O hash é conferido mesmo quando vêm do cache.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: modelos-cache
+        with:
+          path: ${{ runner.temp }}/ditase-modelos-cache
+          key: ditase-modelos-e2e-${{ hashFiles('motores/src/catalogo.rs', '.github/workflows/e2e-windows.yml') }}
+          restore-keys: |
+            ditase-modelos-parakeet-${{ hashFiles('motores/src/catalogo.rs') }}
+
+      - name: Preparar Parakeet verificado por SHA-256
+        shell: powershell
+        run: .\scripts\windows\preparar-parakeet.ps1
+
+      - name: Preparar GGUF pequeno verificado por SHA-256
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $ProgressPreference = "SilentlyContinue"
+          $pasta = Join-Path $env:RUNNER_TEMP "ditase-modelos-cache\e2e"
+          New-Item -ItemType Directory -Force -Path $pasta | Out-Null
+          $arquivo = Join-Path $pasta $env:GGUF_NOME
+          $valido = (Test-Path -LiteralPath $arquivo) -and
+            ((Get-Item -LiteralPath $arquivo).Length -eq [long]$env:GGUF_TAMANHO) -and
+            ((Get-FileHash -Algorithm SHA256 -LiteralPath $arquivo).Hash.ToLowerInvariant() -eq $env:GGUF_SHA256)
+          if (-not $valido) {
+            Remove-Item -Force -LiteralPath $arquivo -ErrorAction SilentlyContinue
+            Invoke-WebRequest -Uri $env:GGUF_URL -OutFile "$arquivo.part" -UseBasicParsing -TimeoutSec 600
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath "$arquivo.part").Hash.ToLowerInvariant()
+            if ($hash -ne $env:GGUF_SHA256) { throw "SHA-256 divergente do GGUF: $hash" }
+            Move-Item -LiteralPath "$arquivo.part" -Destination $arquivo
+          }
+          Write-Host "GGUF conferido: $arquivo"
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "DITASE_E2E_GGUF=$arquivo" -Encoding UTF8
+
+      - name: Compilar a casca e os motores para teste (Release)
+        id: exe
+        shell: bash
+        run: |
+          set -euo pipefail
+          achar() {
+            cargo test --locked --release -p "$1" ${2:+--test "$2"} --no-run --message-format=json \
+              | jq -r --arg alvo "$3" 'select(.executable != null and .profile.test == true and .target.name == $alvo) | .executable' \
+              | tail -n 1
+          }
+          casca="$(achar ditase "" ditase)"
+          modelos="$(achar motores modelos modelos)"
+          for exe in "$casca" "$modelos"; do
+            if [ -z "$exe" ] || [ ! -f "$exe" ]; then echo "Executável de teste não encontrado." >&2; exit 1; fi
+            # System32\onnxruntime.dll (1.17.1) venceria o PATH: as DLLs verificadas vão ao lado do .exe.
+            cp -f \
+              "$SHERPA_ONNX_LIB_DIR/sherpa-onnx-c-api.dll" \
+              "$SHERPA_ONNX_LIB_DIR/onnxruntime.dll" \
+              "$SHERPA_ONNX_LIB_DIR/onnxruntime_providers_shared.dll" \
+              "$(dirname "$exe")/"
+          done
+          echo "casca=$casca" >> "$GITHUB_OUTPUT"
+          echo "modelos=$modelos" >> "$GITHUB_OUTPUT"
+
+      - name: Prova de ponta a ponta (arquivo, reunião, resumo e recuperação)
+        shell: bash
+        env:
+          DITASE_E2E: "1"
+        run: |
+          set -euo pipefail
+          export DITASE_E2E_LLAMA="$GITHUB_WORKSPACE/windows/vendor/llama/llama-server.exe"
+          export DITASE_E2E_SAIDA="$RUNNER_TEMP/e2e-saida"
+          test -f "$DITASE_E2E_LLAMA"
+          "${{ steps.exe.outputs.casca }}" e2e --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/e2e.log"
+          grep -F 'test e2e::e2e_arquivo_reuniao_resumo_e_recuperacao ...' "$RUNNER_TEMP/e2e.log"
+          grep -F 'test result: ok. 1 passed; 0 failed' "$RUNNER_TEMP/e2e.log"
+
+      - name: Motores reais (Parakeet, palavras com tempo, separação de três vozes)
+        shell: bash
+        env:
+          DITASE_TESTES_MODELOS: "1"
+        run: |
+          set -euo pipefail
+          "${{ steps.exe.outputs.modelos }}" --nocapture --test-threads=1 | tee "$RUNNER_TEMP/e2e-motores.log"
+          grep -F 'diarizacao_separa_tres_vozes' "$RUNNER_TEMP/e2e-motores.log"
+          grep -F 'test result: ok.' "$RUNNER_TEMP/e2e-motores.log"
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Exportação .txt, .srt e .md (função da interface)
+        shell: bash
+        run: node windows/src-tauri/tests/e2e/exportar.mjs "$RUNNER_TEMP/e2e-saida"
+
+      - name: Tempos de cada etapa
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Prova de ponta a ponta no Windows"
+            echo
+            if [ -f "$RUNNER_TEMP/e2e.log" ]; then
+              echo '| Etapa | Segundos |'
+              echo '|---|---|'
+              (grep -h '^TEMPO ' "$RUNNER_TEMP/e2e.log" || true) | sed -E 's/^TEMPO (.*): ([0-9.]+) s$/| \1 | \2 |/'
+              echo
+              (grep -h -E '^(arquivo|reunião|recuperada|resumo)' "$RUNNER_TEMP/e2e.log" || true) | sed 's/^/    /'
+            else
+              echo "Log da prova não gerado."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: ditase-e2e-windows
+          path: |
+            ${{ runner.temp }}/e2e-saida
+            ${{ runner.temp }}/e2e.log
+            ${{ runner.temp }}/e2e-motores.log
+          if-no-files-found: ignore
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: always() && github.event_name != 'pull_request' && steps.modelos-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ditase-modelos-cache
+          key: ${{ steps.modelos-cache.outputs.cache-primary-key }}

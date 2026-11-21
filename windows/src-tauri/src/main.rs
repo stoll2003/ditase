@@ -8,6 +8,8 @@ mod bandeja;
 mod caminhos;
 mod controlador;
 mod decodificacao;
+#[cfg(test)]
+mod e2e;
 mod emenda;
 mod integracao;
 mod lancamento;
@@ -21,10 +23,7 @@ mod teste;
 
 use std::{
     path::PathBuf,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, OnceLock,
-    },
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -312,8 +311,8 @@ fn main() {
             let handle = app.handle().clone();
             let prefs = Arc::new(Preferencias::abrir(caminhos::preferencias()));
             let estado = handle.clone();
-            let estava_baixando = Arc::new(AtomicBool::new(false));
-            let estava_baixando_cb = estava_baixando.clone();
+            let transicao_fala = Arc::new(std::sync::Mutex::new(TransicaoFala::default()));
+            let transicao_fala_cb = transicao_fala.clone();
             let motores = MotoresLocais::novo(
                 caminhos::modelos(),
                 prefs.clone(),
@@ -321,8 +320,11 @@ fn main() {
                     ponte::emitir(&estado, "estado");
                     if let Some(c) = estado.try_state::<Arc<Casca>>() {
                         let (baixando, carregando, pronto) = c.integracao.motores.resumo_fala();
+                        let acao = transicao_fala_cb
+                            .lock()
+                            .unwrap()
+                            .avancar(baixando, carregando, pronto);
                         if let Some((feito, total)) = baixando {
-                            estava_baixando_cb.store(true, Ordering::Release);
                             c.pilula.modelo(Some(feito), total);
                             let pct = feito
                                 .saturating_mul(100)
@@ -333,16 +335,14 @@ fn main() {
                                 b.definir_carregando(false);
                             }
                         } else {
-                            let terminou_download =
-                                estava_baixando_cb.swap(false, Ordering::AcqRel);
-                            if terminou_download {
+                            if acao.encerrar_modelo {
                                 c.pilula.modelo(None, 0);
                             }
                             if let Some(b) = c.bandeja.get() {
                                 b.definir_baixando(None);
                                 b.definir_carregando(carregando);
                             }
-                            if terminou_download && pronto {
+                            if acao.avisar_pronto {
                                 c.pilula.avisar("Pronto para ditar", 2.5, NivelAviso::Info);
                             }
                         }
@@ -384,6 +384,7 @@ fn main() {
                                     }
                                 };
                                 b.definir_ditado(fase);
+                                b.definir_falta_permissao(!audio::microfone_disponivel());
                             }
                         }
                     }
@@ -469,6 +470,7 @@ fn main() {
                 prefs.pilula_sempre_visivel(),
                 prefs.atalho().simbolo(),
             )?;
+            b.definir_falta_permissao(!audio::microfone_disponivel());
             let _ = casca.bandeja.set(b);
             motores.preparar_fala();
             app.manage(casca);
@@ -509,4 +511,85 @@ fn main() {
 
 async fn tokio_espera(d: Duration) {
     let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(d)).await;
+}
+
+/// Rastreia a transição `Baixando -> Carregando -> Pronto` do modelo de fala (M-1):
+/// `avisar_quando_pronto` sobrevive à etapa intermediária `Carregando` para disparar
+/// `"Pronto para ditar"` ao chegar em `Pronto`.
+#[derive(Default)]
+struct TransicaoFala {
+    baixando: bool,
+    avisar_quando_pronto: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AcaoFala {
+    encerrar_modelo: bool,
+    avisar_pronto: bool,
+}
+
+impl TransicaoFala {
+    fn avancar(
+        &mut self,
+        baixando: Option<(u64, u64)>,
+        carregando: bool,
+        pronto: bool,
+    ) -> AcaoFala {
+        if baixando.is_some() {
+            self.baixando = true;
+            self.avisar_quando_pronto = true;
+            return AcaoFala::default();
+        }
+        let encerrar_modelo = std::mem::replace(&mut self.baixando, false);
+        let avisar_pronto = if pronto {
+            std::mem::replace(&mut self.avisar_quando_pronto, false)
+        } else if !carregando {
+            self.avisar_quando_pronto = false;
+            false
+        } else {
+            false
+        };
+        AcaoFala {
+            encerrar_modelo,
+            avisar_pronto,
+        }
+    }
+}
+
+#[cfg(test)]
+mod testes_main {
+    use super::*;
+
+    #[test]
+    fn transicao_fala_avisa_pronto_apos_baixando_carregando_pronto() {
+        let mut t = TransicaoFala::default();
+        assert_eq!(
+            t.avancar(Some((50, 100)), false, false),
+            AcaoFala::default()
+        );
+        // Entra em Carregando: encerra barra de download mas preserva o aviso pendente.
+        assert_eq!(
+            t.avancar(None, true, false),
+            AcaoFala {
+                encerrar_modelo: true,
+                avisar_pronto: false,
+            }
+        );
+        // Chega em Pronto: dispara "Pronto para ditar" uma única vez.
+        assert_eq!(
+            t.avancar(None, false, true),
+            AcaoFala {
+                encerrar_modelo: false,
+                avisar_pronto: true,
+            }
+        );
+        assert_eq!(t.avancar(None, false, true), AcaoFala::default());
+    }
+
+    #[test]
+    fn transicao_fala_nao_avisa_sem_download_previo() {
+        let mut t = TransicaoFala::default();
+        assert_eq!(t.avancar(None, true, false), AcaoFala::default());
+        assert_eq!(t.avancar(None, false, true), AcaoFala::default());
+    }
 }

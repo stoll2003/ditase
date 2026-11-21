@@ -4,7 +4,7 @@
 //! `SWP_NOACTIVATE`, nunca `WebviewWindow::show()`).
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicU64, Ordering},
         Arc, Mutex,
     },
     time::{Duration, Instant},
@@ -217,12 +217,65 @@ struct Interno {
     sempre_visivel: bool,
     tela_cheia: bool,
     baixando_modelo: Option<(u64, u64)>,
+    progresso_ativo: bool,
     aviso_ate: Option<Instant>,
     espelhada: bool,
     ultimo_nivel: Instant,
     atalho: String,
     canal: Option<Channel<Value>>,
-    vigia_cursor_ativo: Arc<AtomicBool>,
+    /// Geração ativa do vigia de cursor (`0` = desligado). Cada abertura recebe um id próprio
+    /// para que uma reabertura rápida invalide o vigia anterior antes do próximo ciclo.
+    vigia_geracao_ativa: Arc<AtomicU64>,
+    vigia_proxima_geracao: u64,
+}
+
+/// Atualiza `modo` e a geração do vigia de cursor num único lugar (I-3):
+/// fora de `Aberta` o vigia é sempre desligado (`0`); ao entrar em `Aberta` (quando ainda não
+/// havia vigia ativo), emite `(geracao_ativa, minha_geracao)` para a thread do vigia.
+fn atualizar_modo_e_vigia(i: &mut Interno, modo: ModoJanela) -> Option<(Arc<AtomicU64>, u64)> {
+    i.modo = modo;
+    if modo == ModoJanela::Aberta {
+        if i.vigia_geracao_ativa.load(Ordering::Acquire) == 0 {
+            i.vigia_proxima_geracao = i.vigia_proxima_geracao.wrapping_add(1).max(1);
+            let geracao = i.vigia_proxima_geracao;
+            i.vigia_geracao_ativa.store(geracao, Ordering::Release);
+            Some((i.vigia_geracao_ativa.clone(), geracao))
+        } else {
+            None
+        }
+    } else {
+        i.vigia_geracao_ativa.store(0, Ordering::Release);
+        None
+    }
+}
+
+fn vigia_ainda_valido(geracao_ativa: &AtomicU64, minha_geracao: u64) -> bool {
+    minha_geracao != 0 && geracao_ativa.load(Ordering::Acquire) == minha_geracao
+}
+
+/// Regra do timer de segurança de `Pilula::avisar` (I-4): só encolhe pelo Rust se não houver
+/// canal IPC conectado ou se o ponteiro já estiver fora da janela (com hover ativo, o `pilula.js`
+/// segura o aviso e manda `modo:repouso` quando o ponteiro sai).
+fn deve_encolher_aviso_no_timer(canal_conectado: bool, cursor_fora: bool) -> bool {
+    !canal_conectado || cursor_fora
+}
+
+fn modo_ocioso_padrao(i: &Interno) -> ModoJanela {
+    if i.baixando_modelo.is_some() || i.progresso_ativo {
+        ModoJanela::Compacta
+    } else {
+        ModoJanela::Repouso
+    }
+}
+
+/// Ao receber atualização de `modelo` ou `progresso` em estado ocioso, preserva `Aberta` se a aba
+/// estiver aberta pelo ponteiro; caso contrário, usa `Compacta` em atividade ou `Repouso`.
+fn modo_para_atividade_ociosa(i: &Interno) -> ModoJanela {
+    if i.modo == ModoJanela::Aberta {
+        ModoJanela::Aberta
+    } else {
+        modo_ocioso_padrao(i)
+    }
 }
 
 pub struct Pilula {
@@ -266,12 +319,14 @@ impl Pilula {
                 sempre_visivel,
                 tela_cheia: crate::nativo::janela::tela_cheia_ativa(),
                 baixando_modelo: None,
+                progresso_ativo: false,
                 aviso_ate: None,
                 espelhada: false,
                 ultimo_nivel: Instant::now(),
                 atalho: atalho.to_string(),
                 canal: None,
-                vigia_cursor_ativo: Arc::new(AtomicBool::new(false)),
+                vigia_geracao_ativa: Arc::new(AtomicU64::new(0)),
+                vigia_proxima_geracao: 0,
             }),
         });
 
@@ -331,7 +386,10 @@ impl Pilula {
 
     fn deve_estar_visivel(i: &Interno) -> bool {
         let aviso_ativo = i.aviso_ate.is_some_and(|ate| Instant::now() < ate);
-        let em_atividade = i.fase != Fase::Ociosa || aviso_ativo || i.baixando_modelo.is_some();
+        let em_atividade = i.fase != Fase::Ociosa
+            || aviso_ativo
+            || i.baixando_modelo.is_some()
+            || i.progresso_ativo;
         if em_atividade {
             true
         } else {
@@ -385,49 +443,53 @@ impl Pilula {
         let _ = pos;
     }
 
+    fn iniciar_vigia_se_preciso(&self, vigia: Option<(Arc<AtomicU64>, u64)>) {
+        let Some((geracao_ativa, minha_geracao)) = vigia else {
+            return;
+        };
+        // Fallback de saída do ponteiro (MOTION-windows.md §6): 10 Hz só enquanto aberta, nunca em repouso.
+        let app = self.app.clone();
+        let _ = std::thread::Builder::new()
+            .name("ditase.aba.cursor".into())
+            .spawn(move || {
+                while vigia_ainda_valido(&geracao_ativa, minha_geracao) {
+                    std::thread::sleep(Duration::from_millis(100));
+                    if !vigia_ainda_valido(&geracao_ativa, minha_geracao) {
+                        break;
+                    }
+                    let Some(j) = app.get_webview_window(ROTULO) else {
+                        break;
+                    };
+                    #[cfg(windows)]
+                    if let Ok(h) = j.hwnd() {
+                        if crate::nativo::janela::cursor_fora_da_janela(h.0 as isize) {
+                            if let Some(casca) = app.try_state::<Arc<crate::Casca>>() {
+                                casca.pilula.enviar(json!({"tipo": "ponteiroFora"}));
+                            }
+                        }
+                    }
+                    #[cfg(not(windows))]
+                    let _ = j;
+                }
+            });
+    }
+
     pub fn definir_modo(&self, modo: ModoJanela) {
-        let flag = {
+        let iniciar = {
             let mut i = self.interno.lock().unwrap();
-            if i.modo == modo {
+            if modo != ModoJanela::Aberta {
+                // Se o JS comandou o fechamento (ex.: fim de aviso após sair o hover), limpa aviso_ate.
+                i.aviso_ate = None;
+            }
+            let mesmo = i.modo == modo;
+            let flag = atualizar_modo_e_vigia(&mut i, modo);
+            if mesmo && flag.is_none() {
                 return;
             }
-            i.modo = modo;
-            i.vigia_cursor_ativo.clone()
+            flag
         };
         self.aplicar_janela();
-
-        // Fallback de saída do ponteiro (MOTION-windows.md §6): 10 Hz só enquanto aberta, nunca em repouso.
-        if modo == ModoJanela::Aberta {
-            if !flag.swap(true, Ordering::AcqRel) {
-                let app = self.app.clone();
-                let flag_thread = flag.clone();
-                let _ = std::thread::Builder::new()
-                    .name("ditase.aba.cursor".into())
-                    .spawn(move || {
-                        while flag_thread.load(Ordering::Acquire) {
-                            std::thread::sleep(Duration::from_millis(100));
-                            if !flag_thread.load(Ordering::Acquire) {
-                                break;
-                            }
-                            let Some(j) = app.get_webview_window(ROTULO) else {
-                                break;
-                            };
-                            #[cfg(windows)]
-                            if let Ok(h) = j.hwnd() {
-                                if crate::nativo::janela::cursor_fora_da_janela(h.0 as isize) {
-                                    if let Some(casca) = app.try_state::<Arc<crate::Casca>>() {
-                                        casca.pilula.enviar(json!({"tipo": "ponteiroFora"}));
-                                    }
-                                }
-                            }
-                            #[cfg(not(windows))]
-                            let _ = j;
-                        }
-                    });
-            }
-        } else {
-            flag.store(false, Ordering::Release);
-        }
+        self.iniciar_vigia_se_preciso(iniciar);
     }
 
     pub fn definir_tela_cheia(&self, ativa: bool) {
@@ -446,25 +508,21 @@ impl Pilula {
     }
 
     pub fn mostrar(&self, fase: Fase) {
-        {
+        let iniciar = {
             let mut i = self.interno.lock().unwrap();
             i.fase = fase;
             if fase != Fase::Ociosa {
                 i.aviso_ate = None;
             }
-            i.modo = match fase {
-                Fase::Ociosa => {
-                    if i.baixando_modelo.is_some() {
-                        ModoJanela::Compacta
-                    } else {
-                        ModoJanela::Repouso
-                    }
-                }
+            let modo = match fase {
+                Fase::Ociosa => modo_ocioso_padrao(&i),
                 Fase::Gravando | Fase::Processando => ModoJanela::Compacta,
                 Fase::MaosLivres => ModoJanela::Aberta,
             };
-        }
+            atualizar_modo_e_vigia(&mut i, modo)
+        };
         self.aplicar_janela();
+        self.iniciar_vigia_se_preciso(iniciar);
         self.enviar(msg_fase(fase));
     }
 
@@ -474,13 +532,14 @@ impl Pilula {
             NivelAviso::Erro => segundos.max(3.5),
             NivelAviso::Info => segundos,
         };
-        {
+        let iniciar = {
             let mut i = self.interno.lock().unwrap();
             i.fase = Fase::Ociosa;
-            i.modo = ModoJanela::Aberta;
             i.aviso_ate = Some(Instant::now() + Duration::from_secs_f64(duracao + 0.4));
-        }
+            atualizar_modo_e_vigia(&mut i, ModoJanela::Aberta)
+        };
         self.aplicar_janela();
+        self.iniciar_vigia_se_preciso(iniciar);
         self.enviar(msg_aviso(texto, duracao, nivel));
         if nivel == NivelAviso::Erro {
             if let Some(casca) = self.app.try_state::<Arc<crate::Casca>>() {
@@ -490,41 +549,59 @@ impl Pilula {
             }
         }
 
+        // Guarda de segurança (I-4): o fechamento normal é comandado por `pilula.js` (que segura
+        // o aviso enquanto o ponteiro está sobre a aba). Este timer só atua se não houver canal
+        // conectado ou se o ponteiro estiver fora da janela.
         let app = self.app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_secs_f64(duracao + 0.5));
-            if let Some(estado) = app.try_state::<Arc<crate::Casca>>() {
-                let mut i = estado.pilula.interno.lock().unwrap();
-                if i.aviso_ate.is_some_and(|ate| Instant::now() >= ate) {
-                    i.aviso_ate = None;
-                    if i.fase == Fase::Ociosa {
-                        i.modo = if i.baixando_modelo.is_some() {
-                            ModoJanela::Compacta
-                        } else {
-                            ModoJanela::Repouso
-                        };
-                    }
-                    drop(i);
-                    estado.pilula.aplicar_janela();
+            let Some(estado) = app.try_state::<Arc<crate::Casca>>() else {
+                return;
+            };
+            let cursor_fora = {
+                #[cfg(windows)]
+                {
+                    estado
+                        .pilula
+                        .janela()
+                        .and_then(|j| j.hwnd().ok())
+                        .is_none_or(|h| crate::nativo::janela::cursor_fora_da_janela(h.0 as isize))
                 }
+                #[cfg(not(windows))]
+                {
+                    true
+                }
+            };
+            let mut i = estado.pilula.interno.lock().unwrap();
+            let canal_conectado = i.canal.is_some();
+            if i.aviso_ate.is_some_and(|ate| Instant::now() >= ate)
+                && deve_encolher_aviso_no_timer(canal_conectado, cursor_fora)
+            {
+                i.aviso_ate = None;
+                if i.fase == Fase::Ociosa {
+                    let modo = modo_ocioso_padrao(&i);
+                    let _ = atualizar_modo_e_vigia(&mut i, modo);
+                }
+                drop(i);
+                estado.pilula.aplicar_janela();
             }
         });
     }
 
     /// Progresso do download do modelo de voz (`feito: None` encerra o estado de download).
     pub fn modelo(&self, feito: Option<u64>, total: u64) {
-        {
+        let iniciar = {
             let mut i = self.interno.lock().unwrap();
             i.baixando_modelo = feito.map(|f| (f, total));
             if i.fase == Fase::Ociosa && i.aviso_ate.is_none() {
-                i.modo = if i.baixando_modelo.is_some() {
-                    ModoJanela::Compacta
-                } else {
-                    ModoJanela::Repouso
-                };
+                let modo = modo_para_atividade_ociosa(&i);
+                atualizar_modo_e_vigia(&mut i, modo)
+            } else {
+                None
             }
-        }
+        };
         self.aplicar_janela();
+        self.iniciar_vigia_se_preciso(iniciar);
         self.enviar(msg_modelo(feito, total));
     }
 
@@ -556,6 +633,18 @@ impl Pilula {
 
     /// Progresso de arquivo ou reunião (`ProgressoDaPilula`); `None` encerra.
     pub fn progresso(&self, evento: Option<Value>) {
+        let iniciar = {
+            let mut i = self.interno.lock().unwrap();
+            i.progresso_ativo = evento.is_some();
+            if i.fase == Fase::Ociosa && i.aviso_ate.is_none() {
+                let modo = modo_para_atividade_ociosa(&i);
+                atualizar_modo_e_vigia(&mut i, modo)
+            } else {
+                None
+            }
+        };
+        self.aplicar_janela();
+        self.iniciar_vigia_se_preciso(iniciar);
         self.enviar(json!({"tipo": "progresso", "progresso": evento}));
     }
 }
@@ -696,5 +785,102 @@ mod testes {
             !producao.contains(".show()"),
             "pilula.rs não pode chamar WebviewWindow::show(), que pode ativar a janela"
         );
+    }
+
+    fn interno_teste() -> Interno {
+        Interno {
+            fase: Fase::Ociosa,
+            modo: ModoJanela::Repouso,
+            sempre_visivel: true,
+            tela_cheia: false,
+            baixando_modelo: None,
+            progresso_ativo: false,
+            aviso_ate: None,
+            espelhada: false,
+            ultimo_nivel: Instant::now(),
+            atalho: "Ctrl dir.".into(),
+            canal: None,
+            vigia_geracao_ativa: Arc::new(AtomicU64::new(0)),
+            vigia_proxima_geracao: 0,
+        }
+    }
+
+    #[test]
+    fn sair_de_aberta_desliga_vigia_de_cursor_em_repouso() {
+        let mut i = interno_teste();
+        // Hover abre -> vigia liga com geração 1.
+        let (ativa, gen1) = atualizar_modo_e_vigia(&mut i, ModoJanela::Aberta).unwrap();
+        assert!(vigia_ainda_valido(&ativa, gen1));
+        // Atalho inicia ditado (Compacta) -> vigia desliga imediatamente (I-3).
+        assert!(atualizar_modo_e_vigia(&mut i, ModoJanela::Compacta).is_none());
+        assert!(!vigia_ainda_valido(&ativa, gen1));
+        // Volta a repouso -> vigia segue desligado.
+        assert!(atualizar_modo_e_vigia(&mut i, ModoJanela::Repouso).is_none());
+        assert!(!vigia_ainda_valido(&ativa, gen1));
+    }
+
+    #[test]
+    fn abrir_e_progresso_repetido_preserva_janela_aberta_e_sai_ao_fechar() {
+        let mut i = interno_teste();
+        // Chega progresso com aba em repouso -> passa a Compacta.
+        i.progresso_ativo = true;
+        let modo = modo_para_atividade_ociosa(&i);
+        assert_eq!(modo, ModoJanela::Compacta);
+        let _ = atualizar_modo_e_vigia(&mut i, modo);
+
+        // Ponteiro abre a aba -> Aberta (vigia ativo).
+        let (ativa, gen1) = atualizar_modo_e_vigia(&mut i, ModoJanela::Aberta).unwrap();
+        assert_eq!(i.modo, ModoJanela::Aberta);
+        assert!(vigia_ainda_valido(&ativa, gen1));
+
+        // Novos eventos de progresso ou modelo repetidos não podem encolher a aba aberta.
+        for feito in [10u64, 40, 80] {
+            i.baixando_modelo = Some((feito, 100));
+            let m = modo_para_atividade_ociosa(&i);
+            assert_eq!(m, ModoJanela::Aberta);
+            assert!(atualizar_modo_e_vigia(&mut i, m).is_none());
+            assert!(vigia_ainda_valido(&ativa, gen1));
+        }
+
+        // Quando o ponteiro sai (pilula.js envia modo:compacta), volta a Compacta e desliga vigia.
+        assert!(atualizar_modo_e_vigia(&mut i, ModoJanela::Compacta).is_none());
+        assert_eq!(i.modo, ModoJanela::Compacta);
+        assert!(!vigia_ainda_valido(&ativa, gen1));
+
+        // Ao encerrar o progresso/download fora do hover, volta a Repouso.
+        i.baixando_modelo = None;
+        i.progresso_ativo = false;
+        let m = modo_para_atividade_ociosa(&i);
+        assert_eq!(m, ModoJanela::Repouso);
+        let _ = atualizar_modo_e_vigia(&mut i, m);
+        assert_eq!(i.modo, ModoJanela::Repouso);
+    }
+
+    #[test]
+    fn reabrir_rapido_invalida_vigia_anterior_antes_do_proximo_ciclo() {
+        let mut i = interno_teste();
+        // 1. Abrir -> gera vigia da geração 1.
+        let (ativa, gen1) = atualizar_modo_e_vigia(&mut i, ModoJanela::Aberta).unwrap();
+        assert!(vigia_ainda_valido(&ativa, gen1));
+        // 2. Fechar -> geração ativa vai a 0.
+        assert!(atualizar_modo_e_vigia(&mut i, ModoJanela::Repouso).is_none());
+        assert!(!vigia_ainda_valido(&ativa, gen1));
+        // 3. Reabrir rápido (antes do próximo ciclo de 100 ms do vigia 1) -> geração 2.
+        let (ativa2, gen2) = atualizar_modo_e_vigia(&mut i, ModoJanela::Aberta).unwrap();
+        assert_ne!(gen1, gen2);
+        // O vigia anterior (gen1) continua inválido e sai no próximo ciclo sem emitir eventos.
+        assert!(!vigia_ainda_valido(&ativa, gen1));
+        // Apenas o vigia novo (gen2) segue válido.
+        assert!(vigia_ainda_valido(&ativa2, gen2));
+    }
+
+    #[test]
+    fn timer_de_aviso_nao_encolhe_sob_hover_com_canal_conectado() {
+        // Canal conectado + ponteiro dentro da aba -> não encolhe pelo Rust (I-4).
+        assert!(!deve_encolher_aviso_no_timer(true, false));
+        // Canal conectado + ponteiro fora -> pode encolher.
+        assert!(deve_encolher_aviso_no_timer(true, true));
+        // Sem canal conectado -> timer de segurança sempre encolhe.
+        assert!(deve_encolher_aviso_no_timer(false, false));
     }
 }

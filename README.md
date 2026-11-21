@@ -1,103 +1,53 @@
 # Dita.se
 
-Ditado por voz, transcrição de reuniões e transcrição de arquivos de áudio e vídeo com separação de falantes para Mac e Windows. Tudo roda localmente no seu computador, sem conta, sem assinatura e sem enviar áudio ou texto para servidores externos.
+Dite em qualquer app e transcreva reuniões ou arquivos de áudio e vídeo com separação de falantes. O áudio e o texto ficam no seu computador.
 
-![Início](docs/screens-publicas/inicio-claro.png)
+## Baixar
 
-## O que é
+- [Baixar para Mac](https://github.com/stoll2003/ditase/releases/latest/download/Dita.se-mac-arm64.dmg) · macOS 15 ou mais recente, com chip Apple (M1 ou superior).
+- [Baixar para Windows](https://github.com/stoll2003/ditase/releases/latest/download/Dita.se-windows-x64-setup.exe) · Windows 10 (1903 ou mais recente) ou 11, x64.
 
-O **Dita.se** transforma fala em texto direto no campo onde você está digitando e também transcreve chamadas e gravações longas:
+Veja as [notas da versão mais recente](https://github.com/stoll2003/ditase/releases/latest) para conferir o download ou resolver avisos na primeira abertura.
 
-- **Ditado rápido em qualquer aplicativo:** segure a tecla do atalho (`Opção direita ⌥` no Mac e `Ctrl direito` no Windows, por padrão), fale e solte. O texto entra no cursor já pontuado e sem hesitações vazias, preservando as palavras que você disse. Também há modo mãos livres pelo botão flutuante na tela.
-- **Reuniões com falantes e resumo local:** captura o áudio do computador junto com o seu microfone durante chamadas (Meet, Zoom, Teams ou qualquer app), mostra a transcrição quase ao vivo, identifica quem falou ao encerrar e gera um resumo curto no modelo local.
-- **Arquivos de áudio e vídeo:** arraste gravações (`mp3`, `m4a`, `wav`, `aac`, `flac`, `ogg`, `mp4`, `mov`, `m4v`, `webm`) para separar as vozes por trecho, renomear participantes e exportar em texto (`.txt`), Markdown (`.md`) ou legendas (`.srt` e `.vtt`).
-- **Dicionário pessoal e estatísticas:** cadastre nomes próprios, siglas e termos técnicos para que saiam sempre com a grafia certa, inclusive por semelhança fonética.
-- **Fidelidade ao que foi dito:** a limpeza opcional por modelo local só pontua, organiza parágrafos e remove muletas ou autocorreções; uma camada determinística impede que o modelo invente frases ou troque suas palavras por sinônimos.
+## Telas
 
-![Reunião](docs/screens-publicas/reuniao-claro.png)
+![Tela de início do Dita.se](docs/screens-publicas/inicio-claro.png)
 
-![Arquivos](docs/screens-publicas/arquivos-claro.png)
+[Reunião](docs/screens-publicas/reuniao-claro.png) · [Arquivos](docs/screens-publicas/arquivos-claro.png) · [Ajustes](docs/screens-publicas/ajustes-claro.png)
 
-![Ajustes](docs/screens-publicas/ajustes-claro.png)
-
-## Requisitos
+<details>
+<summary><strong>Instalação, permissões e desinstalação</strong></summary>
 
 ### Mac
 
-- Mac com chip Apple (M1 ou superior)
-- macOS 15 ou superior
+Abra o DMG e arraste o Dita.se para **Aplicativos**. Se o macOS bloquear a primeira abertura, tente abrir o app, feche o aviso e vá a **Ajustes do Sistema** > **Privacidade e Segurança** > **Abrir Mesmo Assim**. Para ditar, segure **Opção direita**.
 
-### Windows
+O macOS pede acesso ao **Microfone** para ouvir a sua voz, à **Acessibilidade** para acionar o atalho e colar e à gravação de áudio do sistema para capturar a chamada. O app não grava imagens da tela.
 
-- Windows 10 (versão 1903 ou mais recente) ou Windows 11
-- Computador de 64 bits (x64)
-
-#### Instalar no Windows
-
-1. Abra **Releases** na página deste repositório e baixe `Dita.se-windows-x64-setup.exe` e `SHA256SUMS.txt` da última versão.
-2. Abra o PowerShell na pasta dos downloads e rode:
-
-   ```powershell
-   Get-FileHash -Algorithm SHA256 .\Dita.se-windows-x64-setup.exe
-   ```
-
-   Compare o resultado com o hash do instalador em `SHA256SUMS.txt`. Abra o instalador se os dois valores coincidirem.
-3. O instalador configura o app para a sua conta, sem senha de administrador. Como ele ainda é distribuído sem assinatura Authenticode, o SmartScreen pode mostrar um aviso. Após conferir o hash, escolha **Mais informações** > **Executar assim mesmo**.
-
-Para ditar, segure o **Ctrl direito**, fale e solte. Você pode trocar a tecla em **Ajustes**. No teclado brasileiro, o Alt direito funciona como AltGr.
-
-Na primeira abertura, o app baixa cerca de 700 MB em modelos de fala e de separação de falantes. A IA de limpeza é opcional e pode ser baixada pela aba **Início**. O app verifica atualizações automaticamente ao abrir e pede sua confirmação antes de instalar.
-
-## Instalar no Mac
-
-### Opção 1: instalar por uma linha no Terminal (recomendado)
-
-Abra o aplicativo **Terminal** e cole:
+Para instalar pelo Terminal, rode:
 
 ```bash
 curl -fsSL -H 'Accept: application/vnd.github.raw+json' 'https://api.github.com/repositories/1464733163/contents/scripts/install.sh?ref=main' | bash
 ```
 
-O script baixa o `.dmg` da última versão publicada no GitHub Releases, confere a integridade pelo hash SHA-256, copia o `Dita.se.app` para `/Applications` (ou `~/Applications` se a sua conta não for administradora) e remove o atributo de quarentena do download para que o app abra direto pelo ícone no Spotlight ou no Launchpad.
-
-### Opção 2: baixar o DMG manualmente
-
-1. Baixe o arquivo `Dita.se-mac-arm64.dmg` na página de **Releases** deste repositório.
-2. Abra o `.dmg` e arraste o **Dita.se** para a pasta **Aplicativos**.
-3. **Na primeira abertura:** como o aplicativo é distribuído com assinatura local gratuita (sem certificado pago da Apple), o macOS pode exibir um aviso dizendo que a Apple não pôde verificar o app. Para autorizar:
-   - Tente abrir o **Dita.se** uma vez e feche o aviso.
-   - Abra **Ajustes do Sistema** > **Privacidade e Segurança**.
-   - Role até a seção **Segurança** e clique em **Abrir Mesmo Assim** ao lado da mensagem sobre o Dita.se.
-   - Confirme com a senha ou Touch ID do Mac. Nas próximas vezes ele abrirá normalmente.
-
-## Permissões no Mac
-
-Na primeira vez que você usar cada função, o macOS pedirá as permissões correspondentes:
-
-- **Microfone:** para ouvir a sua voz nos ditados e nas reuniões.
-- **Acessibilidade:** para detectar o atalho global de teclado e colar o texto no campo em foco.
-- **Gravação de Áudio do Sistema / Tela:** solicitada apenas quando você inicia uma reunião na aba **Reunião**, para ouvir os outros participantes da chamada. Nenhuma imagem da sua tela é gravada.
-
-## Privacidade
-
-- O reconhecimento de fala, a separação de vozes, a limpeza e os resumos rodam no computador. Seu áudio, suas transcrições e seu dicionário ficam no dispositivo.
-- O app usa a internet para baixar os modelos. No Windows, também consulta e baixa atualizações.
-- Os dados ficam em `~/Library/Application Support/Ditado` no Mac e em `%LOCALAPPDATA%\Dita.se` no Windows.
-
-## Desinstalar
-
-### Mac
-
-1. Feche o Dita.se e mova `/Applications/Dita.se.app` (ou `~/Applications/Dita.se.app`) para a Lixeira.
-2. Se quiser apagar também o histórico, o dicionário, as reuniões e o modelo de limpeza, remova a pasta `~/Library/Application Support/Ditado`.
-3. O modelo de reconhecimento de fala e o de separação de vozes ficam num cache da biblioteca FluidAudio, em `~/Library/Application Support/FluidAudio/Models`. Essa pasta pode ser usada por outros apps que usam a mesma biblioteca. Se nenhum outro app precisar dela, pode removê-la também.
+Para desinstalar, mova o app para a Lixeira. Os dados e o modelo de limpeza ficam em `~/Library/Application Support/Ditado`. Os modelos de fala e falantes ficam no cache compartilhado `~/Library/Application Support/FluidAudio/Models`.
 
 ### Windows
 
-Em **Configurações** > **Aplicativos**, encontre **Dita.se** e escolha **Desinstalar**. Se quiser remover também o histórico, as preferências e os modelos baixados, remova `%LOCALAPPDATA%\Dita.se`.
+Abra o instalador. Ele instala o app para sua conta, sem senha de administrador. Para ditar, segure **Ctrl direito**. Você pode trocar a tecla em **Ajustes**. No teclado brasileiro, o Alt direito funciona como AltGr.
+
+Na primeira abertura, o app baixa cerca de 700 MB em modelos de fala e de separação de falantes. A limpeza com IA é opcional e pode ser baixada pela aba **Início**. O app consulta atualizações ao abrir e pede confirmação antes de instalar.
+
+Para desinstalar, vá a **Configurações** > **Aplicativos**. Os dados e modelos ficam em `%LOCALAPPDATA%\Dita.se`.
+
+### Privacidade
+
+O reconhecimento de fala, a separação de vozes, a limpeza e os resumos rodam no computador. O app usa a internet para baixar modelos e, no Windows, para consultar e baixar atualizações.
+
+</details>
 
 <details>
-<summary><strong>Seção avançada: compilação a partir do código-fonte, arquitetura e testes</strong></summary>
+<summary><strong>Para desenvolvedores</strong></summary>
 
 ### Arquitetura do projeto
 
@@ -114,7 +64,7 @@ Em **Configurações** > **Aplicativos**, encontre **Dita.se** e escolha **Desin
 - **`nucleo-rs/`** porta o núcleo Swift para Rust. Ele reúne as regras de texto, o dicionário, o histórico, as reuniões e a recuperação de gravações interrompidas. Os dois núcleos executam os casos de teste compartilhados em `contrato/casos/`.
 - **`motores/`** executa o Parakeet via sherpa-onnx e separa os falantes. A limpeza e o resumo usam llama.cpp na CPU, com servidor em `127.0.0.1`, TLS e chave gerada a cada execução.
 - **GitHub Actions** compila e testa o aplicativo e gera o instalador NSIS. O fluxo confere o SHA-256 das bibliotecas de terceiros baixadas e testa a regressão da taxa de erro de palavras (WER) do Parakeet.
-- **Atualizador** verifica a assinatura minisign do instalador indicado em `latest.json`, na release. A chave privada fica fora do repositório.
+- **Atualizador** verifica a assinatura minisign do instalador indicado no `latest.json` do canal estável. A chave privada fica fora do repositório.
 
 ### Compilar e testar no Windows
 

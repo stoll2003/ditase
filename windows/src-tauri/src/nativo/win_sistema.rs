@@ -53,27 +53,30 @@ pub fn versao() -> String {
 }
 
 fn dword_personalize(nome: &str) -> Option<u32> {
-    let saida = Command::new("reg")
-        .args([
-            "query",
-            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
-            "/v",
-            nome,
-        ])
-        .creation_flags(SEM_JANELA)
-        .output()
-        .ok()?;
-    let texto = String::from_utf8_lossy(&saida.stdout);
-    let val = texto
-        .lines()
-        .find(|l| l.trim_start().starts_with(nome))?
-        .split("REG_DWORD")
-        .nth(1)?
-        .trim();
-    if let Some(hex) = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).ok()
+    use std::ffi::c_void;
+    use windows::{
+        core::HSTRING,
+        Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD},
+    };
+    let subchave = w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+    let valor = HSTRING::from(nome);
+    let mut dado = 0u32;
+    let mut tam = std::mem::size_of::<u32>() as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            subchave,
+            &valor,
+            RRF_RT_REG_DWORD,
+            None,
+            Some((&mut dado as *mut u32).cast::<c_void>()),
+            Some(&mut tam),
+        )
+    };
+    if status.is_ok() {
+        Some(dado)
     } else {
-        val.parse::<u32>().ok()
+        None
     }
 }
 

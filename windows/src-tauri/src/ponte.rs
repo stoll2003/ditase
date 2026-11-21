@@ -264,6 +264,9 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
         "permissao.pedir" => match p.get("qual").and_then(Value::as_str) {
             Some("microfone") => {
                 let _ = nativo::sistema::abrir("ms-settings:privacy-microphone");
+                if let Some(b) = casca.bandeja.get() {
+                    b.definir_falta_permissao(!crate::audio::microfone_disponivel());
+                }
                 emitir(app, "estado");
                 ok()
             }

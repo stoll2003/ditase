@@ -2,7 +2,7 @@
 //!
 //! Uso:
 //!   medir --corpus motores/corpus [--modelos DIR] [--baixar] [--threads N]
-//!         [--falantes] [--limiar N] [--llama BIN --gguf ARQ --llama-threads N --contexto N] [--json SAIDA.json]
+//!         [--falantes [--detalhe]] [--limiar N] [--llama BIN --gguf ARQ --llama-threads N --contexto N] [--json SAIDA.json]
 //!   medir --diagnostico-llama --llama BIN --gguf ARQ [--sha256 HEX]
 //!
 //! `--diagnostico-llama` sobe o `llama-server` do pacote com um GGUF público minúsculo e faz uma
@@ -42,6 +42,7 @@ struct Args {
     json: Option<PathBuf>,
     fala_json: Option<PathBuf>,
     diagnostico: bool,
+    detalhe: bool,
     sha256: Option<String>,
 }
 
@@ -60,6 +61,7 @@ fn args() -> Args {
         json: None,
         fala_json: None,
         diagnostico: false,
+        detalhe: false,
         sha256: None,
     };
     let mut it = std::env::args().skip(1);
@@ -80,6 +82,7 @@ fn args() -> Args {
             "--baixar" => a.baixar = true,
             "--falantes" => a.falantes = true,
             "--diagnostico-llama" => a.diagnostico = true,
+            "--detalhe" => a.detalhe = true,
             "--sha256" => a.sha256 = Some(v().to_ascii_lowercase()),
             outro => panic!("opção desconhecida: {outro}"),
         }
@@ -319,6 +322,20 @@ fn main() {
                 vr.len(),
                 der * 100.0
             );
+            if a.detalhe {
+                for f in &refe {
+                    println!(
+                        "    referência {:>6.2} a {:>6.2}  {}",
+                        f.inicio, f.fim, f.voz
+                    );
+                }
+                for f in &hip {
+                    println!(
+                        "    obtido     {:>6.2} a {:>6.2}  {}",
+                        f.inicio, f.fim, f.voz
+                    );
+                }
+            }
             itens.push(serde_json::json!({"arquivo": nome, "audio_s": dur, "proc_s": p, "vozes_ref": vr.len(), "vozes_obtidas": vh.len(), "erro_quadro": der}));
         }
         rel.insert(

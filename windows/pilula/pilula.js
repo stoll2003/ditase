@@ -29,6 +29,7 @@ let ponteiroSobre = false;
 let acenoAtivo = false;
 let hoverAberto = false;
 let etapa = "Transcrevendo";
+let progressoAtivo = false;
 let progressoReal = null; // 0..1 ou null
 let baixando = null; // { feito, total, pct } ou null
 let aviso = null; // { texto, nivel } ou null
@@ -47,7 +48,8 @@ const PESOS3 = [0.78, 1, 0.78];
 const historico = Array(5).fill(0);
 const atual9 = Array(9).fill(0.18);
 const atual3 = Array(3).fill(0.18);
-const ultimoEscrito9 = Array(9).fill(-1);
+const ultimoEscrito9a = Array(9).fill(-1);
+const ultimoEscrito9m = Array(9).fill(-1);
 const ultimoEscrito3 = Array(3).fill(-1);
 let nivelAlvo = 0;
 let rafId = 0;
@@ -133,9 +135,10 @@ function calcularEstado() {
       ? { id: "gravandoAberta", visivel: 200, vista: "v-grav-aberta" }
       : { id: "gravandoCompacta", visivel: 32, vista: "v-grav-comp" };
   }
-  if (fase === "processando") {
+  if (fase === "processando" || (fase === "ociosa" && progressoAtivo)) {
     if (hoverAberto) {
-      const w = Math.max(200, Math.min(240, Math.round(etapa.length * 7.5 + 64)));
+      const textoEtapa = typeof etapa === "string" && etapa ? etapa : "Transcrevendo";
+      const w = Math.max(200, Math.min(240, Math.round(textoEtapa.length * 7.5 + 64)));
       return { id: "processandoAberta", visivel: w, vista: "v-proc-aberta" };
     }
     return { id: "processandoCompacta", visivel: 32, vista: "v-proc-comp" };
@@ -269,8 +272,8 @@ function passoBarras(ts) {
   }
 
   aplicarEscalaBarras(barras3, atual3, ultimoEscrito3);
-  aplicarEscalaBarras(barras9a, atual9, ultimoEscrito9);
-  aplicarEscalaBarras(barras9m, atual9, ultimoEscrito9);
+  aplicarEscalaBarras(barras9a, atual9, ultimoEscrito9a);
+  aplicarEscalaBarras(barras9m, atual9, ultimoEscrito9m);
 }
 
 function atualizarLoopBarras() {
@@ -330,7 +333,7 @@ casca.addEventListener("pointerenter", (e) => {
   ponteiroSobre = true;
   if (fecharTimer) { clearTimeout(fecharTimer); fecharTimer = null; }
   if (e.pointerType === "touch" || e.pointerType === "pen") return;
-  if ((fase === "gravando" || fase === "processando" || baixando) && !hoverAberto) {
+  if ((fase === "gravando" || fase === "processando" || progressoAtivo || baixando) && !hoverAberto) {
     if (abrirTimer) clearTimeout(abrirTimer);
     abrirTimer = setTimeout(() => {
       abrirTimer = null;
@@ -432,8 +435,8 @@ window.pilula = (m) => {
           atual3[i] = Math.max(0.18, Math.min(1, (historico[d] ?? 0) * PESOS3[i]));
         }
         aplicarEscalaBarras(barras3, atual3, ultimoEscrito3);
-        aplicarEscalaBarras(barras9a, atual9, ultimoEscrito9);
-        aplicarEscalaBarras(barras9m, atual9, ultimoEscrito9);
+        aplicarEscalaBarras(barras9a, atual9, ultimoEscrito9a);
+        aplicarEscalaBarras(barras9m, atual9, ultimoEscrito9m);
       }
       break;
     }
@@ -451,9 +454,14 @@ window.pilula = (m) => {
     }
     case "progresso": {
       if (!m.progresso) {
+        progressoAtivo = false;
         progressoReal = null;
+        etapa = "Transcrevendo";
       } else {
-        if (m.progresso.etapa) etapa = m.progresso.etapa;
+        progressoAtivo = true;
+        const e = m.progresso.etapa;
+        const rotulo = typeof e === "string" ? e : (e && typeof e.rotulo === "string" ? e.rotulo : null);
+        if (rotulo) etapa = rotulo;
         if (typeof m.progresso.progresso === "number") {
           progressoReal = Math.max(progressoReal ?? 0, Math.min(1, m.progresso.progresso));
         }
