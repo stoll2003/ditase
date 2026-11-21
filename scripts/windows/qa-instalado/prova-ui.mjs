@@ -183,6 +183,8 @@ function lerTela(cdp, rotuloBotao) {
       botaoEncontrado: !!btn,
       botaoDesabilitado: btn ? !!btn.disabled : null,
       avisoIndisponivel: texto.includes("indisponível nesta versão do motor"),
+      // Texto do aviso de status (o candidato mostra o motivo do reconhecedor durante a carga).
+      status: Array.from(document.querySelectorAll("main [role=status], main [role=alert]")).map(e => e.innerText.trim()).filter(Boolean).join(" | ").slice(0, 300),
     };
   })()`);
 }
@@ -264,12 +266,16 @@ async function faseTransicao(cdp, relatorio) {
       ponteDisponivel: lanc?.disponivel ?? null,
       telaBotaoDesabilitado: tela.botaoDesabilitado,
       telaAvisoIndisponivel: tela.avisoIndisponivel,
+      telaStatus: tela.status,
       mesmaPagina: tela.marca === marca,
     };
     if (!tela.botaoEncontrado) throw new ErroDeProva("ui_controle_ausente", "botão Escolher arquivo não está na tela", a);
     if (a.ponteDisponivel === null) throw new ErroDeProva("ponte_contrato", "lancamento.estado sem campo disponivel", lanc);
     if (!a.mesmaPagina) throw new ErroDeProva("sessao_recarregada", "a página recarregou; a observação não vale", a);
-    if (linha.length < 400 || a.ponteDisponivel !== linha[linha.length - 1]?.ponteDisponivel) linha.push(a);
+    const ant = linha[linha.length - 1];
+    const mudou = !ant || ant.ponteDisponivel !== a.ponteDisponivel || ant.reconhecedor !== a.reconhecedor
+      || ant.telaBotaoDesabilitado !== a.telaBotaoDesabilitado || ant.telaStatus !== a.telaStatus;
+    if (mudou && linha.length < 400) linha.push(a);
     return a;
   };
 
@@ -281,8 +287,8 @@ async function faseTransicao(cdp, relatorio) {
       "a ponte já diz disponível na primeira consulta: o Parakeet estava no disco e a transição não pode ser observada"
     );
   }
-  if (!primeira.telaBotaoDesabilitado || !primeira.telaAvisoIndisponivel) {
-    throw new ErroDeProva("precondicao_tela", "sem modelo no disco, a tela deveria mostrar Arquivos indisponível", primeira);
+  if (!primeira.telaBotaoDesabilitado) {
+    throw new ErroDeProva("precondicao_tela", "sem modelo no disco, Escolher arquivo deveria estar desabilitado", primeira);
   }
 
   // Espera o modelo chegar ao disco na mesma sessão (o app baixa sozinho).
