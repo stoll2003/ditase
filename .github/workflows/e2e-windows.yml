@@ -115,15 +115,6 @@ jobs:
           echo "casca=$casca" >> "$GITHUB_OUTPUT"
           echo "modelos=$modelos" >> "$GITHUB_OUTPUT"
 
-      - name: Motores reais (Parakeet, palavras com tempo, separação de três vozes)
-        shell: bash
-        env:
-          DITASE_TESTES_MODELOS: "1"
-        run: |
-          set -euo pipefail
-          "${{ steps.exe.outputs.modelos }}" --nocapture --test-threads=1 | tee "$RUNNER_TEMP/e2e-motores.log"
-          grep -F 'test diarizacao_separa_tres_vozes ... ok' "$RUNNER_TEMP/e2e-motores.log"
-
       - name: Prova de ponta a ponta (arquivo, reunião, resumo e recuperação)
         shell: bash
         env:
@@ -135,6 +126,15 @@ jobs:
           test -f "$DITASE_E2E_LLAMA"
           "${{ steps.exe.outputs.casca }}" e2e --ignored --nocapture --test-threads=1 | tee "$RUNNER_TEMP/e2e.log"
           grep -F 'test e2e::e2e_arquivo_reuniao_resumo_e_recuperacao ... ok' "$RUNNER_TEMP/e2e.log"
+
+      - name: Motores reais (Parakeet, palavras com tempo, separação de três vozes)
+        shell: bash
+        env:
+          DITASE_TESTES_MODELOS: "1"
+        run: |
+          set -euo pipefail
+          "${{ steps.exe.outputs.modelos }}" --nocapture --test-threads=1 | tee "$RUNNER_TEMP/e2e-motores.log"
+          grep -F 'test diarizacao_separa_tres_vozes ... ok' "$RUNNER_TEMP/e2e-motores.log"
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
@@ -151,11 +151,15 @@ jobs:
           {
             echo "## Prova de ponta a ponta no Windows"
             echo
-            echo '| Etapa | Segundos |'
-            echo '|---|---|'
-            grep -h '^TEMPO ' "$RUNNER_TEMP/e2e.log" 2>/dev/null | sed -E 's/^TEMPO (.*): ([0-9.]+) s$/| \1 | \2 |/'
-            echo
-            grep -h -E '^(arquivo|reunião|recuperada|resumo)' "$RUNNER_TEMP/e2e.log" 2>/dev/null | sed 's/^/    /'
+            if [ -f "$RUNNER_TEMP/e2e.log" ]; then
+              echo '| Etapa | Segundos |'
+              echo '|---|---|'
+              (grep -h '^TEMPO ' "$RUNNER_TEMP/e2e.log" || true) | sed -E 's/^TEMPO (.*): ([0-9.]+) s$/| \1 | \2 |/'
+              echo
+              (grep -h -E '^(arquivo|reunião|recuperada|resumo)' "$RUNNER_TEMP/e2e.log" || true) | sed 's/^/    /'
+            else
+              echo "Log da prova não gerado."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
