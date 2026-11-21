@@ -14,7 +14,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -70,22 +70,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           toolchain: stable
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          shared-key: windows-x64
+          shared-key: windows-x64-sherpa-verified-v1
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
 
-      # O rust-cache restaura o build do sherpa-onnx-sys sem as bibliotecas que o build.rs dele
-      # baixa para target/sherpa-onnx-prebuilt (LNK1181 sherpa-onnx-c-api.lib). Refaz só esse crate.
-      - name: Refazer sherpa-onnx-sys (cache sem as bibliotecas baixadas)
-        shell: bash
-        run: rm -rf target/sherpa-onnx-prebuilt && cargo clean -p sherpa-onnx-sys && cargo clean -p sherpa-onnx-sys --release
+      # Cache só dos arquivos baixados. O hash é conferido mesmo quando há cache.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vendor-cache
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows/preparar-vendor.ps1') }}
+
+      - name: Preparar bibliotecas verificadas do Windows
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1 ${{ steps.modo.outputs.tauri == 'false' && '-SomenteSherpa' || '' }}
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name != 'pull_request' && steps.vendor-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ${{ steps.vendor-cache.outputs.cache-primary-key }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: ui/package-lock.json
+          cache-dependency-path: |
+            ui/package-lock.json
+            scripts/windows/tauri-cli/package-lock.json
 
       - name: Build da UI
         working-directory: ui
@@ -93,8 +109,17 @@ jobs:
           npm ci
           npm run build
 
-      - name: cargo test (workspace)
-        run: cargo test --workspace --all-targets
+      # Use o mesmo perfil e feature do NSIS para reaproveitar dependências compiladas.
+      - name: Testes Rust em Release (workspace e WER)
+        shell: bash
+        env:
+          TEM_TAURI: ${{ steps.modo.outputs.tauri }}
+        run: |
+          set -euo pipefail
+          args=(--locked --workspace --all-targets --release)
+          if [ "$TEM_TAURI" = true ]; then args+=(--features ditase/custom-protocol); fi
+          cargo test "${args[@]}" | tee "$RUNNER_TEMP/ditase-testes.log"
+          grep -F 'test medicao::testes::wer_basico ... ok' "$RUNNER_TEMP/ditase-testes.log"
 
       - name: install.ps1 no Windows PowerShell 5.1 (sintaxe e recusa de hash errado)
         shell: powershell
@@ -104,10 +129,9 @@ jobs:
         shell: pwsh
         run: .\scripts\windows\testar-install.ps1 -Modo sintaxe
 
-      - name: Preparar binários (vendor)
+      - name: Instalar CLI do Tauri pelo lockfile
         if: steps.modo.outputs.tauri == 'true'
-        shell: powershell
-        run: .\scripts\windows\preparar-vendor.ps1
+        run: npm ci --prefix scripts/windows/tauri-cli --ignore-scripts --no-audit --no-fund
 
       - name: Build Tauri (NSIS por usuário, sem atualizador)
         if: steps.modo.outputs.tauri == 'true'
@@ -116,13 +140,20 @@ jobs:
         run: |
           # installMode currentUser: instala em %LOCALAPPDATA% sem pedir administrador.
           # Em CI não há chave do atualizador (PRs de fora não leem secrets).
-          npx --yes @tauri-apps/cli@2 build --bundles nsis --ci \
+          node ../scripts/windows/tauri-cli/node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --ci \
             --config src-tauri/tauri.distribuicao.conf.json \
-            --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}'
+            --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' -- --locked
 
       - name: install.ps1 instalando o build do CI (por usuário, atalho, desinstala)
         if: steps.modo.outputs.tauri == 'true'
         shell: powershell
+        run: |
+          $exe = Get-ChildItem target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
+          .\scripts\windows\testar-install.ps1 -Modo instalacao -Instalador $exe.FullName
+
+      - name: Reinstalação em pasta com acento e espaço (PowerShell 7)
+        if: steps.modo.outputs.tauri == 'true'
+        shell: pwsh
         run: |
           $exe = Get-ChildItem target\release\bundle\nsis\*-setup.exe | Select-Object -First 1
           .\scripts\windows\testar-install.ps1 -Modo instalacao -Instalador $exe.FullName
@@ -135,3 +166,80 @@ jobs:
           path: target/release/bundle/nsis/*.exe
           if-no-files-found: error
           retention-days: 7
+
+      - name: Formatação Rust
+        if: success() || failure()
+        run: cargo fmt --all --check
+
+      - name: Clippy Windows
+        if: success() || failure()
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+  wer:
+    name: Windows (WER Parakeet)
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: windows-x64-wer-v1
+          cache-on-failure: true
+          save-if: ${{ github.event_name != 'pull_request' }}
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: vendor-cache
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/windows/preparar-vendor.ps1') }}
+
+      - name: Preparar sherpa-onnx verificado
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1 -SomenteSherpa
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: parakeet-cache
+        with:
+          path: ${{ runner.temp }}/ditase-modelos-cache
+          key: ditase-modelos-parakeet-${{ hashFiles('motores/src/catalogo.rs') }}
+
+      - name: Preparar Parakeet verificado por SHA-256
+        shell: powershell
+        run: .\scripts\windows\preparar-parakeet.ps1
+
+      - uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: github.event_name != 'pull_request' && steps.parakeet-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.temp }}/ditase-modelos-cache
+          key: ${{ steps.parakeet-cache.outputs.cache-primary-key }}
+
+      - name: Regressão de WER (Parakeet PT-BR)
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe="$(cargo test --locked --release -p motores --test modelos --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "modelos") | .executable' \
+            | tail -n 1)"
+          if [ -z "$exe" ] || [ ! -f "$exe" ]; then
+            echo "Executável de teste modelos não encontrado." >&2
+            exit 1
+          fi
+          # No Windows, System32\onnxruntime.dll (1.17.1) vence o PATH; colocar as DLLs
+          # verificadas ao lado do .exe garante a versão do sherpa-onnx.
+          dir_exe="$(dirname "$exe")"
+          cp -f \
+            "$SHERPA_ONNX_LIB_DIR/sherpa-onnx-c-api.dll" \
+            "$SHERPA_ONNX_LIB_DIR/onnxruntime.dll" \
+            "$SHERPA_ONNX_LIB_DIR/onnxruntime_providers_shared.dll" \
+            "$dir_exe/"
+          if "$exe" --list --ignored | grep -F 'wer_do_corpus_pt_br: test'; then
+            "$exe" wer_do_corpus_pt_br --ignored --nocapture
+          else
+            echo "::notice::Teste wer_do_corpus_pt_br ainda ausente nesta branch; validando Parakeet com parakeet_transcreve_pt_br."
+            DITASE_TESTES_MODELOS=1 "$exe" parakeet_transcreve_pt_br --nocapture
+          fi

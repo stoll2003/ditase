@@ -1,34 +1,32 @@
-# Instala o Dita.se no Windows 11 (x64) para o usuário atual, sem administrador.
-#
-# Uso (PowerShell):
-#   irm https://raw.githubusercontent.com/stoll2003/ditase/windows/scripts/install.ps1 | iex
-#
-# Canal: teste (padrão nesta fase) ou estavel.
-#   $env:DITASE_CANAL = 'estavel'; irm https://raw.githubusercontent.com/stoll2003/ditase/windows/scripts/install.ps1 | iex
-#   ou, salvo em arquivo: .\install.ps1 -Canal estavel
-#
-# O que faz: baixa o instalador e o SHA256SUMS.txt do canal, confere o SHA-256,
-# instala em silêncio por usuário (%LOCALAPPDATA%), garante o atalho na Área de
-# Trabalho e abre o app. Depois disso o próprio app se atualiza ao abrir.
-#
-# Variáveis para testes: DITASE_REPO, DITASE_BASE_URL (URL ou pasta local),
-# DITASE_NAO_ABRIR=1 (não abre o app no fim).
+﻿# Auxiliar de instalação para uso local ou em CI. Para o primeiro teste no PC,
+# siga scripts/windows/LEIA-ME-TESTE.md e confira o SHA-256 enviado separadamente.
+# DITASE_PROXY: URL do proxy sem usuário/senha; usa o login do Windows.
+# DITASE_BASE_URL: pasta local ou URL HTTPS de um espelho autorizado.
+# DITASE_NAO_ABRIR=1: não abre o aplicativo após instalar.
 
 param(
     [ValidateSet('teste', 'estavel')]
-    [string]$Canal = $(if ($env:DITASE_CANAL) { $env:DITASE_CANAL } else { 'teste' })
+    [string]$Canal = $(if ($env:DITASE_CANAL) { $env:DITASE_CANAL } else { 'teste' }),
+    [ValidatePattern('\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-teste\.[1-9][0-9]*)?\z')]
+    [string]$Versao,
+    [Parameter(Mandatory)]
+    [ValidatePattern('\A[0-9a-fA-F]{64}\z')]
+    [string]$Sha256
 )
 
 function Install-Ditase {
-    param([string]$Canal)
+    param([string]$Canal, [string]$Versao, [string]$Sha256)
 
-    # Só no escopo da função: não altera a sessão de quem rodou o irm | iex.
+    # Limita as preferências de erro e progresso ao escopo da instalação.
     $ErrorActionPreference = 'Stop'
     $ProgressPreference = 'SilentlyContinue'
 
     $repo = if ($env:DITASE_REPO) { $env:DITASE_REPO } else { 'stoll2003/ditase' }
-    $instalador = 'Dita.se-windows-x64-setup.exe'
-    $somas = 'SHA256SUMS.txt'
+    if ($Versao) {
+        $instalador = "Dita.se-windows-x64-$Versao-setup.exe"
+    } else {
+        $instalador = 'Dita.se-windows-x64-setup.exe'
+    }
 
     if ($env:DITASE_BASE_URL) {
         $base = $env:DITASE_BASE_URL.TrimEnd('/', '\')
@@ -42,92 +40,119 @@ function Install-Ditase {
         throw 'O Dita.se para Windows precisa de um Windows 64 bits.'
     }
 
-    # PowerShell 5.1 ainda pode vir sem TLS 1.2 ligado.
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    } catch { }
+    # O PowerShell 5.1 usa ServicePointManager; restaure o valor ao sair.
+    $tlsAnterior = [Net.ServicePointManager]::SecurityProtocol
 
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("ditase-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tmp | Out-Null
 
     try {
-        Write-Host "Dita.se: baixando a versao do canal '$Canal'..."
+        if ($PSVersionTable.PSEdition -eq 'Desktop') {
+            [Net.ServicePointManager]::SecurityProtocol = $tlsAnterior -bor [Net.SecurityProtocolType]::Tls12
+        }
+        Write-Host "Dita.se: baixando a versão do canal '$Canal'..."
         $exe = Join-Path $tmp $instalador
-        $sumsArq = Join-Path $tmp $somas
-        foreach ($par in @(@($instalador, $exe), @($somas, $sumsArq))) {
-            $origem = "$base/$($par[0])"
-            if (Test-Path -LiteralPath $base) {
-                Copy-Item -LiteralPath (Join-Path $base $par[0]) -Destination $par[1]
-            } else {
-                try {
-                    Invoke-WebRequest -Uri $origem -OutFile $par[1] -UseBasicParsing
-                } catch {
-                    throw "Nao foi possivel baixar $origem. Confira a internet. Se o canal for 'estavel', talvez ainda nao exista versao para Windows. Detalhe: $($_.Exception.Message)"
+
+        if (Test-Path -LiteralPath $base -PathType Container) {
+            Copy-Item -LiteralPath (Join-Path $base $instalador) -Destination $exe
+        } else {
+            if ($Canal -eq 'teste' -and $Versao -notmatch '-teste\.') {
+                throw 'Informe a versão de teste em -Versao, como 0.2.0-teste.123.'
+            }
+            $origem = "$base/$instalador" -as [uri]
+            if (-not $origem -or -not $origem.IsAbsoluteUri -or $origem.Scheme -ne 'https' -or $origem.UserInfo) {
+                throw 'O endereço do instalador deve usar HTTPS e não pode conter usuário e senha.'
+            }
+            $proxy = @{}
+            if ($env:DITASE_PROXY) {
+                $urlProxy = $env:DITASE_PROXY -as [uri]
+                if (-not $urlProxy -or -not $urlProxy.IsAbsoluteUri -or
+                    $urlProxy.Scheme -notin @('http', 'https') -or $urlProxy.UserInfo) {
+                    throw 'DITASE_PROXY deve ser uma URL HTTP ou HTTPS sem usuário e senha.'
+                }
+                $proxy = @{ Proxy = $urlProxy; ProxyUseDefaultCredentials = $true }
+            } elseif ($PSVersionTable.PSEdition -eq 'Desktop') {
+                # No Windows PowerShell, use o proxy do sistema, inclusive o definido por PAC.
+                $destino = [uri]$base
+                $proxySistema = [Net.WebRequest]::DefaultWebProxy
+                if ($proxySistema -and -not $proxySistema.IsBypassed($destino)) {
+                    $proxy = @{ Proxy = $proxySistema.GetProxy($destino); ProxyUseDefaultCredentials = $true }
                 }
             }
+            Baixar-Ditase $origem.AbsoluteUri $exe @proxy
+            # Mantém o arquivo sujeito às verificações do Windows para downloads.
+            Set-Content -LiteralPath $exe -Stream Zone.Identifier -Encoding Ascii -Value @('[ZoneTransfer]', 'ZoneId=3')
         }
 
         Write-Host 'Conferindo o SHA-256...'
-        $esperado = $null
-        foreach ($linha in Get-Content -LiteralPath $sumsArq) {
-            $partes = $linha.Trim() -split '\s+', 2
-            if ($partes.Count -eq 2 -and $partes[1].TrimStart('*') -eq $instalador) {
-                $esperado = $partes[0].ToLowerInvariant()
-                break
-            }
-        }
-        if (-not $esperado) { throw "Hash de $instalador nao encontrado em $somas." }
         $atual = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($atual -ne $esperado) {
-            throw "Falha na conferencia do SHA-256 (esperado $esperado, calculado $atual). Nada foi instalado."
+        if ($atual -ne $Sha256) {
+            throw "Falha na conferência do SHA-256 (esperado $Sha256, calculado $atual). Nada foi instalado."
         }
 
-        Unblock-File -LiteralPath $exe -ErrorAction SilentlyContinue
-
-        # Fecha o Dita.se se estiver aberto, para a instalação poder substituir os arquivos.
         $registro = Get-DitaseRegistro
         if ($registro -and $registro.DisplayIcon) {
-            $exeApp = ($registro.DisplayIcon -split ',')[0].Trim('"')
-            Get-Process -ErrorAction SilentlyContinue |
-                Where-Object { $_.Path -and ($_.Path -ieq $exeApp) } |
-                Stop-Process -Force -ErrorAction SilentlyContinue
+            $exeApp = ($registro.DisplayIcon -replace ',-?\d+$').Trim('"')
+            $aberto = Get-Process -ErrorAction SilentlyContinue |
+                Where-Object { $_.Path -and ($_.Path -ieq $exeApp) }
+            if ($aberto) { throw 'Encerre o Dita.se pelo ícone da bandeja antes de reinstalar.' }
         }
 
         Write-Host 'Instalando (sem pedir senha de administrador)...'
-        Write-Host 'Se aparecer "O Windows protegeu o computador", clique em "Mais informacoes" e depois em "Executar assim mesmo". O aviso aparece porque o Dita.se e gratuito e nao tem certificado pago; o arquivo ja foi conferido pelo SHA-256.'
         $proc = Start-Process -FilePath $exe -ArgumentList '/S' -Wait -PassThru
-        if ($proc.ExitCode -ne 0) { throw "O instalador terminou com erro (codigo $($proc.ExitCode))." }
+        if ($proc.ExitCode -ne 0) { throw "O instalador terminou com erro (código $($proc.ExitCode))." }
 
         $registro = Get-DitaseRegistro
         if (-not $registro -or -not $registro.DisplayIcon) {
-            throw 'A instalacao terminou, mas o Dita.se nao foi encontrado no registro do usuario.'
+            throw 'A instalação terminou, mas o Dita.se não foi encontrado no registro do usuário.'
         }
-        $exeApp = ($registro.DisplayIcon -split ',')[0].Trim('"')
-        if (-not (Test-Path -LiteralPath $exeApp)) { throw "Executavel nao encontrado: $exeApp" }
+        $exeApp = ($registro.DisplayIcon -replace ',-?\d+$').Trim('"')
+        if (-not (Test-Path -LiteralPath $exeApp)) { throw "Executável não encontrado: $exeApp" }
 
         $nome = if ($registro.DisplayName) { $registro.DisplayName } else { 'Dita.se' }
         $desktop = [Environment]::GetFolderPath('Desktop')
         $atalho = Join-Path $desktop "$nome.lnk"
-        if (-not (Test-Path -LiteralPath $atalho)) {
-            $shell = New-Object -ComObject WScript.Shell
-            $lnk = $shell.CreateShortcut($atalho)
-            $lnk.TargetPath = $exeApp
-            $lnk.WorkingDirectory = Split-Path -Parent $exeApp
-            $lnk.IconLocation = "$exeApp,0"
-            $lnk.Save()
+        if (-not (Test-Path -LiteralPath $atalho -PathType Leaf)) {
+            Write-Warning "Atalho ausente na Área de Trabalho. Abra o Dita.se pelo menu Iniciar."
         }
 
-        $versao = if ($registro.DisplayVersion) { " $($registro.DisplayVersion)" } else { '' }
+        $versaoInstalada = if ($registro.DisplayVersion) { " $($registro.DisplayVersion)" } else { '' }
         Write-Host ""
-        Write-Host "Pronto: Dita.se$versao instalado em $(Split-Path -Parent $exeApp)."
-        Write-Host "Atalho na Area de Trabalho: $atalho"
-        Write-Host 'Daqui em diante o app se atualiza sozinho ao abrir.'
+        Write-Host "Pronto: Dita.se$versaoInstalada instalado em $(Split-Path -Parent $exeApp)."
+        if (Test-Path -LiteralPath $atalho -PathType Leaf) { Write-Host "Atalho na Área de Trabalho: $atalho" }
+        Write-Host 'O app verifica atualizações ao abrir e pede confirmação antes de instalar.'
 
         if ($env:DITASE_NAO_ABRIR -ne '1') {
             Start-Process -FilePath $exeApp
         }
     } finally {
+        [Net.ServicePointManager]::SecurityProtocol = $tlsAnterior
         Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Baixar-Ditase {
+    param([string]$Url, [string]$Destino, [uri]$Proxy, [switch]$ProxyUseDefaultCredentials)
+
+    for ($tentativa = 1; $tentativa -le 3; $tentativa++) {
+        try {
+            $opcoes = @{ Uri = $Url; OutFile = $Destino; UseBasicParsing = $true; TimeoutSec = 180 }
+            if ($Proxy) {
+                $opcoes.Proxy = $Proxy
+                $opcoes.ProxyUseDefaultCredentials = $ProxyUseDefaultCredentials
+            }
+            Invoke-WebRequest @opcoes
+            return
+        } catch {
+            $status = $_.Exception.Response
+            if ($status -and [int]$status.StatusCode -eq 407) {
+                throw 'O proxy exige autenticação. Defina DITASE_PROXY com a URL fornecida pela sua TI e tente de novo.'
+            }
+            if ($tentativa -eq 3 -or ($status -and [int]$status.StatusCode -eq 404)) {
+                throw "Não foi possível baixar $Url. Confira a conexão e se o canal está disponível. Detalhe: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds (2 * $tentativa)
+        }
     }
 }
 
@@ -138,4 +163,4 @@ function Get-DitaseRegistro {
         Select-Object -First 1
 }
 
-Install-Ditase -Canal $Canal
+Install-Ditase -Canal $Canal -Versao $Versao -Sha256 $Sha256
