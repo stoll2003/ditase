@@ -346,9 +346,14 @@ try {
         $item = [ordered]@{ pedida = $pct; codigo = $rc; escalaDoSistema = $sistema; dpiDoMonitor = $dpiMon; aplicadaNoSistema = $noSistema
             aplicadaNaIlha = $aplicada; medido = $m[0]; esperado = $m[1]; ok = ($m[2] -and $aplicada -eq $pct) }
         if ($item.ok) {
-            $d1 = $false; [void][QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$d1)
+            $d1 = $false; $tipoR = [QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$d1)
             $d2 = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$d2)
-            $item.recorte = ($d1 -and -not $d2)
+            $raizC = Raiz-Em ([int]($m[0].x + $m[0].w / 2)) ($m[0].y + 1)
+            $raizE = Raiz-Em ($m[0].x + 1) ($m[0].y + $m[0].h - 1)
+            # tipo 1 = vazia, 2 = retângulo, 3 = complexa (elipse); 0 = sem região.
+            $item.regiao = [ordered]@{ hwnd = [int64]$ilha; tipo = $tipoR; centroDentro = $d1; cantoDentro = $d2
+                centroEhIlha = ($raizC -eq $ilha); cantoEhIlha = ($raizE -eq $ilha); classeSobCanto = [QaIlha]::Classe($raizE) }
+            $item.recorte = ($d1 -and -not $d2 -and ($raizE -ne $ilha))
             $item.ok = $item.recorte
         }
         $rel.escalas += $item
@@ -359,7 +364,7 @@ try {
         } elseif (-not $item.ok) { $falhas++ }
         Write-Host ("escala {0}%: código {1}, sistema {2}%, monitor {3}%, ilha {4}%, ok={5}" -f $pct, $rc, $sistema, $dpiMon, $aplicada, $item.ok)
         # O patch limita a 2 recriações a cada 20 s (antilaço); troca de escala espaçada como um usuário.
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds 11
     }
     # Abertura já em cada escala acima de 100% (caso mais comum): reinicia o app instalado.
     $altas = @($possiveis | Where-Object { $_ -gt 100 })
