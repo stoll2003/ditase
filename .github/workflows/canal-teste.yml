@@ -13,6 +13,11 @@ on:
   push:
     branches: [windows]
   workflow_dispatch:
+    inputs:
+      estavel:
+        description: Versão estável (sem sufixo -teste)
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -46,7 +51,11 @@ jobs:
           echo "tauri=true" >> "$GITHUB_OUTPUT"
           base=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version *= *"\(.*\)"/\1/p}' Cargo.toml | head -n1)
           if [ -z "$base" ]; then echo "::error::versão do workspace não encontrada em Cargo.toml"; exit 1; fi
-          versao="${base%%-*}-teste.${GITHUB_RUN_NUMBER}"
+          if [ "${{ inputs.estavel }}" = "true" ]; then
+            versao="${base%%-*}"
+          else
+            versao="${base%%-*}-teste.${GITHUB_RUN_NUMBER}"
+          fi
           echo "versao=$versao" >> "$GITHUB_OUTPUT"
           echo "Versão do canal: $versao"
 

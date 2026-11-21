@@ -39,8 +39,8 @@ use crate::{
     preferencias::Preferencias,
 };
 
-const CANAL_DE_TESTE: &str =
-    "https://github.com/stoll2003/ditase/releases/download/windows-teste/latest.json";
+const CANAL_ESTAVEL: &str =
+    "https://github.com/stoll2003/ditase/releases/latest/download/latest.json";
 const CHAVE_DO_CANAL: &str = env!("DITASE_UPDATER_PUB");
 
 /// Estado do app compartilhado pelos comandos.
@@ -280,14 +280,14 @@ fn bandeja(app: &AppHandle, iniciar: bool) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Canal de teste: `latest.json` da release `windows-teste`, assinado com a chave de `windows/updater.pub`.
+/// Canal estável: `latest.json` da última release, assinado com a chave de `windows/updater.pub`.
 async fn procurar_atualizacao(app: AppHandle, manual: bool) {
     if CHAVE_DO_CANAL.is_empty() {
         caminhos::nota("atualização: sem chave pública embutida (windows/updater.pub)");
         return;
     }
     let resultado = async {
-        let url = tauri::Url::parse(CANAL_DE_TESTE)?;
+        let url = tauri::Url::parse(CANAL_ESTAVEL)?;
         let atualizador = app.updater_builder().pubkey(CHAVE_DO_CANAL).endpoints(vec![url])?.build()?;
         let Some(nova) = atualizador.check().await? else { return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(None) };
         let pergunta = format!("A versão de teste {} está disponível (você tem {}). Instalar agora? O Dita.se reinicia.", nova.version, nova.current_version);

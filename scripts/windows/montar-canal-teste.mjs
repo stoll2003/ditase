@@ -8,7 +8,8 @@ if (!pasta || !/^[\da-f]{40}$/.test(commit ?? '') || !repositorio || !caminhoTau
 
 const base = `https://github.com/${repositorio}/releases/download/windows-teste`
 const config = JSON.parse(await readFile(caminhoTauri, 'utf8'))
-if (!config.plugins?.updater?.endpoints?.includes(`${base}/latest.json`)) {
+const estavel = `https://github.com/${repositorio}/releases/latest/download/latest.json`
+if (!config.plugins?.updater?.endpoints?.includes(estavel)) {
   throw new Error('O Tauri não consulta o manifesto do repositório informado.')
 }
 

@@ -6,7 +6,7 @@
 
 param(
     [ValidateSet('teste', 'estavel')]
-    [string]$Canal = $(if ($env:DITASE_CANAL) { $env:DITASE_CANAL } else { 'teste' }),
+    [string]$Canal = $(if ($env:DITASE_CANAL) { $env:DITASE_CANAL } else { 'estavel' }),
     [ValidatePattern('\A(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:-teste\.[1-9][0-9]*)?\z')]
     [string]$Versao,
     [Parameter(Mandatory)]

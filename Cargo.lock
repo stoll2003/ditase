@@ -1089,7 +1089,7 @@ dependencies = [
 
 [[package]]
 name = "ditase"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "cpal",
  "motores",
@@ -2688,7 +2688,7 @@ dependencies = [
 
 [[package]]
 name = "motores"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "getrandom 0.3.4",
  "libc",
@@ -2853,7 +2853,7 @@ dependencies = [
 
 [[package]]
 name = "nucleo"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "chrono",
  "regex",
