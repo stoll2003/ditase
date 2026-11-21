@@ -7,6 +7,8 @@ mod audio;
 mod caminhos;
 mod controlador;
 mod decodificacao;
+#[cfg(test)]
+mod e2e;
 mod integracao;
 mod lancamento;
 mod motores_locais;

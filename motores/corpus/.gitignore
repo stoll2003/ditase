@@ -1,3 +1,5 @@
 # Corpus sintético (vozes do macOS, textos inventados, sem dado pessoal): versionado para o CI
 # Windows medir com os mesmos áudios. Gravações reais continuam barradas pelo .gitignore da raiz.
 !*.wav
+# AAC sintético da conversa de duas vozes: a prova de ponta a ponta decodifica pelo Media Foundation.
+!falantes/*.m4a
