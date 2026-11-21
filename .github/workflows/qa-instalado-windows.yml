@@ -134,6 +134,12 @@ jobs:
           npm ci
           npm run build
 
+      # O build.rs do ditase monta windows/app-dist (interface + pílula); o CLI do Tauri confere
+      # essa pasta antes de compilar, então o Cargo roda primeiro (igual ao canal-teste.yml).
+      - name: Compilar o app (gera windows/app-dist)
+        working-directory: cand
+        run: cargo build --locked --release -p ditase
+
       - name: Build Tauri (NSIS por usuário, sem atualizador)
         working-directory: cand
         shell: bash
@@ -144,7 +150,7 @@ jobs:
           node ../scripts/windows/tauri-cli/node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --ci \
             --config src-tauri/tauri.distribuicao.conf.json \
             --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' -- --locked
-          exe=$(ls ../target/release/bundle/nsis/*-setup.exe | head -n1)
+          exe=$(find ../target/release/bundle/nsis -maxdepth 1 -name '*-setup.exe' | head -n1)
           echo "INSTALADOR=$(cygpath -w "$(realpath "$exe")")" >> "$GITHUB_ENV"
           echo "Candidato $(git -C .. rev-parse HEAD): $exe"
 

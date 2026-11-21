@@ -57,6 +57,7 @@ $envAnterior = @{
 }
 
 $procApp = $null
+$politicaAplicada = $false
 
 try {
     if ($Instalador) {
@@ -98,7 +99,19 @@ try {
 
     $env:DITASE_RAIZ = $raizDados
     $env:DITASE_PASTA_MODELOS = $pastaModelos
-    $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$PortaCdp"
+    # Porta CDP pela política do WebView2, só para ditase.exe. O runner roda elevado e o Runtime 150+
+    # ignora WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS em processo elevado (run 44875174726: o
+    # msedgewebview2 subiu sem a chave). A política só é lida sem a variável, então ela sai do
+    # ambiente. Escuta só em 127.0.0.1; a chave é removida no finally.
+    Remove-Item Env:\WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS -ErrorAction SilentlyContinue
+    $nomeExe = [IO.Path]::GetFileName($Executavel)
+    $raizPolitica = if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { 'HKLM:' } else { 'HKCU:' }
+    $chavePolitica = "$raizPolitica\SOFTWARE\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+    $chaveCriada = -not (Test-Path $chavePolitica)
+    New-Item -Path $chavePolitica -Force | Out-Null
+    New-ItemProperty -Path $chavePolitica -Name $nomeExe -Value "--remote-debugging-port=$PortaCdp" -PropertyType String -Force | Out-Null
+    $politicaAplicada = $true
+    Write-Host "Política WebView2 temporária: $chavePolitica\$nomeExe"
 
     Write-Host "Iniciando executável instalado: $Executavel (CDP porta $PortaCdp)..."
     $procApp = Start-Process -FilePath $Executavel -PassThru
@@ -123,7 +136,8 @@ try {
     $diag = Join-Path $Saida 'diagnostico-webview2.txt'
     & {
         "app vivo: $(-not $procApp.HasExited) pid=$($procApp.Id)"
-        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS no processo do script: $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+        "elevado: $(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator))"
+        "política: $chavePolitica\$nomeExe = $((Get-ItemProperty -Path $chavePolitica -Name $nomeExe -ErrorAction SilentlyContinue).$nomeExe)"
         '--- msedgewebview2.exe (browser) ---'
         Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue |
             Where-Object { $_.CommandLine -notmatch '--type=' } |
@@ -153,6 +167,10 @@ try {
     }
     Write-Host "QA concluído. Evidências em $Saida"
 } finally {
+    if ($politicaAplicada) {
+        Remove-ItemProperty -Path $chavePolitica -Name $nomeExe -ErrorAction SilentlyContinue
+        if ($chaveCriada) { Remove-Item -Path $chavePolitica -ErrorAction SilentlyContinue }
+    }
     if ($procApp -and -not $procApp.HasExited) {
         Write-Host 'Encerrando Dita.se...'
         try { $procApp.CloseMainWindow() | Out-Null } catch {}
