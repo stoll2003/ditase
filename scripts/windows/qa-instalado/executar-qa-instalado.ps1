@@ -9,7 +9,9 @@
     [ValidateSet('diagnostico', 'completo')]
     [string]$Modo = 'completo',
     [int]$PortaCdp = 9222,
-    [int]$PrazoModeloMinutos = 20
+    [int]$PrazoModeloMinutos = 20,
+    # Ilha (1.0.2): liga pilulaSempreVisivel no perfil isolado e roda conferir-ilha.ps1 com o app aberto.
+    [switch]$ConferirIlha
 )
 
 $ErrorActionPreference = 'Stop'
@@ -49,6 +51,10 @@ New-Item -ItemType Directory -Force -Path $raizDados | Out-Null
 $pastaModelos = Join-Path $raizDados 'Modelos'
 New-Item -ItemType Directory -Force -Path $pastaModelos | Out-Null
 if (@(Get-ChildItem -LiteralPath $pastaModelos -Force).Count -ne 0) { throw "Pasta de modelos não está vazia: $pastaModelos" }
+if ($ConferirIlha) {
+    # Em repouso a ilha só aparece com "sempre visível"; sem isso a bordinha 92 x 7 não existe para medir.
+    '{ "pilulaSempreVisivel": "1" }' | Set-Content -LiteralPath (Join-Path $raizDados 'preferencias.json') -Encoding UTF8
+}
 
 $envAnterior = @{
     DITASE_RAIZ = $env:DITASE_RAIZ
@@ -156,12 +162,26 @@ try {
     } *>&1 | Out-File -LiteralPath $diag -Encoding UTF8
     Get-Content -LiteralPath $diag | Write-Host
 
+    $codigoIlha = 0
+    if ($ConferirIlha -and -not $procApp.HasExited) {
+        Write-Host 'Conferindo a ilha instalada (posição, foco, cantos e escalas)...'
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'conferir-ilha.ps1') `
+            -ProcessoApp $procApp.Id -Saida (Join-Path $Saida 'ilha')
+        $codigoIlha = $LASTEXITCODE
+    } elseif ($ConferirIlha) {
+        $codigoIlha = 1
+        Write-Host 'App saiu antes da conferência da ilha.'
+    }
+
     # Copia o log do app para diagnóstico junto aos screenshots.
     $logApp = Join-Path $raizDados 'ditado.log'
     if (Test-Path -LiteralPath $logApp -PathType Leaf) {
         Copy-Item -LiteralPath $logApp -Destination (Join-Path $Saida 'ditado.log') -Force
     }
 
+    if ($codigoIlha -ne 0) {
+        throw "Conferência da ilha falhou (código $codigoIlha). Veja $Saida\ilha\ilha.json."
+    }
     if ($codigoQa -ne 0) {
         throw "Veredito não confere com -Esperado $Esperado (código $codigoQa). Veja $Saida\relatorio-qa.json."
     }

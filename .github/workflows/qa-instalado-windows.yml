@@ -154,6 +154,14 @@ jobs:
           echo "INSTALADOR=$(cygpath -w "$(realpath "$exe")")" >> "$GITHUB_ENV"
           echo "Candidato $(git -C .. rev-parse HEAD): $exe"
 
+      - name: Guardar instalador de teste (combinado)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ditase-teste-nsis-${{ needs.ref.outputs.candidato }}
+          path: cand/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Endpoint de áudio virtual assinado (VB-CABLE)
         working-directory: qa
         shell: powershell
@@ -164,7 +172,7 @@ jobs:
         shell: powershell
         run: |
           .\scripts\windows\qa-instalado\executar-qa-instalado.ps1 `
-            -Instalador $env:INSTALADOR -Saida "$env:RUNNER_TEMP\qa-candidato" -Modo completo -Esperado corrigido
+            -Instalador $env:INSTALADOR -Saida "$env:RUNNER_TEMP\qa-candidato" -Modo completo -Esperado corrigido -ConferirIlha
 
       - name: Resumo
         if: always()

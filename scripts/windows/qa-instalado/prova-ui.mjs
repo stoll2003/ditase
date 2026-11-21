@@ -290,7 +290,7 @@ async function faseTransicao(cdp, relatorio) {
     if (!a.mesmaPagina) throw new ErroDeProva("sessao_recarregada", "a página recarregou; a observação não vale", a);
     const ant = linha[linha.length - 1];
     const mudou = !ant || ant.ponteDisponivel !== a.ponteDisponivel || ant.reconhecedor !== a.reconhecedor
-      || ant.telaBotaoDesabilitado !== a.telaBotaoDesabilitado || ant.telaStatus !== a.telaStatus;
+      || ant.detalhe !== a.detalhe || ant.telaBotaoDesabilitado !== a.telaBotaoDesabilitado || ant.telaStatus !== a.telaStatus;
     if (mudou && linha.length < 400) linha.push(a);
     return a;
   };
@@ -342,6 +342,11 @@ async function faseTransicao(cdp, relatorio) {
   relatorio.etapas.transicao.reuniao = telaReuniao;
 
   const telaPresa = final.telaBotaoDesabilitado || final.telaAvisoIndisponivel || telaReuniao.avisoIndisponivel;
+  // Percentual do download na tela (1.0.2): quantos valores distintos a ponte e a tela mostraram.
+  const pct = (t) => (String(t || "").match(/(\d+)%/) || [])[1];
+  const ponteP = [...new Set(linha.map((a) => pct(a.detalhe)).filter(Boolean))];
+  const telaP = [...new Set(linha.map((a) => pct(a.telaStatus)).filter(Boolean))];
+  relatorio.etapas.transicao.percentual = { ponte: ponteP, tela: telaP };
   relatorio.etapas.transicao.resumo = {
     primeiraPonteDisponivel: primeira.ponteDisponivel,
     finalPonteDisponivel: final.ponteDisponivel,
@@ -349,7 +354,10 @@ async function faseTransicao(cdp, relatorio) {
     telaPresaEmIndisponivel: telaPresa,
     mesmaSessao: final.mesmaPagina,
   };
-  return telaPresa ? "defeito_reproduzido" : "transicao_ok";
+  if (telaPresa) return "defeito_reproduzido";
+  // Só cobra quando o download foi visto com progresso na ponte (3+ valores) e a prova espera corrigido.
+  if (ESPERADO === "corrigido" && ponteP.length >= 3 && telaP.length < 2) return "produto_percentual_congelado";
+  return "transicao_ok";
 }
 
 async function faseArquivos(cdp, relatorio, chaves) {
