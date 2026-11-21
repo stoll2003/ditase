@@ -179,11 +179,16 @@ struct FonteDerivada {
 }
 impl FonteDerivada {
     fn fechar(&self) {
-        let mut d = self.derivacao.lock().unwrap();
-        if d.geracao == self.geracao {
-            d.ao_bloco = None;
-            d.ao_acabar = None;
-        }
+        // Retira sob trava e solta fora dela (como em `soltar_capturas`), para que o Drop de
+        // `ao_bloco` (drenagem da emenda) nunca rode com o mutex da derivação preso.
+        let (_bloco, _acabar) = {
+            let mut d = self.derivacao.lock().unwrap();
+            if d.geracao == self.geracao {
+                (d.ao_bloco.take(), d.ao_acabar.take())
+            } else {
+                (None, None)
+            }
+        };
     }
 }
 impl crate::controlador::FonteAberta for FonteDerivada {
@@ -2461,5 +2466,49 @@ mod medicoes {
                 inicio.elapsed().as_secs_f64() * 1e3 / 20.0
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod testes_fonte_derivada {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn fechar_fonte_derivada_solta_ao_bloco_fora_da_trava() {
+        struct GuardaDrop {
+            derivacao: Derivacao,
+            trava_livre_no_drop: Arc<AtomicBool>,
+        }
+        impl Drop for GuardaDrop {
+            fn drop(&mut self) {
+                if self.derivacao.try_lock().is_ok() {
+                    self.trava_livre_no_drop.store(true, Ordering::Release);
+                }
+            }
+        }
+
+        let derivacao: Derivacao = Arc::new(Mutex::new(EstadoDerivacao::default()));
+        let livre = Arc::new(AtomicBool::new(false));
+        let guarda = GuardaDrop {
+            derivacao: derivacao.clone(),
+            trava_livre_no_drop: livre.clone(),
+        };
+        {
+            let mut d = derivacao.lock().unwrap();
+            d.geracao = 1;
+            d.ao_bloco = Some(Box::new(move |_, _| {
+                let _ = &guarda;
+            }));
+        }
+        let fonte = FonteDerivada {
+            derivacao: derivacao.clone(),
+            geracao: 1,
+        };
+        fonte.fechar();
+        assert!(
+            livre.load(Ordering::Acquire),
+            "o Drop de ao_bloco (drenagem da emenda) rodou com o mutex da derivação preso"
+        );
     }
 }

@@ -83,6 +83,9 @@ pub trait Motores: Send + Sync {
     fn cancelar_modelo(&self);
     fn llama_instalado(&self) -> bool;
     /// Saída do app: para o servidor de IA (sem mexer nos ajustes).
+    fn resumo_fala(&self) -> (Option<(u64, u64)>, bool, bool) {
+        (None, false, false)
+    }
     fn desligar(&self) {}
 }
 

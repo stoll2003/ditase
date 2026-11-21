@@ -5,6 +5,7 @@ import { motion, useReducedMotion } from "motion/react";
 import { Popover as PopoverPrimitive, Select as SelectPrimitive } from "radix-ui";
 import { useId, useMemo, useState } from "react";
 import { EASE_OUT, instant } from "@/lib/motion-tokens";
+import { plataforma } from "@/lib/plataforma";
 import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/loader";
 
@@ -35,10 +36,16 @@ type FieldProps = {
 
 const control =
   "flex h-9 w-full items-center gap-2 rounded-full bg-foreground/[0.06] px-3.5 text-left text-sm text-foreground outline-none transition-[background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] hover:bg-foreground/[0.08] focus-visible:bg-foreground/[0.1] disabled:opacity-40 aria-invalid:bg-negative/10 data-[placeholder]:text-muted-foreground";
+const controlWin =
+  "flex h-9 w-full items-center gap-2 rounded-[4px] border border-(--campo-borda) border-b-(--campo-linha) bg-(--campo) px-3.5 text-left text-sm text-foreground outline-none transition-[border-color,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] focus-visible:border-b-2 focus-visible:border-b-brand focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-40 aria-invalid:border-b-negative data-[placeholder]:text-muted-foreground";
 const surface =
   "z-50 rounded-2xl bg-surface-inset p-1 text-foreground shadow-[0_12px_32px_-12px_rgb(0_0_0/0.28)] outline-none dark:bg-surface-raised dark:shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)]";
+const surfaceWin =
+  "z-50 rounded-lg bg-surface-raised p-1 text-foreground shadow-[0_8px_16px_rgba(0,0,0,0.14)] outline-none border border-(--campo-borda)";
 const row =
   "relative flex cursor-default items-center gap-2.5 rounded-xl py-1.5 pr-8 pl-2.5 text-[0.8125rem] outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-foreground/[0.07] aria-selected:bg-foreground/[0.07]";
+const rowWin =
+  "relative flex cursor-default items-center gap-2.5 rounded-[4px] py-1.5 pr-8 pl-2.5 text-[0.8125rem] outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-foreground/[0.07] aria-selected:bg-foreground/[0.07]";
 
 function Field({
   label,
@@ -149,6 +156,7 @@ export function Select({
 }: SelectProps) {
   const groups = isGrouped(options) ? options : [{ options }];
   const { setViaKeyboard, motionProps } = useMenuMotion();
+  const win = plataforma() === "windows";
 
   return (
     <Field label={label} description={description} error={error} className={className}>
@@ -163,7 +171,7 @@ export function Select({
         >
           <SelectPrimitive.Trigger
             {...ids}
-            className={control}
+            className={win ? controlWin : control}
             onPointerDown={() => setViaKeyboard(false)}
             onKeyDown={() => setViaKeyboard(true)}
           >
@@ -186,7 +194,7 @@ export function Select({
                 style={{
                   transformOrigin: "var(--radix-select-content-transform-origin)",
                 }}
-                className={surface}
+                className={win ? surfaceWin : surface}
               >
                 <SelectPrimitive.Viewport className="max-h-72">
                   {groups.map((group, g) => (
@@ -201,7 +209,7 @@ export function Select({
                           key={option.value}
                           value={option.value}
                           disabled={option.disabled}
-                          className={row}
+                          className={win ? rowWin : row}
                         >
                           {option.icon && (
                             <option.icon

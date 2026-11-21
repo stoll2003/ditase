@@ -131,12 +131,12 @@ export default function App() {
   }, [atual, disponivel]);
   useEffect(() => () => window.clearTimeout(mola.current), []);
   const deArquivo = (event: DragEvent) => event.dataTransfer.types.includes("Files");
-
+  const win = plataforma() === "windows";
 
   return (
     // Com "user", quem pediu movimento reduzido no sistema fica sem deslocamento e sem escala: só fades.
     <MotionConfig reducedMotion="user">
-    <div className="flex h-full bg-surface p-1.5 pl-0"
+    <div className={cn("flex h-full bg-surface", win ? "p-0" : "p-1.5 pl-0")}
       onDragEnter={(event) => { if (deArquivo(event)) { event.preventDefault(); ninho.current++; arrastar(true); } }}
       onDragOver={(event) => { if (deArquivo(event)) { event.preventDefault(); event.dataTransfer.dropEffect = disponivel ? "copy" : "none"; } }}
       onDragLeave={() => { ninho.current = Math.max(0, ninho.current - 1); if (!ninho.current) arrastar(false); }}
@@ -147,9 +147,9 @@ export default function App() {
       }}>
       <input ref={entrada} type="file" hidden multiple accept={aceite}
         onChange={(event) => { adicionar(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
-      {/* O topo da lateral fica livre: ali estão os botões da janela e a faixa de arrasto. */}
-      <nav aria-label="Seções" className="flex w-[13rem] shrink-0 flex-col px-3 pt-12 pb-3">
-        <p className="px-2 pb-4 text-[0.9375rem] font-semibold tracking-tight">Dita.se</p>
+      {/* O topo da lateral fica livre no Mac (botões da janela); no Windows a barra de título é nativa. */}
+      <nav aria-label="Seções" className={cn("flex w-[13rem] shrink-0 flex-col px-3 pb-3", win ? "pt-1" : "pt-12")}>
+        {!win && <p className="px-2 pb-4 text-[0.9375rem] font-semibold tracking-tight">Dita.se</p>}
         <ul className="flex flex-col gap-0.5">
           {paginas.map(({ id, nome, icone: Icone }) => (
             <li key={id}>
@@ -165,12 +165,27 @@ export default function App() {
                 }}
                 onDragLeave={() => window.clearTimeout(mola.current)}
                 className={cn(
-                  "relative isolate flex h-8 w-full items-center gap-2.5 rounded-lg px-2 text-[0.8125rem] font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  "relative isolate flex w-full items-center gap-2.5 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  win ? "h-9 rounded-[4px] px-3 text-[0.875rem]" : "h-8 rounded-lg px-2 text-[0.8125rem]",
                   atual === id ? "text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
                 )}
               >
                 {atual === id && (
-                  <motion.span layoutId="nav-ativo" transition={indicador} className="absolute inset-0 -z-10 rounded-lg bg-foreground/[0.08]" />
+                  <motion.span
+                    layoutId="nav-ativo"
+                    transition={indicador}
+                    className={cn(
+                      "absolute inset-0 -z-10",
+                      win ? "rounded-[4px] bg-foreground/[0.06]" : "rounded-lg bg-foreground/[0.08]",
+                    )}
+                  >
+                    {win && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute top-1/2 left-0 h-4 w-[3px] -translate-y-1/2 rounded-[1.5px] bg-brand"
+                      />
+                    )}
+                  </motion.span>
                 )}
                 <Icone weight={atual === id ? "fill" : "regular"} className="size-4" />
                 {nome}
@@ -187,7 +202,15 @@ export default function App() {
       </nav>
 
       <div className="relative flex min-w-0 flex-1">
-      <main ref={rolagem} className="rolagem min-w-0 flex-1 rounded-2xl bg-surface-inset">
+      <main
+        ref={rolagem}
+        className={cn(
+          "rolagem min-w-0 flex-1 bg-surface-inset",
+          win
+            ? "rounded-none rounded-tl-lg border-t border-l border-(--traco-camada)"
+            : "rounded-2xl",
+        )}
+      >
         {/* A página nova entra subindo 6 px; a antiga some na hora, então navegar não espera animação. */}
         <motion.div
           key={atual}

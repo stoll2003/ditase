@@ -18,14 +18,14 @@ use crate::{
     emenda::{Destino, Emenda, FimDaDerivacao},
     integracao::{Ditado, Integracao, SessaoDeDitado},
     nativo::{self, Insercao},
-    pilula::{Fase as FasePilula, Pilula},
+    pilula::{Fase as FasePilula, NivelAviso, Pilula},
     preferencias::Preferencias,
 };
 
 /// O que o ditado mostra na pílula.
 pub trait Avisos: Send + Sync {
     fn mostrar(&self, fase: FasePilula);
-    fn avisar(&self, texto: &str, segundos: f64);
+    fn avisar(&self, texto: &str, segundos: f64, nivel: NivelAviso);
     fn nivel(&self, nivel: f32);
     fn segundos(&self, s: u64);
     fn atalho(&self, simbolo: &str);
@@ -36,8 +36,8 @@ impl Avisos for Pilula {
     fn mostrar(&self, fase: FasePilula) {
         Pilula::mostrar(self, fase)
     }
-    fn avisar(&self, texto: &str, segundos: f64) {
-        Pilula::avisar(self, texto, segundos)
+    fn avisar(&self, texto: &str, segundos: f64, nivel: NivelAviso) {
+        Pilula::avisar(self, texto, segundos, nivel)
     }
     fn nivel(&self, nivel: f32) {
         self.empurrar_nivel(nivel)
@@ -286,8 +286,9 @@ impl Controlador {
         if !self.sistema.microfone_disponivel() {
             drop(i);
             self.pilula.avisar(
-                "Microfone indisponível. Confira Privacidade > Microfone",
+                "Microfone indisponível. Veja Privacidade > Microfone",
                 3.5,
+                NivelAviso::Erro,
             );
             return false;
         }
@@ -308,7 +309,8 @@ impl Controlador {
             Err(e) => {
                 nota(format!("banco: {e}"));
                 drop(i);
-                self.pilula.avisar("Erro ao abrir o histórico", 3.0);
+                self.pilula
+                    .avisar("Erro ao abrir o histórico", 3.5, NivelAviso::Erro);
                 return false;
             }
         };
@@ -319,7 +321,15 @@ impl Controlador {
                 let _ = self.integracao.descartar_ditado(d.id);
                 drop(i);
                 nota(format!("ditado recusado: {motivo}"));
-                self.pilula.avisar(&motivo, 3.5);
+                if let Some(pct) = motivo.strip_prefix("Baixando o modelo de fala: ") {
+                    self.pilula.avisar(
+                        &format!("O modelo ainda está baixando · {pct}"),
+                        3.0,
+                        NivelAviso::Info,
+                    );
+                } else {
+                    self.pilula.avisar(&motivo, 3.5, NivelAviso::Erro);
+                }
                 return false;
             }
         };
@@ -389,7 +399,8 @@ impl Controlador {
                     let _ = std::fs::remove_file(c);
                 }
                 drop(i);
-                self.pilula.avisar("Microfone indisponível", 3.0);
+                self.pilula
+                    .avisar("Microfone indisponível", 3.5, NivelAviso::Erro);
                 return false;
             }
         };
@@ -466,7 +477,7 @@ impl Controlador {
             return None;
         }
         match self.trocar_para_proprio(id, &emenda) {
-            Ok(()) => None,
+            Ok(_) => None,
             Err(e) => {
                 nota(format!(
                     "ditado {id}: microfone próprio não abriu com a reunião aberta ({e}); tento depois que ela soltar"
@@ -484,11 +495,16 @@ impl Controlador {
             return;
         }
         match self.trocar_para_proprio(id, &emenda) {
-            Ok(()) => self.pilula.avisar(
+            Ok(true) => self.pilula.avisar(
                 "Troquei de microfone: um trecho curto pode ter ficado de fora",
                 3.0,
+                NivelAviso::Info,
             ),
+            Ok(false) => {}
             Err(e) => {
+                if !self.gravando_ditado(id) {
+                    return;
+                }
                 nota(format!(
                     "ditado {id}: a reunião acabou e o microfone não abriu ({e}); encerrado"
                 ));
@@ -506,12 +522,13 @@ impl Controlador {
 
     /// Abre o microfone próprio na emenda, espera o primeiro bloco (até [`SOBREPOSICAO`]) e troca a
     /// fonte do ditado. Soltar a fonte antiga fecha a derivação, que fixa o corte da emenda. Abre
-    /// fora da trava do controlador para não bloquear o app.
+    /// fora da trava do controlador para não bloquear o app. Devolve `Ok(true)` quando a troca
+    /// ocorreu e `Ok(false)` se o ditado já tinha sido encerrado durante a abertura.
     fn trocar_para_proprio(
         self: &Arc<Self>,
         id: i64,
         emenda: &Arc<Mutex<Emenda>>,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let e2 = emenda.clone();
         let proprio: AoBlocoDeAudio =
             Box::new(move |b, n| e2.lock().unwrap().proprio(b, n, Instant::now()));
@@ -536,7 +553,7 @@ impl Controlador {
                 // `terminar` levou a gravação enquanto o microfone abria.
                 drop(i);
                 nova.parar();
-                return Ok(());
+                return Ok(false);
             }
             let g = i.gravacao.as_mut().expect("conferido acima");
             std::mem::replace(&mut g.captura, nova)
@@ -546,7 +563,7 @@ impl Controlador {
         nota(format!(
             "ditado {id}: a reunião acabou; segue no microfone próprio"
         ));
-        Ok(())
+        Ok(true)
     }
 
     pub fn entrar_em_maos_livres(&self) {
@@ -655,7 +672,8 @@ impl Controlador {
                 Err(_) => {
                     nota(format!("ditado {}: a gravação parou com erro", d.id));
                     let _ = c.integracao.marcar_falha(&d);
-                    c.pilula.avisar("Não consegui transcrever", 3.0);
+                    c.pilula
+                        .avisar("Não consegui transcrever", 3.5, NivelAviso::Erro);
                 }
             }
             {
@@ -683,6 +701,7 @@ impl Controlador {
                 self.pilula.avisar(
                     aviso_final.unwrap_or("Não ouvi nada"),
                     if aviso_final.is_some() { 3.5 } else { 1.6 },
+                    NivelAviso::Info,
                 );
                 return;
             }
@@ -697,6 +716,7 @@ impl Controlador {
                     "Não transcrevi. O áudio ficou guardado"
                 },
                 3.5,
+                NivelAviso::Erro,
             );
             return;
         }
@@ -712,8 +732,11 @@ impl Controlador {
             self.mudou("dicionario");
         }
         if !colar {
-            self.pilula
-                .avisar("Ditado guardado no histórico, sem colar", 3.0);
+            self.pilula.avisar(
+                "Ditado guardado no histórico, sem colar",
+                3.0,
+                NivelAviso::Info,
+            );
             return;
         }
         let texto = if self.prefs.espaco_no_fim() && !r.texto.ends_with('\n') {
@@ -728,9 +751,10 @@ impl Controlador {
         match self.sistema.colar(texto) {
             Insercao::Colado => {
                 if let Some(aviso) = aviso_final {
-                    self.pilula.avisar(aviso, 3.5)
+                    self.pilula.avisar(aviso, 3.5, NivelAviso::Info)
                 } else if parcial {
-                    self.pilula.avisar("Parte do áudio não foi transcrita", 3.5)
+                    self.pilula
+                        .avisar("Parte do áudio não foi transcrita", 3.5, NivelAviso::Info)
                 } else {
                     self.pilula.mostrar(FasePilula::Ociosa)
                 }
@@ -742,10 +766,15 @@ impl Controlador {
     fn avisar_sem_colar(&self, i: Insercao) {
         match i {
             Insercao::Colado => {}
-            Insercao::SoCopiado => self.pilula.avisar("Copiado. Cole com Ctrl+V", 3.0),
-            Insercao::Recusado => self
-                .pilula
-                .avisar("Não deu para colar aqui. O texto está no histórico", 3.5),
+            Insercao::SoCopiado => {
+                self.pilula
+                    .avisar("Copiado. Cole com Ctrl+V", 3.0, NivelAviso::Info)
+            }
+            Insercao::Recusado => self.pilula.avisar(
+                "Não deu para colar aqui. O texto está no histórico",
+                3.5,
+                NivelAviso::Erro,
+            ),
         }
     }
 
@@ -797,7 +826,9 @@ impl Controlador {
         }
         match self.integracao.ultimo_texto() {
             Ok(Some(t)) if !t.is_empty() => self.avisar_sem_colar(self.sistema.colar(&t)),
-            _ => self.pilula.avisar("Nenhum ditado para colar", 1.6),
+            _ => self
+                .pilula
+                .avisar("Nenhum ditado para colar", 1.6, NivelAviso::Info),
         }
     }
 
@@ -814,15 +845,19 @@ impl Controlador {
         self.mudou("estado");
         let c = self.clone();
         thread::spawn(move || {
-            let aviso = c
-                .integracao
-                .retranscrever(id, &c.sistema.pasta_de_audio(), c.prefs.limpeza_ia())
-                .unwrap_or_else(|e| {
+            let (aviso, nivel) = match c.integracao.retranscrever(
+                id,
+                &c.sistema.pasta_de_audio(),
+                c.prefs.limpeza_ia(),
+            ) {
+                Ok(msg) => (msg, NivelAviso::Info),
+                Err(e) => {
                     nota(format!("retranscrever {id}: {e}"));
-                    "Ainda não consegui transcrever"
-                });
+                    ("Ainda não consegui transcrever", NivelAviso::Erro)
+                }
+            };
             c.interno.lock().unwrap().fase = Fase::Parado;
-            c.pilula.avisar(aviso, 3.0);
+            c.pilula.avisar(aviso, 3.0, nivel);
             c.mudou("estado");
             c.mudou("historico");
         });
@@ -950,7 +985,7 @@ mod testes {
         fn mostrar(&self, fase: FasePilula) {
             self.fases.lock().unwrap().push(fase);
         }
-        fn avisar(&self, texto: &str, _s: f64) {
+        fn avisar(&self, texto: &str, _s: f64, _nivel: NivelAviso) {
             self.avisos.lock().unwrap().push(texto.into());
         }
         fn nivel(&self, _n: f32) {}
@@ -1553,6 +1588,103 @@ mod testes {
         assert!(
             std::fs::metadata(&wav).unwrap().len() > 44 + 2 * 16_000 * 3,
             "WAV incompleto"
+        );
+    }
+
+    /// Achado menor do Dev Par: se o ditado encerrar enquanto `abrir_microfone` roda na segunda
+    /// tentativa (`depois_de_soltar`), não deve mostrar aviso tardio de troca de microfone.
+    #[test]
+    fn encerrar_durante_troca_tardia_nao_mostra_aviso_de_microfone() {
+        struct SistemaLentoNaSegunda {
+            dentro: SistemaDuble,
+            tentativas: AtomicUsize,
+            entrou_na_segunda: Mutex<Option<mpsc::Sender<()>>>,
+            liberar_segunda: Mutex<Option<mpsc::Receiver<()>>>,
+        }
+        impl Sistema for SistemaLentoNaSegunda {
+            fn microfone_disponivel(&self) -> bool {
+                true
+            }
+            fn abrir_microfone(
+                &self,
+                nome: &str,
+                ao_bloco: AoBlocoDeAudio,
+            ) -> Result<Box<dyn FonteAberta>, String> {
+                let n = self.tentativas.fetch_add(1, Ordering::Relaxed);
+                if n == 0 {
+                    return Err("microfone exclusivo ocupado".into());
+                }
+                if let Some(tx) = self.entrou_na_segunda.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = self.liberar_segunda.lock().unwrap().take() {
+                    let _ = rx.recv_timeout(Duration::from_secs(5));
+                }
+                self.dentro.abrir_microfone(nome, ao_bloco)
+            }
+            fn app_em_foco(&self) -> (String, String) {
+                self.dentro.app_em_foco()
+            }
+            fn colar(&self, texto: &str) -> Insercao {
+                self.dentro.colar(texto)
+            }
+            fn pasta_de_audio(&self) -> PathBuf {
+                self.dentro.pasta_de_audio()
+            }
+        }
+
+        let dir = crate::caminhos::pasta_de_teste();
+        let prefs = Arc::new(Preferencias::abrir(dir.path().join("prefs.json")));
+        let integracao = Arc::new(
+            Integracao::abrir(&dir.path().join("banco.sqlite"), MotoresDuble::novo()).unwrap(),
+        );
+        let pasta = dir.path().join("Audio");
+        std::fs::create_dir_all(&pasta).unwrap();
+        let (tx_entrou, rx_entrou) = mpsc::channel();
+        let (tx_libera, rx_libera) = mpsc::channel();
+        let sistema = Arc::new(SistemaLentoNaSegunda {
+            dentro: SistemaDuble {
+                pcm: voz(2.0, 0.0),
+                microfone: true,
+                colagem: Insercao::Colado,
+                colados: Mutex::new(Vec::new()),
+                aberturas: AtomicUsize::new(0),
+                pasta,
+                microfone_falha: false,
+                mundo: None,
+            },
+            tentativas: AtomicUsize::new(0),
+            entrou_na_segunda: Mutex::new(Some(tx_entrou)),
+            liberar_segunda: Mutex::new(Some(rx_libera)),
+        });
+        let pilula = Arc::new(PilulaDuble::default());
+        let c = Controlador::new(prefs, integracao, pilula.clone(), sistema.clone(), |_| {});
+        let reuniao = ReuniaoDuble::em_tempo_real(voz(3.0, 0.0));
+        c.compartilhar_microfone(reuniao.clone());
+        assert!(c.comecar(true));
+        thread::sleep(Duration::from_millis(200));
+
+        let r2 = reuniao.clone();
+        let fio = thread::spawn(move || r2.acabar());
+        rx_entrou
+            .recv_timeout(Duration::from_secs(5))
+            .expect("segunda tentativa de abrir microfone não começou");
+
+        // Encerra o ditado enquanto `abrir_microfone` ainda está bloqueado na segunda tentativa.
+        c.terminar(true);
+        esperar_parado(&c);
+        let _ = tx_libera.send(());
+        fio.join().unwrap();
+
+        assert!(
+            !pilula
+                .avisos
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|a| a.starts_with("Troquei de microfone")),
+            "aviso tardio não deveria aparecer após encerramento concorrente: {:?}",
+            pilula.avisos.lock().unwrap()
         );
     }
 }

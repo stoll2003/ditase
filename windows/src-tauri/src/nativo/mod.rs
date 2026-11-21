@@ -58,7 +58,18 @@ pub mod colagem {
 #[cfg(not(windows))]
 #[allow(dead_code)]
 pub mod janela {
+    use std::sync::Arc;
     pub fn sem_foco(_hwnd: isize) {}
+    pub fn posicionar_sem_ativar(_hwnd: isize, _x: i32, _y: i32, _w: i32, _h: i32, _mostrar: bool) {
+    }
+    pub fn esconder(_hwnd: isize) {}
+    pub fn tela_cheia_ativa() -> bool {
+        false
+    }
+    pub fn cursor_fora_da_janela(_hwnd: isize) -> bool {
+        false
+    }
+    pub fn observar_tela_cheia(_cb: Arc<dyn Fn(bool) + Send + Sync>) {}
 }
 
 #[cfg(not(windows))]
@@ -69,9 +80,19 @@ pub mod midia {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)]
 pub mod sistema {
     pub fn versao() -> String {
         format!("{} (fora do Windows)", std::env::consts::OS)
+    }
+    pub fn barra_clara() -> bool {
+        false
+    }
+    pub fn tema_app_escuro() -> bool {
+        false
+    }
+    pub fn suporta_mica() -> bool {
+        false
     }
     /// Programa em primeiro plano: (nome do executável, nome para exibir). Nunca o título da janela.
     pub fn app_em_foco() -> (String, String) {

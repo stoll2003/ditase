@@ -4,6 +4,7 @@
 
 mod atalho;
 mod audio;
+mod bandeja;
 mod caminhos;
 mod controlador;
 mod decodificacao;
@@ -18,12 +19,18 @@ mod preferencias;
 mod relatorio;
 mod teste;
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
+    },
+    time::Duration,
+};
 
 use serde_json::{json, Value};
 use tauri::{
-    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    window::{Color, Effect, EffectState, EffectsBuilder},
     AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder,
     WindowEvent,
 };
@@ -32,11 +39,12 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::{
+    bandeja::{Bandeja, FaseDitadoBandeja, FaseReuniaoBandeja},
     controlador::Controlador,
     integracao::Integracao,
     lancamento::{CapturaDoSistema, Lancamento},
     motores_locais::MotoresLocais,
-    pilula::Pilula,
+    pilula::{ModoJanela, NivelAviso, Pilula},
     preferencias::Preferencias,
 };
 
@@ -52,6 +60,7 @@ pub struct Casca {
     pub lancamento: Arc<Lancamento>,
     pub pilula: Arc<Pilula>,
     pub controlador: Arc<Controlador>,
+    pub bandeja: OnceLock<Arc<Bandeja>>,
 }
 
 #[tauri::command]
@@ -76,6 +85,12 @@ fn pilula_conectar(casca: State<'_, Arc<Casca>>, canal: tauri::ipc::Channel<Valu
 fn pilula_acao(casca: State<'_, Arc<Casca>>, acao: String) {
     if acao == "pronta" {
         casca.pilula.reenviar();
+        return;
+    }
+    if let Some(nome_modo) = acao.strip_prefix("modo:") {
+        if let Some(modo) = ModoJanela::de_nome(nome_modo) {
+            casca.pilula.definir_modo(modo);
+        }
         return;
     }
     let c = casca.controlador.clone();
@@ -137,22 +152,47 @@ pub fn desligar_tudo(casca: &Casca) {
     ));
 }
 
-fn mostrar_principal(app: &AppHandle) {
+pub fn mostrar_principal(app: &AppHandle) {
     if let Some(j) = app.get_webview_window("principal") {
         let _ = j.unminimize();
         let _ = j.show();
         let _ = j.set_focus();
     }
+    if let Some(c) = app.try_state::<Arc<Casca>>() {
+        if let Some(b) = c.bandeja.get() {
+            b.janela_aberta();
+        }
+    }
 }
 
 fn abrir_principal(app: &AppHandle) -> tauri::Result<()> {
-    let janela = WebviewWindowBuilder::new(app, "principal", WebviewUrl::App("index.html".into()))
-        .title("Dita.se")
-        .inner_size(1120.0, 760.0)
-        .min_inner_size(820.0, 560.0)
-        .on_navigation(navegacao_permitida)
-        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-        .build()?;
+    let escuro = nativo::sistema::tema_app_escuro();
+    let fundo = if escuro {
+        Color(0x20, 0x20, 0x20, 0xFF)
+    } else {
+        Color(0xF3, 0xF3, 0xF3, 0xFF)
+    };
+    let usar_mica = nativo::sistema::suporta_mica();
+    let mut construtor =
+        WebviewWindowBuilder::new(app, "principal", WebviewUrl::App("index.html".into()))
+            .title("Dita.se")
+            .inner_size(1120.0, 760.0)
+            .min_inner_size(820.0, 560.0)
+            .background_color(fundo)
+            .on_navigation(navegacao_permitida)
+            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+    if usar_mica {
+        construtor = construtor
+            .transparent(true)
+            .effects(
+                EffectsBuilder::new()
+                    .effect(Effect::Mica)
+                    .state(EffectState::FollowsWindowActiveState)
+                    .build(),
+            )
+            .initialization_script("document.documentElement.dataset.mica='1';");
+    }
+    let janela = construtor.build()?;
     #[cfg(windows)]
     if let Ok(h) = janela.hwnd() {
         nativo::colagem::definir_dono(h.0 as isize);
@@ -164,6 +204,13 @@ fn abrir_principal(app: &AppHandle) -> tauri::Result<()> {
             api.prevent_close();
             if let Some(j) = app2.get_webview_window("principal") {
                 let _ = j.hide();
+            }
+        }
+        WindowEvent::Focused(true) => {
+            if let Some(c) = app2.try_state::<Arc<Casca>>() {
+                if let Some(b) = c.bandeja.get() {
+                    b.janela_aberta();
+                }
             }
         }
         // O arraste nativo entrega o caminho real (o WebKit do Mac só entregava o nome).
@@ -194,95 +241,8 @@ fn soltar(app: &AppHandle, caminhos_soltos: Vec<PathBuf>) {
     });
 }
 
-fn bandeja(app: &AppHandle, iniciar: bool) -> tauri::Result<()> {
-    let abrir = MenuItem::with_id(app, "abrir", "Abrir Dita.se", true, None::<&str>)?;
-    let ditar = MenuItem::with_id(app, "ditar", "Começar ou parar ditado", true, None::<&str>)?;
-    let auto = CheckMenuItem::with_id(
-        app,
-        "iniciar",
-        "Iniciar com o Windows",
-        true,
-        iniciar,
-        None::<&str>,
-    )?;
-    let relatorio = MenuItem::with_id(
-        app,
-        "relatorio",
-        "Copiar relatório de teste",
-        true,
-        None::<&str>,
-    )?;
-    let atualizar =
-        MenuItem::with_id(app, "atualizar", "Procurar atualização", true, None::<&str>)?;
-    let sair = MenuItem::with_id(app, "sair", "Sair", true, None::<&str>)?;
-    let sep = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(
-        app,
-        &[
-            &abrir, &ditar, &sep, &auto, &relatorio, &atualizar, &sep, &sair,
-        ],
-    )?;
-    let mut construtor = TrayIconBuilder::with_id("bandeja")
-        .tooltip("Dita.se")
-        .menu(&menu)
-        .show_menu_on_left_click(false);
-    if let Some(icone) = app.default_window_icon() {
-        construtor = construtor.icon(icone.clone());
-    }
-    construtor
-        .on_menu_event(move |app, evento| {
-            let Some(casca) = app.try_state::<Arc<Casca>>().map(|s| s.inner().clone()) else {
-                return;
-            };
-            match evento.id.as_ref() {
-                "abrir" => mostrar_principal(app),
-                "ditar" => {
-                    let c = casca.controlador.clone();
-                    std::thread::spawn(move || c.alternar());
-                }
-                "iniciar" => {
-                    let ligar = !casca.prefs.iniciar_com_windows();
-                    casca
-                        .prefs
-                        .definir("iniciarComWindows", if ligar { "1" } else { "0" });
-                    iniciar_com_windows(app, ligar);
-                }
-                "relatorio" => {
-                    let texto = relatorio::montar(&casca);
-                    let aviso = if nativo::colagem::copiar(&texto).is_ok() {
-                        "Relatório copiado. Cole no chat"
-                    } else {
-                        "Não consegui copiar o relatório"
-                    };
-                    casca.pilula.avisar(aviso, 3.0);
-                }
-                "atualizar" => {
-                    let a = app.clone();
-                    tauri::async_runtime::spawn(async move { procurar_atualizacao(a, true).await });
-                }
-                "sair" => {
-                    desligar_tudo(&casca);
-                    app.exit(0);
-                }
-                _ => {}
-            }
-        })
-        .on_tray_icon_event(|bandeja, evento| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = evento
-            {
-                mostrar_principal(bandeja.app_handle());
-            }
-        })
-        .build(app)?;
-    Ok(())
-}
-
 /// Canal estável: `latest.json` da última release, assinado com a chave de `windows/updater.pub`.
-async fn procurar_atualizacao(app: AppHandle, manual: bool) {
+pub async fn procurar_atualizacao(app: AppHandle, manual: bool) {
     if CHAVE_DO_CANAL.is_empty() {
         caminhos::nota("atualização: sem chave pública embutida (windows/updater.pub)");
         return;
@@ -311,7 +271,8 @@ async fn procurar_atualizacao(app: AppHandle, manual: bool) {
             caminhos::nota("atualização: já é a mais recente");
             if manual {
                 if let Some(c) = app.try_state::<Arc<Casca>>() {
-                    c.pilula.avisar("Você já tem a versão mais recente", 2.5);
+                    c.pilula
+                        .avisar("Você já tem a versão mais recente", 2.5, NivelAviso::Info);
                 }
             }
         }
@@ -351,40 +312,128 @@ fn main() {
             let handle = app.handle().clone();
             let prefs = Arc::new(Preferencias::abrir(caminhos::preferencias()));
             let estado = handle.clone();
+            let estava_baixando = Arc::new(AtomicBool::new(false));
+            let estava_baixando_cb = estava_baixando.clone();
             let motores = MotoresLocais::novo(
                 caminhos::modelos(),
                 prefs.clone(),
-                Arc::new(move || ponte::emitir(&estado, "estado")),
+                Arc::new(move || {
+                    ponte::emitir(&estado, "estado");
+                    if let Some(c) = estado.try_state::<Arc<Casca>>() {
+                        let (baixando, carregando, pronto) = c.integracao.motores.resumo_fala();
+                        if let Some((feito, total)) = baixando {
+                            estava_baixando_cb.store(true, Ordering::Release);
+                            c.pilula.modelo(Some(feito), total);
+                            let pct = feito
+                                .saturating_mul(100)
+                                .checked_div(total)
+                                .map_or(0, |p| p.min(100) as u8);
+                            if let Some(b) = c.bandeja.get() {
+                                b.definir_baixando(Some(pct));
+                                b.definir_carregando(false);
+                            }
+                        } else {
+                            let terminou_download =
+                                estava_baixando_cb.swap(false, Ordering::AcqRel);
+                            if terminou_download {
+                                c.pilula.modelo(None, 0);
+                            }
+                            if let Some(b) = c.bandeja.get() {
+                                b.definir_baixando(None);
+                                b.definir_carregando(carregando);
+                            }
+                            if terminou_download && pronto {
+                                c.pilula.avisar("Pronto para ditar", 2.5, NivelAviso::Info);
+                            }
+                        }
+                    }
+                }),
             );
             let integracao = Arc::new(
                 Integracao::abrir(&caminhos::banco(), motores.clone())
                     .map_err(|e| format!("banco: {e}"))?
                     .com_pasta_de_trabalho(caminhos::trabalho().join("ditado")),
             );
-            let pilula = Arc::new(Pilula::criar(
+            let pilula = Pilula::criar(
                 &handle,
                 prefs.pilula_sempre_visivel(),
                 prefs.atalho().simbolo(),
-            ));
+            );
             let avisar = handle.clone();
             let controlador = Controlador::new(
                 prefs.clone(),
                 integracao.clone(),
                 pilula.clone(),
                 Arc::new(controlador::SistemaReal),
-                move |assunto| ponte::emitir(&avisar, assunto),
+                move |assunto| {
+                    ponte::emitir(&avisar, assunto);
+                    if assunto == "estado" {
+                        if let Some(c) = avisar.try_state::<Arc<Casca>>() {
+                            if let Some(b) = c.bandeja.get() {
+                                let fase = match c.controlador.fase() {
+                                    controlador::Fase::Parado => FaseDitadoBandeja::Parado,
+                                    controlador::Fase::Gravando => {
+                                        if c.controlador.maos_livres() {
+                                            FaseDitadoBandeja::MaosLivres
+                                        } else {
+                                            FaseDitadoBandeja::Ouvindo
+                                        }
+                                    }
+                                    controlador::Fase::Processando => {
+                                        FaseDitadoBandeja::Transcrevendo
+                                    }
+                                };
+                                b.definir_ditado(fase);
+                            }
+                        }
+                    }
+                },
             );
             let (eventos, pilula_eventos) = (handle.clone(), pilula.clone());
             let avisar_lancamento: lancamento::Avisar =
                 Arc::new(move |assunto, detalhe| match detalhe {
-                    None => ponte::emitir(&eventos, assunto),
+                    None => {
+                        ponte::emitir(&eventos, assunto);
+                        if let Some(c) = eventos.try_state::<Arc<Casca>>() {
+                            if let Some(b) = c.bandeja.get() {
+                                if let Ok(est) = c.lancamento.estado(true) {
+                                    let reuniao = match est
+                                        .get("reuniao")
+                                        .and_then(|r| r.get("fase"))
+                                        .and_then(Value::as_str)
+                                    {
+                                        Some("gravando") => FaseReuniaoBandeja::Gravando,
+                                        Some("pausada") => FaseReuniaoBandeja::Pausada,
+                                        Some("finalizando") => FaseReuniaoBandeja::Finalizando,
+                                        _ => FaseReuniaoBandeja::Nenhuma,
+                                    };
+                                    b.definir_reuniao(reuniao);
+                                }
+                            }
+                        }
+                    }
                     Some(v) => {
                         // A pílula mostra a etapa de arquivo ou reunião quando não há ditado.
                         if assunto == "ditado:progresso" {
                             pilula_eventos.progresso(Some(v.clone()));
+                            if let Some(c) = eventos.try_state::<Arc<Casca>>() {
+                                if let Some(b) = c.bandeja.get() {
+                                    let pct = v
+                                        .get("progresso")
+                                        .and_then(Value::as_f64)
+                                        .map(|p| (p * 100.0).round().clamp(0.0, 100.0) as u8);
+                                    b.definir_arquivo(pct, false);
+                                }
+                            }
                         }
                         if assunto == "ditado:resultado" {
                             pilula_eventos.progresso(None);
+                            if let Some(c) = eventos.try_state::<Arc<Casca>>() {
+                                if let Some(b) = c.bandeja.get() {
+                                    let falhou = v.get("erro").is_some();
+                                    b.definir_arquivo(None, falhou);
+                                }
+                            }
                         }
                         ponte::emitir_evento(&eventos, assunto, &v);
                     }
@@ -412,7 +461,15 @@ fn main() {
                 lancamento,
                 pilula,
                 controlador: controlador.clone(),
+                bandeja: OnceLock::new(),
             });
+            let b = Bandeja::criar(
+                &handle,
+                prefs.iniciar_com_windows(),
+                prefs.pilula_sempre_visivel(),
+                prefs.atalho().simbolo(),
+            )?;
+            let _ = casca.bandeja.set(b);
             motores.preparar_fala();
             app.manage(casca);
             caminhos::nota(format!(
@@ -430,7 +487,6 @@ fn main() {
                     let _ = j.hide();
                 }
             }
-            bandeja(&handle, prefs.iniciar_com_windows())?;
             controlador.ligar();
             let a = handle.clone();
             tauri::async_runtime::spawn(async move {

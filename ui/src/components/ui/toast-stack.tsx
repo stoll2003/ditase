@@ -11,6 +11,7 @@ import {
 } from "react";
 import { Button, IconButton } from "@/components/ui/action-button";
 import { CSS_EASE_OUT } from "@/lib/motion-tokens";
+import { plataforma } from "@/lib/plataforma";
 import { cn } from "@/lib/utils";
 
 export type ToastTone = "default" | "success" | "error" | "loading";
@@ -288,7 +289,10 @@ function ToastItem({
     >
       <div
         className={cn(
-          "group flex items-start gap-3 rounded-2xl bg-surface-inset p-3 text-foreground shadow-[0_12px_32px_-12px_rgb(0_0_0/0.3)] dark:bg-surface-raised dark:shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)]",
+          "group flex items-start gap-3 p-3 text-foreground",
+          plataforma() === "windows"
+            ? "rounded-lg bg-surface-raised shadow-[0_8px_16px_rgba(0,0,0,0.14)] border border-(--campo-borda)"
+            : "rounded-2xl bg-surface-inset shadow-[0_12px_32px_-12px_rgb(0_0_0/0.3)] dark:bg-surface-raised dark:shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)]",
           !front && !expanded && "[&>*]:opacity-0",
         )}
       >

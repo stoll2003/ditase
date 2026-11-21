@@ -207,6 +207,16 @@ impl MotoresLocais {
         (self.ao_mudar)();
     }
 
+    /// Resumo do estado do modelo de fala para a aba e a bandeja: `(baixando, carregando, pronto)`.
+    pub fn resumo_fala(&self) -> (Option<(u64, u64)>, bool, bool) {
+        match *self.fala.lock().unwrap() {
+            EstadoFala::Baixando(feito, total) => (Some((feito, total)), false, false),
+            EstadoFala::Carregando => (None, true, false),
+            EstadoFala::Pronto(_) => (None, false, true),
+            EstadoFala::Ausente | EstadoFala::Falhou(_) => (None, false, false),
+        }
+    }
+
     /// Baixa (se preciso) e carrega o modelo de fala numa thread. Chamar de novo depois de falha tenta outra vez.
     pub fn preparar_fala(self: &Arc<Self>) {
         {
@@ -597,6 +607,9 @@ impl Motores for MotoresLocais {
         caminhos::llama_server().is_file()
     }
 
+    fn resumo_fala(&self) -> (Option<(u64, u64)>, bool, bool) {
+        MotoresLocais::resumo_fala(self)
+    }
     fn desligar(&self) {
         self.saindo.store(true, Ordering::Release);
         self.cancelar.store(true, Ordering::Release);

@@ -5,6 +5,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { ContextMenu as ContextPrimitive, DropdownMenu } from "radix-ui";
 import { useState } from "react";
 import { EASE_OUT, instant } from "@/lib/motion-tokens";
+import { plataforma } from "@/lib/plataforma";
 import { cn } from "@/lib/utils";
 
 // Radix's `asChild`, passed as a spread: the shadcn CLI rewrites a literal
@@ -51,8 +52,12 @@ const contextParts = ContextPrimitive as unknown as Parts;
 
 const surface =
   "z-50 min-w-48 rounded-2xl bg-surface-inset p-1 text-foreground shadow-[0_12px_32px_-12px_rgb(0_0_0/0.28)] outline-none dark:bg-surface-raised dark:shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)]";
+const surfaceWin =
+  "z-50 min-w-48 rounded-lg bg-surface-raised p-1 text-foreground shadow-[0_8px_16px_rgba(0,0,0,0.14)] outline-none border border-(--campo-borda)";
 const row =
   "relative flex cursor-default items-center gap-2.5 rounded-xl px-2.5 py-1.5 text-[0.8125rem] outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-foreground/[0.07]";
+const rowWin =
+  "relative flex cursor-default items-center gap-2.5 rounded-[4px] px-2.5 py-1.5 text-[0.8125rem] outline-none select-none data-[disabled]:pointer-events-none data-[disabled]:opacity-40 data-[highlighted]:bg-foreground/[0.07]";
 
 // When any row in a group has an icon, rows without one keep an empty icon
 // column so every label starts on the same line.
@@ -93,10 +98,13 @@ function Entry({
   item: MenuItem;
   reserve: boolean;
 }) {
+  const win = plataforma() === "windows";
+  const r = win ? rowWin : row;
+  const s = win ? surfaceWin : surface;
   if (item.type === "checkbox") {
     return (
       <P.CheckboxItem
-        className={row}
+        className={r}
         checked={item.checked}
         onCheckedChange={item.onCheckedChange}
         disabled={item.disabled}
@@ -118,7 +126,7 @@ function Entry({
             key={option.value}
             value={option.value}
             disabled={option.disabled}
-            className={row}
+            className={r}
           >
             <Glyph icon={option.icon} reserve={reserve} />
             <span className="flex-1">{option.label}</span>
@@ -133,7 +141,7 @@ function Entry({
   if (item.type === "submenu") {
     return (
       <P.Sub>
-        <P.SubTrigger className={cn(row, "data-[state=open]:bg-foreground/[0.07]")}>
+        <P.SubTrigger className={cn(r, "data-[state=open]:bg-foreground/[0.07]")}>
           <Glyph icon={item.icon} reserve={reserve} />
           <span className="flex-1">{item.label}</span>
           <CaretRight weight="bold" className="size-3 text-muted-foreground" />
@@ -148,7 +156,7 @@ function Entry({
                 transformOrigin:
                   "var(--radix-dropdown-menu-content-transform-origin, var(--radix-context-menu-content-transform-origin))",
               }}
-              className={surface}
+              className={s}
             >
               <Items parts={P} groups={[{ items: item.items }]} />
             </motion.div>
@@ -160,7 +168,7 @@ function Entry({
   return (
     <P.Item
       className={cn(
-        row,
+        r,
         item.destructive && "text-negative data-[highlighted]:bg-negative/10",
       )}
       disabled={item.disabled}
@@ -268,7 +276,7 @@ export function Menu({
             >
               <motion.div
                 {...content("--radix-dropdown-menu-content-transform-origin")}
-                className={cn(surface, className)}
+                className={cn(plataforma() === "windows" ? surfaceWin : surface, className)}
               >
                 <Items parts={DropdownMenu} groups={groups} />
               </motion.div>
@@ -321,7 +329,7 @@ export function ContextMenu({
             <ContextPrimitive.Content forceMount {...slot} collisionPadding={8}>
               <motion.div
                 {...content("--radix-context-menu-content-transform-origin")}
-                className={cn(surface, className)}
+                className={cn(plataforma() === "windows" ? surfaceWin : surface, className)}
               >
                 <Items parts={contextParts} groups={groups} />
               </motion.div>

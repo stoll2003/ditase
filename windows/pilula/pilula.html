@@ -3,43 +3,618 @@
 <head>
 <meta charset="utf-8">
 <title>Dita.se</title>
-<!-- Pílula do Windows. Primeira versão funcional; o desenho fino fica com o Dev Designer e o Dev Motion. -->
 <style>
-  :root { color-scheme: light dark; --fundo: rgba(24, 24, 27, .92); --texto: #fafafa; --suave: #a1a1aa; --vermelho: #ef4444; --verde: #22c55e; }
-  html, body { margin: 0; height: 100%; background: transparent; overflow: hidden; user-select: none; font: 13px/1.2 "Segoe UI Variable", "Segoe UI", system-ui, sans-serif; }
-  body { display: flex; align-items: center; justify-content: center; }
-  .pilula { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 8px 0 14px; border-radius: 999px; background: var(--fundo); color: var(--texto);
-    box-shadow: 0 6px 20px rgba(0,0,0,.35); transition: width .18s ease, opacity .18s ease; min-width: 40px; }
-  .pilula[data-fase="ociosa"] { padding: 0 8px; opacity: .85; }
-  button { all: unset; display: grid; place-items: center; width: 28px; height: 28px; border-radius: 999px; cursor: default; color: var(--texto); }
-  button:hover { background: rgba(255,255,255,.12); }
-  button:focus-visible { outline: 2px solid var(--verde); outline-offset: 1px; }
-  .barras { display: flex; align-items: center; gap: 2px; height: 22px; }
-  .barras i { width: 3px; border-radius: 2px; background: var(--texto); height: 3px; transition: height 80ms linear; }
-  .tempo { font-variant-numeric: tabular-nums; color: var(--suave); min-width: 34px; }
-  .texto { max-width: 190px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .giro { width: 14px; height: 14px; border: 2px solid var(--suave); border-top-color: transparent; border-radius: 50%; animation: giro .9s linear infinite; }
-  @keyframes giro { to { transform: rotate(360deg); } }
-  @media (prefers-reduced-motion: reduce) { .giro { animation-duration: 3s; } .barras i, .pilula { transition: none; } }
-  [hidden] { display: none !important; }
+  :root {
+    color-scheme: light dark;
+    --ease-entrada: cubic-bezier(0.23, 1, 0.32, 1);
+    --ease-saida: cubic-bezier(0.32, 0, 0.67, 0);
+    --ease-troca: cubic-bezier(0.77, 0, 0.175, 1);
+    --dur-aceno: 120ms;
+    --dur-entrada: 240ms;
+    --dur-saida: 180ms;
+    --dur-conteudo-in: 160ms;
+    --dur-conteudo-out: 100ms;
+    --dur-fade-reduzido: 120ms;
+
+    --aba-fundo: #FBFBFB;
+    --aba-borda: #E5E5E5;
+    --aba-texto: #1A1A1A;
+    --aba-texto-2: #5C5C5C;
+    --aba-gravando: #C42B1C;
+    --aba-acento: #005FB8;
+    --aba-sobre-acento: #FFFFFF;
+    --aba-ponta-contorno: #FFFFFF;
+    --aba-hover: rgba(0, 0, 0, .06);
+    --aba-pressionado: rgba(0, 0, 0, .09);
+    --aba-chip: #EDEDED;
+    --aba-brilho: #0078D4;
+    --visivel: 4px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-tema="claro"]) {
+      --aba-fundo: #2C2C2C;
+      --aba-borda: #3A3A3A;
+      --aba-texto: #FFFFFF;
+      --aba-texto-2: #C5C5C5;
+      --aba-gravando: #FF99A4;
+      --aba-acento: #60CDFF;
+      --aba-sobre-acento: #000000;
+      --aba-ponta-contorno: #000000;
+      --aba-hover: rgba(255, 255, 255, .08);
+      --aba-pressionado: rgba(255, 255, 255, .05);
+      --aba-chip: #3D3D3D;
+      --aba-brilho: #99EBFF;
+    }
+  }
+
+  :root[data-tema="escuro"] {
+    --aba-fundo: #2C2C2C;
+    --aba-borda: #3A3A3A;
+    --aba-texto: #FFFFFF;
+    --aba-texto-2: #C5C5C5;
+    --aba-gravando: #FF99A4;
+    --aba-acento: #60CDFF;
+    --aba-sobre-acento: #000000;
+    --aba-ponta-contorno: #000000;
+    --aba-hover: rgba(255, 255, 255, .08);
+    --aba-pressionado: rgba(255, 255, 255, .05);
+    --aba-chip: #3D3D3D;
+    --aba-brilho: #99EBFF;
+  }
+
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    font: 14px/18px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    color: var(--aba-texto);
+  }
+
+  .palco {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+  }
+
+  /* Ponta de repouso (4x40 px com contorno oposto; no aceno vai a 6x56). */
+  .ponta {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    width: 4px;
+    height: 40px;
+    border-radius: 2px 0 0 2px;
+    background: var(--aba-acento);
+    box-shadow: 0 0 0 1px var(--aba-ponta-contorno);
+    transform: translateY(-50%) scaleY(1);
+    transform-origin: right center;
+    transition: transform var(--dur-aceno) var(--ease-entrada), opacity var(--dur-aceno) var(--ease-entrada);
+    cursor: pointer;
+    z-index: 3;
+  }
+
+  [data-borda="esquerda"] .ponta {
+    right: auto;
+    left: 0;
+    border-radius: 0 2px 2px 0;
+    transform-origin: left center;
+  }
+
+  .palco[data-estado="aceno"] .ponta {
+    width: 6px;
+    transform: translateY(-50%) scaleY(1.4);
+  }
+
+  .palco:not([data-estado="repouso"]):not([data-estado="aceno"]) .ponta {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  /* Casca fixa 240x56 px: largura visível só via translateX, zero animação de width. */
+  .casca {
+    position: absolute;
+    right: 0;
+    top: 50%;
+    width: 240px;
+    height: 56px;
+    box-sizing: border-box;
+    border-radius: 14px 0 0 14px;
+    border: 1px solid var(--aba-borda);
+    border-right: 0;
+    background: var(--aba-fundo);
+    box-shadow: -2px 4px 12px rgba(0, 0, 0, .14);
+    transform: translateY(-50%) translateX(calc(240px - var(--visivel)));
+    will-change: transform;
+    transition:
+      transform var(--dur-entrada) var(--ease-entrada),
+      opacity var(--dur-aceno) var(--ease-entrada);
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+  }
+
+  [data-borda="esquerda"] .casca {
+    right: auto;
+    left: 0;
+    border-radius: 0 14px 14px 0;
+    border: 1px solid var(--aba-borda);
+    border-left: 0;
+    box-shadow: 2px 4px 12px rgba(0, 0, 0, .14);
+    transform: translateY(-50%) translateX(calc(var(--visivel) - 240px));
+    justify-content: flex-end;
+  }
+
+  .palco[data-recolhendo="1"] .casca {
+    transition:
+      transform var(--dur-saida) var(--ease-saida),
+      opacity var(--dur-saida) var(--ease-saida);
+  }
+
+  .palco[data-recolhendo="1"] button {
+    pointer-events: none;
+  }
+
+  .palco[data-estado="repouso"] .casca {
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .palco[data-estado="aceno"] .casca {
+    opacity: 1;
+    pointer-events: none;
+  }
+
+  /* Traço de 2,5 px na borda esquerda para erro. */
+  .traco-erro {
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 2.5px;
+    border-radius: 2px;
+    background: var(--aba-gravando);
+    opacity: 0;
+    transition: opacity 200ms var(--ease-entrada);
+    pointer-events: none;
+  }
+
+  [data-borda="esquerda"] .traco-erro {
+    left: auto;
+    right: 0;
+  }
+
+  .palco[data-estado="erro"] .traco-erro {
+    opacity: 1;
+  }
+
+  /* Contorno de progresso em C (SVG com pathLength="1"). */
+  .contorno {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 250ms var(--ease-entrada);
+  }
+
+  .contorno.ativo {
+    opacity: 1;
+  }
+
+  .contorno path {
+    fill: none;
+    stroke: var(--aba-acento);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-dasharray: 1;
+    stroke-dashoffset: 1;
+    transition: stroke 120ms ease;
+  }
+
+  .contorno.brilho path {
+    stroke: var(--aba-brilho);
+  }
+
+  .contorno.erro path {
+    stroke: var(--aba-gravando);
+  }
+
+  .conteudo {
+    position: relative;
+    display: flex;
+    align-items: center;
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+    opacity: 1;
+    transition: opacity var(--dur-conteudo-in) var(--ease-entrada) 60ms;
+  }
+
+  .palco[data-estado="repouso"] .conteudo,
+  .palco[data-estado="aceno"] .conteudo {
+    opacity: 0;
+    transition: opacity var(--dur-conteudo-out) var(--ease-saida) 0ms;
+  }
+
+  /* Vistas por estado */
+  .vista {
+    display: none;
+    align-items: center;
+    height: 100%;
+    width: 100%;
+    box-sizing: border-box;
+  }
+
+  .vista.ativa {
+    display: flex;
+  }
+
+  /* 3. Aberta, ociosa (176 px) */
+  .v-ociosa {
+    padding-left: 12px;
+    gap: 8px;
+  }
+
+  .btn-ditar {
+    all: unset;
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 84px;
+    height: 32px;
+    border-radius: 4px;
+    background: var(--aba-acento);
+    color: var(--aba-sobre-acento);
+    font-weight: 600;
+    font-size: 14px;
+    cursor: pointer;
+    transition: transform 100ms var(--ease-entrada), filter 100ms ease;
+  }
+
+  .btn-ditar:hover {
+    filter: brightness(1.06);
+  }
+
+  .btn-ditar:active {
+    transform: scale(0.96);
+    filter: brightness(0.95);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 62px;
+    max-width: 72px;
+    height: 22px;
+    padding: 0 7px;
+    box-sizing: border-box;
+    border-radius: 4px;
+    background: var(--aba-chip);
+    color: var(--aba-texto-2);
+    font: 12px/16px "Segoe UI Variable Small", "Segoe UI", system-ui, sans-serif;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Botões redondos / quadrados 32x32, raio 4px */
+  .btn-icone {
+    all: unset;
+    box-sizing: border-box;
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 4px;
+    color: var(--aba-texto);
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background-color 120ms ease;
+  }
+
+  .btn-icone:hover {
+    background: var(--aba-hover);
+  }
+
+  .btn-icone:active {
+    background: var(--aba-pressionado);
+  }
+
+  /* 4. Gravando, compacta (32 px) */
+  .v-grav-comp {
+    width: 32px;
+    justify-content: center;
+  }
+
+  .barras {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    height: 22px;
+  }
+
+  .barras i {
+    display: block;
+    width: 3px;
+    height: 22px;
+    border-radius: 1.5px;
+    background: var(--aba-gravando);
+    transform: scaleY(0.18);
+    transform-origin: center;
+  }
+
+  /* 5. Gravando, aberta (200 px) */
+  .v-grav-aberta {
+    padding-left: 14px;
+    gap: 12px;
+  }
+
+  /* 6. Mãos livres (232 px) */
+  .v-maos {
+    padding-left: 10px;
+    gap: 10px;
+  }
+
+  .tempo {
+    font-variant-numeric: tabular-nums;
+    font-size: 14px;
+    line-height: 18px;
+    color: var(--aba-texto);
+    min-width: 38px;
+    text-align: left;
+  }
+
+  .quadrado-parar {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    background: var(--aba-gravando);
+  }
+
+  /* 7 e 8. Processando */
+  .v-proc-comp {
+    width: 32px;
+    justify-content: center;
+  }
+
+  .v-proc-aberta {
+    padding-left: 16px;
+    padding-right: 14px;
+    gap: 10px;
+  }
+
+  .pontos {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+
+  .pontos i {
+    display: block;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--aba-acento);
+    animation: onda 1.15s ease-in-out infinite;
+  }
+
+  .pontos i:nth-child(2) { animation-delay: 130ms; }
+  .pontos i:nth-child(3) { animation-delay: 260ms; }
+
+  @keyframes onda {
+    0%, 100% { transform: translateY(0); opacity: 0.5; }
+    50% { transform: translateY(-3px); opacity: 1; }
+  }
+
+  .etapa-texto {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 184px;
+  }
+
+  /* 9 e 10. Baixando o modelo */
+  .v-baix-comp {
+    width: 32px;
+    justify-content: center;
+    color: var(--aba-acento);
+  }
+
+  .v-baix-aberta {
+    padding-left: 18px;
+    padding-right: 12px;
+    gap: 10px;
+  }
+
+  .v-baix-aberta svg {
+    color: var(--aba-acento);
+    flex-shrink: 0;
+  }
+
+  /* 11 e 12. Aviso e erro */
+  .v-aviso {
+    padding-left: 14px;
+    padding-right: 10px;
+    gap: 8px;
+  }
+
+  .icone-aviso {
+    flex-shrink: 0;
+    color: var(--aba-acento);
+  }
+
+  .palco[data-estado="erro"] .icone-aviso {
+    color: var(--aba-gravando);
+  }
+
+  .texto-aviso {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    font-size: 13.5px;
+    line-height: 17px;
+    max-width: 192px;
+    word-break: break-word;
+  }
+
+  .texto-aviso .linha2 {
+    display: block;
+    color: var(--aba-texto-2);
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  /* Movimento reduzido (MOTION-windows.md §8) */
+  @media (prefers-reduced-motion: reduce) {
+    .casca,
+    .palco[data-recolhendo="1"] .casca {
+      transition: opacity var(--dur-fade-reduzido) ease;
+    }
+    .ponta {
+      transition: opacity var(--dur-fade-reduzido) ease;
+    }
+    .btn-ditar:active {
+      transform: none;
+    }
+    .pontos i {
+      animation: onda-reduzida 0.9s ease-in-out infinite;
+    }
+    @keyframes onda-reduzida {
+      0%, 100% { opacity: 0.6; }
+      50% { opacity: 1; }
+    }
+  }
+
+  /* Alto contraste (SPEC-windows.md §3.2) */
+  @media (forced-colors: active) {
+    .casca {
+      background: Canvas;
+      border-color: CanvasText;
+      color: CanvasText;
+      box-shadow: none;
+    }
+    .ponta {
+      background: Highlight;
+      box-shadow: 0 0 0 1px CanvasText;
+    }
+    .barras i,
+    .pontos i,
+    .traco-erro {
+      background: Highlight;
+    }
+    .contorno path {
+      stroke: Highlight;
+    }
+    .btn-ditar {
+      background: ButtonFace;
+      color: ButtonText;
+      border: 2px solid ButtonText;
+    }
+  }
 </style>
 </head>
 <body>
-<!-- Só o texto é região viva: com o contêiner inteiro, o leitor de tela anunciava o relógio a cada segundo. -->
-<div class="pilula" data-fase="ociosa">
-  <button id="microfone" aria-label="Começar ditado em mãos livres" title="">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
-  </button>
-  <div class="barras" id="barras" aria-hidden="true" hidden></div>
-  <span class="tempo" id="tempo" hidden>0:00</span>
-  <span class="giro" id="giro" aria-hidden="true" hidden></span>
-  <span class="texto" id="texto" role="status" aria-live="polite" hidden></span>
-  <button id="cancelar" aria-label="Cancelar ditado" hidden>
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-  </button>
-  <button id="parar" aria-label="Parar e colar" hidden>
-    <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="var(--vermelho)"/></svg>
-  </button>
+<div class="palco" id="palco" data-estado="repouso" data-borda="direita">
+  <div class="ponta" id="ponta" role="button" aria-label="Dita.se. Clique para ditar" title="Dita.se: clique para ditar"></div>
+  <div class="casca" id="casca">
+    <span class="traco-erro" aria-hidden="true"></span>
+    <svg class="contorno" id="contorno" viewBox="0 0 240 56" preserveAspectRatio="none" aria-hidden="true">
+      <path id="contorno-path" pathLength="1" d="M 240 1 H 14 A 13 13 0 0 0 1 14 V 42 A 13 13 0 0 0 14 55 H 240"/>
+    </svg>
+    <div class="conteudo" id="conteudo">
+      <!-- 3. Aberta, ociosa -->
+      <div class="vista v-ociosa" id="v-ociosa">
+        <button class="btn-ditar" id="btn-ditar" type="button" title="Ditar em mãos livres">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+          <span>Ditar</span>
+        </button>
+        <span class="chip" id="chip-atalho">Ctrl dir.</span>
+      </div>
+
+      <!-- 4. Gravando, compacta -->
+      <div class="vista v-grav-comp" id="v-grav-comp">
+        <div class="barras" id="barras-3" aria-hidden="true"><i></i><i></i><i></i></div>
+      </div>
+
+      <!-- 5. Gravando, aberta -->
+      <div class="vista v-grav-aberta" id="v-grav-aberta">
+        <div class="barras" id="barras-9a" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <span class="tempo" id="tempo-a">0:00</span>
+        <button class="btn-icone" id="btn-cancelar-a" type="button" aria-label="Cancelar ditado" title="Cancelar ditado">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+      </div>
+
+      <!-- 6. Mãos livres -->
+      <div class="vista v-maos" id="v-maos">
+        <button class="btn-icone" id="btn-cancelar-m" type="button" aria-label="Cancelar ditado" title="Cancelar ditado">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
+        <div class="barras" id="barras-9m" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <span class="tempo" id="tempo-m">0:00</span>
+        <button class="btn-icone" id="btn-parar" type="button" aria-label="Parar e colar" title="Parar e colar">
+          <span class="quadrado-parar" aria-hidden="true"></span>
+        </button>
+      </div>
+
+      <!-- 7. Processando, compacta -->
+      <div class="vista v-proc-comp" id="v-proc-comp">
+        <div class="pontos" aria-hidden="true"><i></i><i></i><i></i></div>
+      </div>
+
+      <!-- 8. Processando, aberta -->
+      <div class="vista v-proc-aberta" id="v-proc-aberta">
+        <div class="pontos" aria-hidden="true"><i></i><i></i><i></i></div>
+        <span class="etapa-texto" id="etapa-texto">Transcrevendo</span>
+      </div>
+
+      <!-- 9. Baixando o modelo, compacta -->
+      <div class="vista v-baix-comp" id="v-baix-comp">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"/></svg>
+      </div>
+
+      <!-- 10. Baixando o modelo, aberta -->
+      <div class="vista v-baix-aberta" id="v-baix-aberta">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"/></svg>
+        <span class="etapa-texto" id="baixando-texto">Baixando o modelo · 0%</span>
+      </div>
+
+      <!-- 11 e 12. Aviso / Erro -->
+      <div class="vista v-aviso" id="v-aviso">
+        <svg class="icone-aviso" id="icone-info" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+        <svg class="icone-aviso" id="icone-erro" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+        <span class="texto-aviso" id="texto-aviso"></span>
+      </div>
+    </div>
+  </div>
+  <!-- Região viva dedicada: o relógio nunca é anunciado. -->
+  <span class="sr-only" id="leitor" role="status" aria-live="polite"></span>
 </div>
 <script src="pilula.js" defer></script>
 </body>

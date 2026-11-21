@@ -6,6 +6,7 @@ import { Dialog as DialogPrimitive } from "radix-ui";
 import { useState } from "react";
 import { IconButton } from "@/components/ui/action-button";
 import { EASE_OUT } from "@/lib/motion-tokens";
+import { plataforma } from "@/lib/plataforma";
 import { cn } from "@/lib/utils";
 
 // Radix's `asChild`, passed as a spread: the shadcn CLI rewrites a literal
@@ -98,6 +99,7 @@ export function Dialog({
 }: DialogProps) {
   const reduce = useReducedMotion();
   const [open, setOpen] = useOpen(openProp, onOpenChange);
+  const win = plataforma() === "windows";
 
   return (
     <DialogPrimitive.Root open={open} onOpenChange={setOpen}>
@@ -122,19 +124,20 @@ export function Dialog({
                   }}
                   className={cn(
                     surface,
-                    "w-full rounded-[1.375rem] p-1.5",
+                    "w-full p-1.5",
+                    win ? "rounded-lg" : "rounded-[1.375rem]",
                     sizes[size],
                     className,
                   )}
                 >
                   <Header title={title} description={description} />
                   {children && (
-                    <div className="rounded-2xl bg-surface-inset p-4 text-sm">
+                    <div className={cn("bg-surface-inset p-4 text-sm", win ? "rounded-[4px]" : "rounded-2xl")}>
                       {children}
                     </div>
                   )}
                   {footer && (
-                    <div className="flex flex-wrap items-center justify-end gap-2 px-1.5 pt-3 pb-1.5">
+                    <div className={cn("flex flex-wrap items-center gap-2 px-1.5 pt-3 pb-1.5", win ? "flex-row-reverse justify-end" : "justify-end")}>
                       {footer}
                     </div>
                   )}

@@ -243,6 +243,19 @@ pub fn atender(casca: &Casca, metodo: &str, p: &Value) -> R {
             if casca.prefs.definir(chave, valor) {
                 if chave == "iniciarComWindows" {
                     crate::iniciar_com_windows(app, valor == "1");
+                    if let Some(b) = casca.bandeja.get() {
+                        b.atualizar_iniciar_marcado(valor == "1");
+                    }
+                }
+                if chave == "pilulaSempreVisivel" {
+                    if let Some(b) = casca.bandeja.get() {
+                        b.atualizar_aba_marcada(valor == "1");
+                    }
+                }
+                if chave == "atalho" {
+                    if let Some(b) = casca.bandeja.get() {
+                        b.atualizar_atalho(casca.prefs.atalho().simbolo());
+                    }
                 }
                 c.preferencia_mudou(chave);
             }

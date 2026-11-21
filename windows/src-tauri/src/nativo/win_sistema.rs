@@ -52,6 +52,47 @@ pub fn versao() -> String {
     )
 }
 
+fn dword_personalize(nome: &str) -> Option<u32> {
+    let saida = Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+            "/v",
+            nome,
+        ])
+        .creation_flags(SEM_JANELA)
+        .output()
+        .ok()?;
+    let texto = String::from_utf8_lossy(&saida.stdout);
+    let val = texto
+        .lines()
+        .find(|l| l.trim_start().starts_with(nome))?
+        .split("REG_DWORD")
+        .nth(1)?
+        .trim();
+    if let Some(hex) = val.strip_prefix("0x").or_else(|| val.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        val.parse::<u32>().ok()
+    }
+}
+
+/// Tema da barra de tarefas: `true` se a barra for clara (`SystemUsesLightTheme == 1`).
+pub fn barra_clara() -> bool {
+    dword_personalize("SystemUsesLightTheme") == Some(1)
+}
+
+/// Tema dos aplicativos: `true` se escuro (`AppsUseLightTheme == 0`).
+pub fn tema_app_escuro() -> bool {
+    dword_personalize("AppsUseLightTheme") == Some(0)
+}
+
+/// Mica só no Windows 11 (build >= 22000) com "Efeitos de transparência" ligado (`EnableTransparency == 1`).
+pub fn suporta_mica() -> bool {
+    let build = registro("CurrentBuild").parse::<u32>().unwrap_or(0);
+    build >= 22000 && dword_personalize("EnableTransparency") == Some(1)
+}
+
 /// Programa em primeiro plano: (executável, nome para exibir). Nunca o título da janela,
 /// que pode ter nome de documento ou conversa.
 pub fn app_em_foco() -> (String, String) {
