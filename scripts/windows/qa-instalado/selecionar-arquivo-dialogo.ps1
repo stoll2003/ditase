@@ -49,8 +49,9 @@ $campo = $null
 $fimCampo = (Get-Date).AddSeconds(10)
 while ((Get-Date) -lt $fimCampo -and -not $campo) {
     $cands = $janela.FindAll($TS::Descendants, (Cond $AE::AutomationIdProperty '1148'))
+    # Run 44876775586: no runner os controles vêm como Pane (proxy MSAA); vale a classe Win32.
     foreach ($c in $cands) {
-        if ($c.Current.ControlType -eq $CT::Edit) { $campo = $c; break }
+        if ($c.Current.ControlType -eq $CT::Edit -or $c.Current.ClassName -eq 'Edit') { $campo = $c; break }
     }
     if (-not $campo) {
         foreach ($c in $cands) {
@@ -68,8 +69,25 @@ if (-not $campo) {
     throw "Campo de nome de arquivo (AutomationId 1148) não encontrado no diálogo '$($janela.Current.Name)'."
 }
 
+Add-Type -Namespace QaDialogo -Name Win32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern System.IntPtr SendMessage(System.IntPtr h, uint msg, System.IntPtr w, string l);
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern System.IntPtr SendMessage(System.IntPtr h, uint msg, System.IntPtr w, System.IntPtr l);
+'@
+$abrir = $janela.FindFirst($TS::Descendants, (New-Object System.Windows.Automation.AndCondition(
+    (Cond $AE::AutomationIdProperty '1'), (Cond $AE::ClassNameProperty 'Button'))))
+$hCampo = [IntPtr]$campo.Current.NativeWindowHandle
+$hAbrir = if ($abrir) { [IntPtr]$abrir.Current.NativeWindowHandle } else { [IntPtr]::Zero }
+Write-Host "Campo: tipo=$($campo.Current.ControlType.ProgrammaticName) classe=$($campo.Current.ClassName) hwnd=$hCampo; Abrir hwnd=$hAbrir"
+
 $vp = $null
-if ($campo.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
+if ($hCampo -ne [IntPtr]::Zero -and $hAbrir -ne [IntPtr]::Zero) {
+    # Mensagens nativas do próprio controle do diálogo: WM_SETTEXT no campo e BM_CLICK em Abrir.
+    [void][QaDialogo.Win32]::SendMessage($hCampo, 0x000C, [IntPtr]::Zero, $caminho)
+    Start-Sleep -Milliseconds 200
+    [void][QaDialogo.Win32]::SendMessage($hAbrir, 0x00F5, [IntPtr]::Zero, [IntPtr]::Zero)
+} elseif ($campo.TryGetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern, [ref]$vp)) {
     $vp.SetValue($caminho)
     Start-Sleep -Milliseconds 200
     $abrir = $janela.FindFirst($TS::Descendants, (New-Object System.Windows.Automation.AndCondition(
