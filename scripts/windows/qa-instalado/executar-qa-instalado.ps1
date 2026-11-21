@@ -3,11 +3,13 @@
     [string]$Instalador,
     [Parameter(Mandatory = $false)]
     [string]$Executavel,
-    [string]$PastaModelos = '',
+    [ValidateSet('defeito', 'corrigido')]
+    [string]$Esperado = 'corrigido',
     [string]$Saida = (Join-Path $env:TEMP ("ditase-qa-instalado-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))),
     [ValidateSet('diagnostico', 'completo')]
     [string]$Modo = 'completo',
-    [int]$PortaCdp = 9222
+    [int]$PortaCdp = 9222,
+    [int]$PrazoModeloMinutos = 20
 )
 
 $ErrorActionPreference = 'Stop'
@@ -42,6 +44,11 @@ $instalouAqui = $false
 $destino = $null
 $raizDados = Join-Path ([IO.Path]::GetTempPath()) ("ditase-qa-dados-" + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $raizDados | Out-Null
+# Sempre vazia: fala_disponivel() olha o disco, então qualquer modelo pré-carregado esconderia o
+# defeito da v1.0.1. O próprio app baixa o Parakeet nesta pasta, na mesma sessão observada.
+$pastaModelos = Join-Path $raizDados 'Modelos'
+New-Item -ItemType Directory -Force -Path $pastaModelos | Out-Null
+if (@(Get-ChildItem -LiteralPath $pastaModelos -Force).Count -ne 0) { throw "Pasta de modelos não está vazia: $pastaModelos" }
 
 $envAnterior = @{
     DITASE_RAIZ = $env:DITASE_RAIZ
@@ -77,15 +84,20 @@ try {
         throw "Executável não encontrado: $Executavel"
     }
 
-    # Detecta se há dispositivo de áudio disponível para a etapa de Reunião (WASAPI loopback).
-    $dispositivosAudio = @(Get-CimInstance Win32_SoundDevice -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'OK' })
-    $temAudioSistema = if ($dispositivosAudio.Count -gt 0) { '1' } else { '0' }
-    Write-Host "Dispositivos de áudio OK detectados: $($dispositivosAudio.Count)"
+    # Reunião precisa de um endpoint de SAÍDA ativo (WASAPI loopback do dispositivo padrão) e do
+    # serviço de áudio rodando. Win32_SoundDevice sozinho não garante endpoint.
+    $audiosrv = Get-Service -Name Audiosrv -ErrorAction SilentlyContinue
+    $endpoints = @(Get-PnpDevice -Class AudioEndpoint -Status OK -ErrorAction SilentlyContinue)
+    $temAudioSistema = if ($audiosrv -and $audiosrv.Status -eq 'Running' -and $endpoints.Count -gt 0) { '1' } else { '0' }
+    [ordered]@{
+        audiosrv = if ($audiosrv) { "$($audiosrv.Status)" } else { 'ausente' }
+        endpoints = @($endpoints | ForEach-Object { $_.FriendlyName })
+        usadoNaProva = ($temAudioSistema -eq '1')
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Saida 'audio-ambiente.json') -Encoding UTF8
+    Write-Host "Audiosrv: $($audiosrv.Status); endpoints OK: $($endpoints.Count)"
 
     $env:DITASE_RAIZ = $raizDados
-    if ($PastaModelos) {
-        $env:DITASE_PASTA_MODELOS = (Resolve-Path $PastaModelos).Path
-    }
+    $env:DITASE_PASTA_MODELOS = $pastaModelos
     $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$PortaCdp"
 
     Write-Host "Iniciando executável instalado: $Executavel (CDP porta $PortaCdp)..."
@@ -95,6 +107,8 @@ try {
         $scriptUi,
         "--porta=$PortaCdp",
         "--modo=$Modo",
+        "--esperado=$Esperado",
+        "--prazo-modelo-ms=$($PrazoModeloMinutos * 60000)",
         "--wav=$wav",
         "--ref=$refJson",
         "--saida=$Saida",
@@ -111,7 +125,7 @@ try {
     }
 
     if ($codigoQa -ne 0) {
-        throw "Automação de UI terminou com código $codigoQa. Veja $Saida\relatorio-qa.json."
+        throw "Veredito não confere com -Esperado $Esperado (código $codigoQa). Veja $Saida\relatorio-qa.json."
     }
     Write-Host "QA concluído. Evidências em $Saida"
 } finally {

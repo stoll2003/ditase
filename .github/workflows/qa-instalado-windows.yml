@@ -1,0 +1,178 @@
+# QA pela interface do executável INSTALADO (NSIS) no Windows.
+# - original: instalador publicado na release v1.0.1 (SHA-256 conferido pelo SHA256SUMS.txt).
+#   Espera reproduzir o defeito: Arquivos e Reunião presos em "indisponível" depois de o modelo
+#   chegar ao disco na mesma sessão.
+# - candidato: build NSIS do ref em scripts/windows/qa-instalado/candidato-ref.txt (vazio = pula).
+#   Espera destravar e passar Arquivos (texto lido na tela) e Reunião (com endpoint de áudio).
+# Sem segredos, sem publicar nada: só lê a release e guarda os relatórios como artefato.
+name: Windows (QA instalado)
+
+on:
+  push:
+    branches: ["qa-instalado*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TAG_ORIGINAL: v1.0.1
+  ASSET: Dita.se-windows-x64-setup.exe
+
+jobs:
+  original:
+    name: Instalador original (v1.0.1)
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Baixar e conferir o instalador original
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $d = Join-Path $env:RUNNER_TEMP 'original'
+          gh release download $env:TAG_ORIGINAL -R $env:GITHUB_REPOSITORY -p $env:ASSET -p SHA256SUMS.txt -D $d
+          if ($LASTEXITCODE -ne 0) { throw 'gh release download falhou' }
+          $linha = Get-Content (Join-Path $d 'SHA256SUMS.txt') | Where-Object { $_ -match [regex]::Escape($env:ASSET) }
+          $esperado = ($linha -split '\s+')[0].ToLowerInvariant()
+          $obtido = (Get-FileHash -Algorithm SHA256 (Join-Path $d $env:ASSET)).Hash.ToLowerInvariant()
+          if (-not $esperado -or $esperado -ne $obtido) { throw "SHA-256 divergente: esperado=$esperado obtido=$obtido" }
+          Write-Host "Instalador original conferido: $obtido"
+          "INSTALADOR=$(Join-Path $d $env:ASSET)" | Add-Content $env:GITHUB_ENV
+
+      - name: Endpoint de áudio virtual assinado (VB-CABLE)
+        shell: powershell
+        run: .\scripts\windows\qa-instalado\preparar-audio-virtual.ps1 -Saida "$env:RUNNER_TEMP\qa-original"
+
+      - name: Prova pela UI (espera o defeito)
+        shell: powershell
+        run: |
+          .\scripts\windows\qa-instalado\executar-qa-instalado.ps1 `
+            -Instalador $env:INSTALADOR -Saida "$env:RUNNER_TEMP\qa-original" -Modo completo -Esperado defeito
+
+      - name: Resumo
+        if: always()
+        shell: pwsh
+        run: |
+          $r = Join-Path $env:RUNNER_TEMP 'qa-original\relatorio-qa.json'
+          if (Test-Path $r) { Get-Content $r -Raw | Tee-Object -Variable j; "### original`n``````json`n$j`n``````" | Add-Content $env:GITHUB_STEP_SUMMARY }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: qa-instalado-original
+          path: ${{ runner.temp }}/qa-original
+          if-no-files-found: warn
+          retention-days: 7
+
+  ref:
+    name: Ref do candidato
+    runs-on: ubuntu-24.04
+    outputs:
+      candidato: ${{ steps.ler.outputs.candidato }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: ler
+        run: echo "candidato=$(tr -d '[:space:]' < scripts/windows/qa-instalado/candidato-ref.txt)" >> "$GITHUB_OUTPUT"
+
+  candidato:
+    name: Instalador candidato
+    needs: ref
+    if: needs.ref.outputs.candidato != ''
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: qa
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.ref.outputs.candidato }}
+          path: cand
+
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: cand
+          shared-key: windows-x64-qa-instalado-v1
+          cache-on-failure: true
+
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/ditase-vendor-cache
+          key: ditase-vendor-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('cand/scripts/windows/preparar-vendor.ps1') }}
+
+      - name: Preparar bibliotecas verificadas do Windows
+        working-directory: cand
+        shell: powershell
+        run: .\scripts\windows\preparar-vendor.ps1
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Build da UI
+        working-directory: cand/ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Tauri (NSIS por usuário, sem atualizador)
+        working-directory: cand
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --prefix scripts/windows/tauri-cli --ignore-scripts --no-audit --no-fund
+          cd windows
+          node ../scripts/windows/tauri-cli/node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --ci \
+            --config src-tauri/tauri.distribuicao.conf.json \
+            --config '{"bundle":{"createUpdaterArtifacts":false,"windows":{"nsis":{"installMode":"currentUser"}}}}' -- --locked
+          exe=$(ls ../target/release/bundle/nsis/*-setup.exe | head -n1)
+          echo "INSTALADOR=$(cygpath -w "$(realpath "$exe")")" >> "$GITHUB_ENV"
+          echo "Candidato $(git -C .. rev-parse HEAD): $exe"
+
+      - name: Endpoint de áudio virtual assinado (VB-CABLE)
+        working-directory: qa
+        shell: powershell
+        run: .\scripts\windows\qa-instalado\preparar-audio-virtual.ps1 -Saida "$env:RUNNER_TEMP\qa-candidato"
+
+      - name: Prova pela UI (espera corrigido)
+        working-directory: qa
+        shell: powershell
+        run: |
+          .\scripts\windows\qa-instalado\executar-qa-instalado.ps1 `
+            -Instalador $env:INSTALADOR -Saida "$env:RUNNER_TEMP\qa-candidato" -Modo completo -Esperado corrigido
+
+      - name: Resumo
+        if: always()
+        shell: pwsh
+        run: |
+          $r = Join-Path $env:RUNNER_TEMP 'qa-candidato\relatorio-qa.json'
+          if (Test-Path $r) { Get-Content $r -Raw | Tee-Object -Variable j; "### candidato`n``````json`n$j`n``````" | Add-Content $env:GITHUB_STEP_SUMMARY }
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: qa-instalado-candidato
+          path: |
+            ${{ runner.temp }}/qa-candidato
+            cand/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: warn
+          retention-days: 7
