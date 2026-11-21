@@ -85,10 +85,12 @@ function ConteudoArquivo({ arquivo, aberto, alternar, bruto, mostrarBruto }: Car
   </Shell>;
 }
 
+const SEM_ARQUIVOS: Arquivo[] = [];
+
 export function Arquivos({ dados, selecionar, arrastando, destaque, erro, recarregar }: {
   dados?: Lancamento; selecionar: () => void; arrastando: boolean; destaque?: string; erro?: string; recarregar: () => void;
 }) {
-  const arquivos = dados?.arquivos ?? [];
+  const arquivos = dados?.arquivos ?? SEM_ARQUIVOS;
   const disponivel = !erro && dados?.disponivel === true;
   const [abertos, atualizar] = useState(() => new Set<string>());
   const [busca, pesquisar] = useState("");

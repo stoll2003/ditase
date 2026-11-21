@@ -620,6 +620,8 @@ pub mod dubles {
         /// O resumo espera até ser cancelado (no máximo 5 s).
         pub resumo_lento: bool,
         pub fala_quebrada: bool,
+        /// Quando preenchido, `fala` devolve este motivo (modelo baixando, carregando...).
+        pub indisponivel: std::sync::Mutex<Option<super::FalaIndisponivel>>,
     }
 
     impl MotoresDuble {
@@ -635,6 +637,7 @@ pub mod dubles {
                 com_limpeza: false,
                 resumo_lento: false,
                 fala_quebrada: false,
+                indisponivel: std::sync::Mutex::new(None),
             };
             ajustar(&mut m);
             Arc::new(m)
@@ -643,6 +646,9 @@ pub mod dubles {
 
     impl Motores for MotoresDuble {
         fn fala(&self, _esperar: bool) -> Result<Arc<dyn Fala>, super::FalaIndisponivel> {
+            if let Some(motivo) = self.indisponivel.lock().unwrap().clone() {
+                return Err(motivo);
+            }
             Ok(if self.fala_quebrada {
                 Arc::new(FalaQuebrada)
             } else {

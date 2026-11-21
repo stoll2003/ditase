@@ -1903,6 +1903,32 @@ mod testes {
         assert!(!doc["trechos"].as_array().unwrap().is_empty());
     }
 
+    /// Regressão da 1.0.1: `disponivel` vinha do arquivo do modelo no disco, não do reconhecedor.
+    /// As telas precisam saber se a fala atende agora e, se não, o motivo exato.
+    #[test]
+    fn disponivel_segue_o_reconhecedor_e_explica_o_motivo() {
+        let motores = MotoresDuble::novo();
+        *motores.indisponivel.lock().unwrap() =
+            Some(crate::integracao::FalaIndisponivel::Carregando);
+        let (_tmp, s, _) = servico_com(3.0, motores.clone());
+        let carregando = s.estado(true).unwrap();
+        assert_eq!(carregando["disponivel"], false);
+        assert_eq!(
+            carregando["motivoIndisponibilidade"],
+            "O modelo de fala está carregando. Tente em alguns segundos."
+        );
+        *motores.indisponivel.lock().unwrap() =
+            Some(crate::integracao::FalaIndisponivel::Baixando { feito: 1, total: 4 });
+        assert_eq!(
+            s.estado(true).unwrap()["motivoIndisponibilidade"],
+            "Baixando o modelo de fala: 25%"
+        );
+        *motores.indisponivel.lock().unwrap() = None;
+        let pronto = s.estado(true).unwrap();
+        assert_eq!(pronto["disponivel"], true);
+        assert!(pronto.get("motivoIndisponibilidade").is_none());
+    }
+
     #[test]
     fn arquivo_passa_pelo_processador_com_falantes_e_fica_pronto() {
         let (tmp, s, reg) = servico(3.0);
