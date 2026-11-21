@@ -43,7 +43,7 @@ use crate::{
     integracao::Integracao,
     lancamento::{CapturaDoSistema, Lancamento},
     motores_locais::MotoresLocais,
-    pilula::{ModoJanela, NivelAviso, Pilula},
+    pilula::{NivelAviso, Pilula},
     preferencias::Preferencias,
 };
 
@@ -87,8 +87,8 @@ fn pilula_acao(casca: State<'_, Arc<Casca>>, acao: String) {
         return;
     }
     if let Some(nome_modo) = acao.strip_prefix("modo:") {
-        if let Some(modo) = ModoJanela::de_nome(nome_modo) {
-            casca.pilula.definir_modo(modo);
+        if let Some((modo, geometria)) = pilula::interpretar_modo(nome_modo) {
+            casca.pilula.definir_modo(modo, geometria);
         }
         return;
     }

@@ -1,4 +1,4 @@
-// Aba na borda direita do Windows (SPEC-windows.md §3 e MOTION-windows.md).
+// Ilha no centro da borda superior do Windows (SPEC-dynamic-island.md rev. 2 e MOTION-windows.md).
 // Repouso com 0% de CPU: nenhum rAF, setInterval ou animação CSS ativa fora de gravação/processamento.
 const $ = (id) => document.getElementById(id);
 
@@ -24,7 +24,6 @@ const invocar = (acao) => {
 
 let fase = "ociosa"; // ociosa | gravando | maosLivres | processando
 let atalho = "Ctrl dir.";
-let borda = "direita"; // direita | esquerda
 let ponteiroSobre = false;
 let acenoAtivo = false;
 let hoverAberto = false;
@@ -36,21 +35,21 @@ let aviso = null; // { texto, nivel } ou null
 let avisoTimer = null;
 let abrirTimer = null;
 let fecharTimer = null;
-let modoAtual = "repouso";
+let janelaAtual = { modo: "repouso", w: 92, h: 7 };
 let encolherTimer = null;
 
-// Barras da voz: 3 (compacta) e 9 (aberta / mãos livres)
-const barras3 = Array.from($("barras-3").children);
+// Barras da voz: 5 (compacta) e 9 (aberta / mãos livres)
+const barras5 = Array.from($("barras-5").children);
 const barras9a = Array.from($("barras-9a").children);
 const barras9m = Array.from($("barras-9m").children);
 const PESOS9 = [0.48, 0.62, 0.78, 0.92, 1, 0.92, 0.78, 0.62, 0.48];
-const PESOS3 = [0.78, 1, 0.78];
+const PESOS5 = [0.62, 0.85, 1, 0.85, 0.62];
 const historico = Array(5).fill(0);
 const atual9 = Array(9).fill(0.18);
-const atual3 = Array(3).fill(0.18);
+const atual5 = Array(5).fill(0.22);
 const ultimoEscrito9a = Array(9).fill(-1);
 const ultimoEscrito9m = Array(9).fill(-1);
-const ultimoEscrito3 = Array(3).fill(-1);
+const ultimoEscrito5 = Array(5).fill(-1);
 let nivelAlvo = 0;
 let rafId = 0;
 let ultimoQuadro = 0;
@@ -67,94 +66,123 @@ function limparTimersHover() {
   if (fecharTimer) { clearTimeout(fecharTimer); fecharTimer = null; }
 }
 
-function modoDesejado(estadoVisual) {
-  if (estadoVisual === "repouso" || estadoVisual === "aceno") return "repouso";
-  if (estadoVisual === "gravandoCompacta" || estadoVisual === "processandoCompacta" || estadoVisual === "baixandoCompacta") {
+// Contorno único (meia elipse, topo reto): centro (W/2, 0), semieixos W/2 e H.
+// `recuo` desloca o traço para dentro (0,5 px para a borda de 1 px, 1 px para o arco de 2 px).
+function caminhoMeiaElipse(w, h, recuo = 0, fechar = false) {
+  const rx = w / 2 - recuo;
+  const ry = h - recuo;
+  const meio = `${w / 2} ${h - recuo}`;
+  const d = `M ${recuo} 0 A ${rx} ${ry} 0 0 0 ${meio} A ${rx} ${ry} 0 0 0 ${w - recuo} 0`;
+  return fechar ? `${d} Z` : d;
+}
+
+function desenharForma(svg, fundo, borda, w, h) {
+  svg.setAttribute("width", w);
+  svg.setAttribute("height", h);
+  svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+  fundo.setAttribute("d", caminhoMeiaElipse(w, h, 0, true));
+  borda.setAttribute("d", caminhoMeiaElipse(w, h, 0.5));
+}
+
+// Mesma regra de quebra da renderização: 2 linhas só com frase dupla acima de 26 caracteres.
+function linhasDoAviso(texto) {
+  const partes = texto.split(/\.\s+/);
+  return partes.length >= 2 && texto.length > 26 ? [partes[0], partes.slice(1).join(". ")] : [texto];
+}
+
+function maiorLinha(texto) {
+  return Math.max(...linhasDoAviso(texto).map((l) => l.length));
+}
+
+const limitar = (min, v, max) => Math.max(min, Math.min(max, v));
+
+// Medidas da spec rev. 2 (px lógicos): W x H da meia elipse, centro vertical da linha de
+// conteúdo e largura máxima de texto (miolo com 52 px de cada lado).
+function calcularEstado() {
+  if (aviso) {
+    const erro = aviso.nivel === "erro";
+    // Duas linhas descem mais na curva: +16 px de largura para manter a folga de 6 px.
+    const duas = linhasDoAviso(aviso.texto).length === 2;
+    const w = limitar(erro ? 232 : 220, Math.round(maiorLinha(aviso.texto) * 7.0 + 116 + (duas ? 16 : 0)), 336);
+    const centro = duas ? 22 : 24;
+    // Largura do texto limitada pela curva na base da linha (10 px na horizontal ≈ 6 px até a curva).
+    const fator = Math.sqrt(1 - ((centro + (duas ? 16 : 8)) / 56) ** 2);
+    const textoMax = Math.min(w - 96 - 24, Math.floor(2 * ((w / 2) * fator - 10)) - 24);
+    return { id: erro ? "erro" : "aviso", w, h: 56, centro, vista: "v-aviso", textoMax };
+  }
+  if (fase === "maosLivres") {
+    return { id: "maosLivres", w: 284, h: 56, centro: 23, vista: "v-maos" };
+  }
+  if (fase === "gravando") {
+    return hoverAberto
+      ? { id: "gravandoAberta", w: 248, h: 54, centro: 22, vista: "v-grav-aberta" }
+      : { id: "gravandoCompacta", w: 116, h: 40, centro: 17, vista: "v-grav-comp" };
+  }
+  if (fase === "processando" || (fase === "ociosa" && progressoAtivo)) {
+    if (hoverAberto) {
+      const textoEtapa = typeof etapa === "string" && etapa ? etapa : "Transcrevendo";
+      const w = limitar(248, Math.round(textoEtapa.length * 7.5 + 128), 296);
+      return { id: "processandoAberta", w, h: 54, centro: 22, vista: "v-proc-aberta", textoMax: w - 104 - 28 };
+    }
+    return { id: "processandoCompacta", w: 116, h: 40, centro: 17, vista: "v-proc-comp" };
+  }
+  if (baixando) {
+    return hoverAberto
+      ? { id: "baixandoAberta", w: 296, h: 56, centro: 23, vista: "v-baix-aberta", textoMax: 296 - 104 - 20 }
+      : { id: "baixandoCompacta", w: 132, h: 42, centro: 18, vista: "v-baix-comp" };
+  }
+  if (hoverAberto) {
+    return { id: "ociosaAberta", w: 248, h: 54, centro: 22, vista: "v-ociosa" };
+  }
+  if (acenoAtivo) {
+    return { id: "aceno", w: 112, h: 11, vista: null };
+  }
+  return { id: "repouso", w: 92, h: 7, vista: null };
+}
+
+function modoDesejado(id) {
+  if (id === "repouso" || id === "aceno") return "repouso";
+  if (id === "gravandoCompacta" || id === "processandoCompacta" || id === "baixandoCompacta") {
     return "compacta";
   }
   return "aberta";
 }
 
-function ordemModo(m) {
-  return m === "repouso" ? 0 : m === "compacta" ? 1 : 2;
-}
-
-function sincronizarJanela(proximoModo) {
+// Pede ao Rust tamanho, posição e recorte da janela numa mensagem só (`modo:{nome}:{w}:{h}`).
+// Cresce antes de animar; ao recolher para o repouso, só encolhe depois da animação de saída.
+function sincronizarJanela(est) {
   if (encolherTimer) { clearTimeout(encolherTimer); encolherTimer = null; }
-  if (proximoModo === modoAtual) return;
-  if (ordemModo(proximoModo) > ordemModo(modoAtual)) {
-    // Crescer a janela ANTES de animar (MOTION-windows.md §6).
-    modoAtual = proximoModo;
-    invocar(`modo:${proximoModo}`);
+  const alvo = { modo: modoDesejado(est.id), w: est.w, h: est.h };
+  const igual = (x, y) => x.modo === y.modo && x.w === y.w && x.h === y.h;
+  if (igual(alvo, janelaAtual)) return;
+  const enviar = () => {
+    janelaAtual = alvo;
+    invocar(`modo:${alvo.modo}:${alvo.w}:${alvo.h}`);
+  };
+  const recolheParaRepouso = alvo.modo === "repouso" && janelaAtual.modo !== "repouso";
+  if (!recolheParaRepouso) {
+    enviar();
+    return;
+  }
+  const aplicarEncolher = () => {
+    const agora = calcularEstado();
+    if (modoDesejado(agora.id) === "repouso" && agora.w === alvo.w && agora.h === alvo.h) enviar();
+  };
+  if (mqReduzido.matches) {
+    encolherTimer = setTimeout(aplicarEncolher, 140);
   } else {
-    // Encolher só no fim da transição (ou logo em movimento reduzido).
-    const alvo = proximoModo;
-    const aplicarEncolher = () => {
-      if (modoDesejado(calcularEstado().id) === alvo && modoAtual !== alvo) {
-        modoAtual = alvo;
-        invocar(`modo:${alvo}`);
-      }
-    };
-    if (mqReduzido.matches) {
-      encolherTimer = setTimeout(aplicarEncolher, 140);
-    } else {
-      const onEnd = (e) => {
-        if (e.propertyName === "transform") {
-          casca.removeEventListener("transitionend", onEnd);
-          aplicarEncolher();
-        }
-      };
-      casca.addEventListener("transitionend", onEnd);
-      encolherTimer = setTimeout(() => {
+    const onEnd = (e) => {
+      if (e.propertyName === "transform") {
         casca.removeEventListener("transitionend", onEnd);
         aplicarEncolher();
-      }, 240);
-    }
-  }
-}
-
-function larguraAviso(texto) {
-  const linhas = texto.split(/\n/);
-  const maior = Math.max(...linhas.map((l) => l.length));
-  return Math.max(120, Math.min(240, Math.round(maior * 7.2 + 54)));
-}
-
-function calcularEstado() {
-  if (aviso) {
-    return {
-      id: aviso.nivel === "erro" ? "erro" : "aviso",
-      visivel: larguraAviso(aviso.texto),
-      vista: "v-aviso",
+      }
     };
+    casca.addEventListener("transitionend", onEnd);
+    encolherTimer = setTimeout(() => {
+      casca.removeEventListener("transitionend", onEnd);
+      aplicarEncolher();
+    }, 240);
   }
-  if (fase === "maosLivres") {
-    return { id: "maosLivres", visivel: 232, vista: "v-maos" };
-  }
-  if (fase === "gravando") {
-    return hoverAberto
-      ? { id: "gravandoAberta", visivel: 200, vista: "v-grav-aberta" }
-      : { id: "gravandoCompacta", visivel: 32, vista: "v-grav-comp" };
-  }
-  if (fase === "processando" || (fase === "ociosa" && progressoAtivo)) {
-    if (hoverAberto) {
-      const textoEtapa = typeof etapa === "string" && etapa ? etapa : "Transcrevendo";
-      const w = Math.max(200, Math.min(240, Math.round(textoEtapa.length * 7.5 + 64)));
-      return { id: "processandoAberta", visivel: w, vista: "v-proc-aberta" };
-    }
-    return { id: "processandoCompacta", visivel: 32, vista: "v-proc-comp" };
-  }
-  if (baixando) {
-    return hoverAberto
-      ? { id: "baixandoAberta", visivel: 240, vista: "v-baix-aberta" }
-      : { id: "baixandoCompacta", visivel: 32, vista: "v-baix-comp" };
-  }
-  if (hoverAberto) {
-    return { id: "ociosaAberta", visivel: 176, vista: "v-ociosa" };
-  }
-  if (acenoAtivo) {
-    return { id: "aceno", visivel: 6, vista: null };
-  }
-  return { id: "repouso", visivel: 4, vista: null };
 }
 
 function atualizarContorno(est) {
@@ -169,30 +197,47 @@ function atualizarContorno(est) {
     return;
   }
   const v = Math.max(0, Math.min(1, pct));
-  // Ajusta o path em C para a largura visível atual.
-  const xEsq = borda === "direita" ? 1 : 240 - est.visivel + 1;
-  const xDir = borda === "direita" ? est.visivel : 239;
-  const d = borda === "direita"
-    ? `M ${xDir} 1 H 14 A 13 13 0 0 0 1 14 V 42 A 13 13 0 0 0 14 55 H ${xDir}`
-    : `M ${xEsq} 1 H ${xDir - 13} A 13 13 0 0 1 ${xDir} 14 V 42 A 13 13 0 0 1 ${xDir - 13} 55 H ${xEsq}`;
-  contornoPath.setAttribute("d", d);
+  // Mesma meia elipse da casca, 1 px para dentro: M 1 0 A (W/2-1) (H-1) ... (W-1) 0.
+  contorno.setAttribute("width", est.w);
+  contorno.setAttribute("height", est.h);
+  contorno.setAttribute("viewBox", `0 0 ${est.w} ${est.h}`);
+  contornoPath.setAttribute("d", caminhoMeiaElipse(est.w, est.h, 1));
   contornoPath.style.strokeDashoffset = String(1 - v);
   contorno.classList.add("ativo");
 }
 
+let estadoAnterior = "repouso";
+
 function renderizar() {
-  const anteriorVisivel = parseFloat(getComputedStyle(palco).getPropertyValue("--visivel")) || 4;
   const est = calcularEstado();
-  const proximoModo = modoDesejado(est.id);
-  sincronizarJanela(proximoModo);
+  sincronizarJanela(est);
 
+  const expandido = est.id !== "repouso" && est.id !== "aceno";
+  const eraExpandido = estadoAnterior !== "repouso" && estadoAnterior !== "aceno";
   palco.dataset.estado = est.id;
-  palco.dataset.borda = borda;
-  palco.dataset.recolhendo = est.visivel < anteriorVisivel ? "1" : "0";
-  palco.style.setProperty("--visivel", `${est.visivel}px`);
+  palco.dataset.recolhendo = eraExpandido && !expandido ? "1" : "0";
+  estadoAnterior = est.id;
 
-  for (const v of document.querySelectorAll(".vista")) {
-    v.classList.toggle("ativa", v.id === est.vista);
+  // A bordinha sempre segue repouso/aceno.
+  const pw = acenoAtivo ? 112 : 92;
+  const ph = acenoAtivo ? 11 : 7;
+  const pontaSvg = $("ponta-svg");
+  desenharForma(pontaSvg, $("ponta-fundo"), $("ponta-borda"), pw, ph);
+  pontaSvg.style.marginLeft = `${-pw / 2}px`;
+  ponta.style.width = `${pw}px`;
+  ponta.style.height = `${ph}px`;
+
+  // A casca só muda de forma quando expandida: ao recolher, sobe com a última forma.
+  if (expandido) {
+    casca.style.width = `${est.w}px`;
+    casca.style.height = `${est.h}px`;
+    desenharForma($("casca-svg"), $("casca-fundo"), $("casca-borda"), est.w, est.h);
+    $("arco-erro").setAttribute("d", caminhoMeiaElipse(est.w, est.h, 1.25));
+    palco.style.setProperty("--centro", `${est.centro}px`);
+    palco.style.setProperty("--texto-max", `${est.textoMax ?? 200}px`);
+    for (const v of document.querySelectorAll(".vista")) {
+      v.classList.toggle("ativa", v.id === est.vista);
+    }
   }
 
   $("chip-atalho").textContent = atalho;
@@ -203,6 +248,7 @@ function renderizar() {
 
   if (baixando) {
     $("baixando-texto").textContent = `Baixando o modelo · ${baixando.pct}%`;
+    $("baixando-pct").textContent = `${baixando.pct}%`;
   }
 
   if (aviso) {
@@ -210,17 +256,17 @@ function renderizar() {
     $("icone-info").style.display = ehErro ? "none" : "block";
     $("icone-erro").style.display = ehErro ? "block" : "none";
     const prefixo = ehErro && mqAltoContraste.matches ? "Erro: " : "";
-    const partes = aviso.texto.split(/\.\s+/);
+    const linhas = linhasDoAviso(aviso.texto);
     const el = $("texto-aviso");
     el.title = aviso.texto;
     el.setAttribute("aria-label", aviso.texto);
-    if (partes.length >= 2 && aviso.texto.length > 26) {
+    if (linhas.length === 2) {
       el.textContent = "";
       const l1 = document.createElement("span");
-      l1.textContent = prefixo + partes[0];
+      l1.textContent = prefixo + linhas[0];
       const l2 = document.createElement("span");
       l2.className = "linha2";
-      l2.textContent = partes.slice(1).join(". ");
+      l2.textContent = linhas[1];
       el.append(l1, l2);
     } else {
       el.textContent = prefixo + aviso.texto;
@@ -263,15 +309,15 @@ function passoBarras(ts) {
     const tau = alvo > atual9[i] ? 0.045 : 0.16 + dist * 0.025;
     atual9[i] += (alvo - atual9[i]) * (1 - Math.exp(-dt / tau));
   }
-  for (let i = 0; i < 3; i++) {
-    const dist = Math.abs(i - 1);
-    const amostra = dist === 0 ? levantado : historico[1] ?? 0;
-    const alvo = Math.max(0.18, Math.min(1, amostra * PESOS3[i] + respiracao));
-    const tau = alvo > atual3[i] ? 0.045 : 0.16 + dist * 0.025;
-    atual3[i] += (alvo - atual3[i]) * (1 - Math.exp(-dt / tau));
+  for (let i = 0; i < 5; i++) {
+    const dist = Math.abs(i - 2);
+    const amostra = dist === 0 ? levantado : historico[dist] ?? 0;
+    const alvo = Math.max(0.22, Math.min(1, amostra * PESOS5[i] + respiracao));
+    const tau = alvo > atual5[i] ? 0.045 : 0.16 + dist * 0.025;
+    atual5[i] += (alvo - atual5[i]) * (1 - Math.exp(-dt / tau));
   }
 
-  aplicarEscalaBarras(barras3, atual3, ultimoEscrito3);
+  aplicarEscalaBarras(barras5, atual5, ultimoEscrito5);
   aplicarEscalaBarras(barras9a, atual9, ultimoEscrito9a);
   aplicarEscalaBarras(barras9m, atual9, ultimoEscrito9m);
 }
@@ -368,7 +414,7 @@ function agendarFimAviso(segundos) {
   avisoTimer = setTimeout(() => {
     avisoTimer = null;
     if (ponteiroSobre) {
-      // Com o ponteiro sobre a aba, nada recolhe sozinho; recolhe ao sair.
+      // Com o ponteiro sobre a ilha, nada recolhe sozinho; recolhe ao sair.
       agendarFimAviso(0.5);
       return;
     }
@@ -377,7 +423,7 @@ function agendarFimAviso(segundos) {
   }, Math.max(500, segundos * 1000));
 }
 
-// Protocolo da aba via Channel IPC (SPEC-windows.md §3.6)
+// Protocolo da ilha via Channel IPC (SPEC-windows.md §3.6)
 window.pilula = (m) => {
   switch (m.tipo) {
     case "fase": {
@@ -430,11 +476,11 @@ window.pilula = (m) => {
           const d = Math.abs(i - 4);
           atual9[i] = Math.max(0.18, Math.min(1, (historico[d] ?? 0) * PESOS9[i]));
         }
-        for (let i = 0; i < 3; i++) {
-          const d = Math.abs(i - 1);
-          atual3[i] = Math.max(0.18, Math.min(1, (historico[d] ?? 0) * PESOS3[i]));
+        for (let i = 0; i < 5; i++) {
+          const d = Math.abs(i - 2);
+          atual5[i] = Math.max(0.22, Math.min(1, (historico[d] ?? 0) * PESOS5[i]));
         }
-        aplicarEscalaBarras(barras3, atual3, ultimoEscrito3);
+        aplicarEscalaBarras(barras5, atual5, ultimoEscrito5);
         aplicarEscalaBarras(barras9a, atual9, ultimoEscrito9a);
         aplicarEscalaBarras(barras9m, atual9, ultimoEscrito9m);
       }
@@ -478,11 +524,6 @@ window.pilula = (m) => {
         baixando = { feito: m.feito, total: m.total, pct };
         if (eraNulo) anunciar("Baixando o modelo de voz");
       }
-      renderizar();
-      break;
-    }
-    case "borda": {
-      borda = m.lado === "esquerda" ? "esquerda" : "direita";
       renderizar();
       break;
     }

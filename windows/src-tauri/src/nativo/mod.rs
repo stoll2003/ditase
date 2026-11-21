@@ -63,6 +63,7 @@ pub mod janela {
     pub fn posicionar_sem_ativar(_hwnd: isize, _x: i32, _y: i32, _w: i32, _h: i32, _mostrar: bool) {
     }
     pub fn esconder(_hwnd: isize) {}
+    pub fn recortar_elipse(_hwnd: isize, _l: i32, _t: i32, _r: i32, _b: i32) {}
     pub fn tela_cheia_ativa() -> bool {
         false
     }

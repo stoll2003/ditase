@@ -1,14 +1,17 @@
-//! Pílula (aba na borda) sem roubar o foco:
+//! Ilha no topo da tela sem roubar o foco:
 //! - `WS_EX_NOACTIVATE` faz o clique não ativar a janela (o texto continua indo para o app em foco).
 //! - `WS_EX_TOOLWINDOW` tira da barra de tarefas e do Alt+Tab.
 //! - `SetWindowPos` com `SWP_NOACTIVATE | SWP_NOZORDER` posiciona, redimensiona e mostra numa
 //!   chamada só, sem ativar a janela nem mostrar quadro deslocado.
+//! - `SetWindowRgn` com uma `CreateEllipticRgn` recorta a janela na meia elipse da ilha: o clique
+//!   fora da curva atravessa para a janela de baixo (pixel transparente do WebView2 ainda pegaria).
 //! - `SHQueryUserNotificationState` detecta tela cheia / apresentação na troca de janela em foco
 //!   (`EVENT_SYSTEM_FOREGROUND`), sem consulta periódica.
 use std::sync::{Arc, OnceLock};
 
 use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
+    Graphics::Gdi::{CreateEllipticRgn, DeleteObject, SetWindowRgn, HGDIOBJ},
     UI::{
         Accessibility::{SetWinEventHook, HWINEVENTHOOK},
         Shell::{
@@ -34,7 +37,7 @@ pub fn sem_foco(hwnd: isize) {
     }
 }
 
-/// Posiciona, redimensiona e opcionalmente mostra a aba numa única chamada nativa,
+/// Posiciona, redimensiona e opcionalmente mostra a ilha numa única chamada nativa,
 /// nunca ativando a janela (`SWP_NOACTIVATE`).
 pub fn posicionar_sem_ativar(hwnd: isize, x: i32, y: i32, w: i32, h: i32, mostrar: bool) {
     unsafe {
@@ -46,7 +49,22 @@ pub fn posicionar_sem_ativar(hwnd: isize, x: i32, y: i32, w: i32, h: i32, mostra
     }
 }
 
-/// Esconde a aba sem mexer no foco.
+/// Recorta a janela na elipse de retângulo envolvente `(l, t, r, b)` (pixels físicos relativos à
+/// janela; ver `pilula::regiao_meia_elipse`). Em sucesso o sistema passa a ser dono da região; em
+/// falha ela é apagada aqui e a janela fica retangular (só perde o clique atravessando os cantos).
+pub fn recortar_elipse(hwnd: isize, l: i32, t: i32, r: i32, b: i32) {
+    unsafe {
+        let rgn = CreateEllipticRgn(l, t, r, b);
+        if rgn.is_invalid() {
+            return;
+        }
+        if SetWindowRgn(HWND(hwnd as *mut _), Some(rgn), true) == 0 {
+            let _ = DeleteObject(HGDIOBJ(rgn.0));
+        }
+    }
+}
+
+/// Esconde a ilha sem mexer no foco.
 pub fn esconder(hwnd: isize) {
     unsafe {
         let _ = SetWindowPos(

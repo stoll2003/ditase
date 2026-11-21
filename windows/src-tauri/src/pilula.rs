@@ -1,7 +1,12 @@
-//! Aba na borda direita do Windows (spec v1.0.1, seção 3 e MOTION-windows.md):
-//! segunda janela Tauri transparente, sempre no topo, fora da barra de tarefas e sem nunca
-//! roubar o foco (`WS_EX_NOACTIVATE`, posicionamento e exibição só por `SetWindowPos` com
-//! `SWP_NOACTIVATE`, nunca `WebviewWindow::show()`).
+//! Ilha no centro da borda superior do Windows (v1.0.2, SPEC-dynamic-island.md, com o ajuste de
+//! aceite do Founder: base em curva contínua). Segunda janela Tauri transparente, sempre no topo,
+//! fora da barra de tarefas e sem nunca roubar o foco (`WS_EX_NOACTIVATE`, posicionamento e
+//! exibição só por `SetWindowPos` com `SWP_NOACTIVATE`, nunca `WebviewWindow::show()`).
+//!
+//! Contorno único: meia elipse com o topo reto rente à borda da tela (centro em `(w/2, 0)`,
+//! semieixos `w/2` e `h`). É o mesmo contorno no desenho (`pilula.html`), no contorno de progresso e
+//! no recorte nativo (`CreateEllipticRgn` + `SetWindowRgn`), para que o clique fora da curva atravesse
+//! para a janela de baixo.
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -49,7 +54,8 @@ impl NivelAviso {
     }
 }
 
-/// Tamanhos lógicos da janela por modo (MOTION-windows.md §6 e SPEC-windows.md §3.5).
+/// Modo da janela da ilha. A largura exata de cada estado vem do `pilula.js`
+/// (`modo:{nome}:{w}:{h}`); estes são os tamanhos usados enquanto ele não informa.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModoJanela {
     Repouso,
@@ -57,12 +63,18 @@ pub enum ModoJanela {
     Aberta,
 }
 
+/// Limites de sanidade para a geometria pedida pela página (px lógicos).
+const LARGURA_MIN: f64 = 40.0;
+const LARGURA_MAX: f64 = 340.0;
+const ALTURA_MIN: f64 = 4.0;
+const ALTURA_MAX: f64 = 56.0;
+
 impl ModoJanela {
-    pub fn dimensoes_logicas(self) -> (f64, f64) {
+    pub fn dimensoes_padrao(self) -> (f64, f64) {
         match self {
-            ModoJanela::Repouso => (6.0, 64.0),
-            ModoJanela::Compacta => (44.0, 64.0),
-            ModoJanela::Aberta => (256.0, 80.0),
+            ModoJanela::Repouso => (92.0, 7.0),
+            ModoJanela::Compacta => (116.0, 40.0),
+            ModoJanela::Aberta => (248.0, 54.0),
         }
     }
 
@@ -74,6 +86,23 @@ impl ModoJanela {
             _ => None,
         }
     }
+}
+
+/// Interpreta o pedido de modo da página: `aberta` ou `aberta:248:48` (px lógicos).
+/// Medidas fora dos limites são recusadas, para a página nunca pedir janela absurda.
+pub fn interpretar_modo(s: &str) -> Option<(ModoJanela, Option<(f64, f64)>)> {
+    let mut partes = s.split(':');
+    let modo = ModoJanela::de_nome(partes.next()?)?;
+    let (w, h) = match (partes.next(), partes.next(), partes.next()) {
+        (None, None, None) => return Some((modo, None)),
+        (Some(w), Some(h), None) => (w.parse::<f64>().ok()?, h.parse::<f64>().ok()?),
+        _ => return None,
+    };
+    let valido = w.is_finite()
+        && h.is_finite()
+        && (LARGURA_MIN..=LARGURA_MAX).contains(&w)
+        && (ALTURA_MIN..=ALTURA_MAX).contains(&h);
+    valido.then_some((modo, Some((w, h))))
 }
 
 /// Dados geométricos de um monitor em pixels físicos (para testes determinísticos sem janela).
@@ -92,102 +121,88 @@ pub struct RetanguloMonitor {
 }
 
 impl RetanguloMonitor {
-    pub fn direita(&self) -> i32 {
-        self.x + self.w
-    }
-    pub fn work_direita(&self) -> i32 {
-        self.work_x + self.work_w
+    fn mesmo(&self, outro: &RetanguloMonitor) -> bool {
+        self.x == outro.x && self.y == outro.y && self.w == outro.w && self.h == outro.h
     }
 }
 
+/// Posição e tamanho da janela da ilha em pixels físicos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PosicaoAba {
+pub struct PosicaoIlha {
     pub x: i32,
     pub y: i32,
     pub w: i32,
     pub h: i32,
-    pub espelhada: bool,
 }
 
-/// Escolhe monitor, borda e coordenadas físicas da aba segundo a seção 3.4 da spec:
-/// 1. Borda direita do monitor principal se nenhum monitor encosta à direita na faixa vertical da aba.
-/// 2. Senão, borda direita do monitor com a maior borda direita.
-/// 3. Se a barra de tarefas estiver à direita (work_direita < direita), espelha na borda esquerda
-///    do monitor mais à esquerda.
-///
-/// Altura: centro a 62% da altura da área de trabalho.
-pub fn escolher_borda(monitores: &[RetanguloMonitor], modo: ModoJanela) -> Option<PosicaoAba> {
-    if monitores.is_empty() {
-        return None;
+fn posicao_no_monitor(m: &RetanguloMonitor, w_log: f64, h_log: f64) -> PosicaoIlha {
+    let w = (w_log * m.escala).round() as i32;
+    let h = (h_log * m.escala).round() as i32;
+    let x = m.work_x + ((m.work_w - w) as f64 / 2.0).round() as i32;
+    // Topo rente: sem folga de 1 px, também em escalas fracionárias.
+    PosicaoIlha {
+        x,
+        y: m.work_y,
+        w,
+        h,
     }
+}
+
+/// Escolhe monitor e coordenadas físicas da ilha (spec §6.4):
+/// 1. Centro da borda superior da área de trabalho do monitor principal.
+/// 2. Se outro monitor encosta acima do principal na faixa horizontal da ilha (monitores
+///    empilhados), usa o monitor mais alto dessa coluna, para que `y = work_y` seja sempre uma
+///    parede física onde o ponteiro para.
+/// 3. Barra de tarefas no topo: `work_y > y`, e a ilha encosta logo abaixo dela.
+pub fn escolher_topo(
+    monitores: &[RetanguloMonitor],
+    w_log: f64,
+    h_log: f64,
+) -> Option<PosicaoIlha> {
     let principal = monitores
         .iter()
         .find(|m| m.principal)
-        .copied()
-        .unwrap_or(monitores[0]);
+        .or_else(|| monitores.first())
+        .copied()?;
+    let no_principal = posicao_no_monitor(&principal, w_log, h_log);
+    let faixa = (no_principal.x, no_principal.x + no_principal.w);
+    let sobrepoe = |m: &RetanguloMonitor| m.x < faixa.1 && m.x + m.w > faixa.0;
 
-    let (lw, lh) = modo.dimensoes_logicas();
-    let calcular_y = |m: &RetanguloMonitor, h_phys: i32| -> i32 {
-        let centro = m.work_y as f64 + (m.work_h as f64) * 0.62;
-        let y = (centro - (h_phys as f64) / 2.0).round() as i32;
-        y.clamp(m.work_y, (m.work_y + m.work_h - h_phys).max(m.work_y))
-    };
-
-    // Verifica se algum monitor encosta à direita do principal na faixa de altura da aba.
-    let h_principal = (lh * principal.escala).round() as i32;
-    let y_principal = calcular_y(&principal, h_principal);
-    let faixa_topo = y_principal;
-    let faixa_base = y_principal + h_principal;
-
-    let encosta_a_direita = monitores.iter().any(|m| {
-        if m.x == principal.x && m.y == principal.y && m.w == principal.w && m.h == principal.h {
-            return false;
-        }
-        let toca_x = (m.x - principal.direita()).abs() <= 4;
-        let sobrepoe_y = m.y < faixa_base && (m.y + m.h) > faixa_topo;
-        toca_x && sobrepoe_y
-    });
-
-    let escolhido = if !encosta_a_direita {
-        principal
-    } else {
-        monitores
-            .iter()
-            .copied()
-            .max_by_key(|m| m.work_direita())
-            .unwrap_or(principal)
-    };
-
-    // Regra 3: barra de tarefas à direita (área de trabalho termina antes do monitor).
-    if escolhido.work_direita() < escolhido.direita() {
-        let mais_esquerda = monitores
-            .iter()
-            .copied()
-            .min_by_key(|m| m.work_x)
-            .unwrap_or(escolhido);
-        let w_phys = (lw * mais_esquerda.escala).round() as i32;
-        let h_phys = (lh * mais_esquerda.escala).round() as i32;
-        let y = calcular_y(&mais_esquerda, h_phys);
-        return Some(PosicaoAba {
-            x: mais_esquerda.work_x,
-            y,
-            w: w_phys,
-            h: h_phys,
-            espelhada: true,
-        });
+    let encosta_acima = monitores
+        .iter()
+        .any(|m| !m.mesmo(&principal) && (m.y + m.h - principal.y).abs() <= 4 && sobrepoe(m));
+    if !encosta_acima {
+        return Some(no_principal);
     }
+    let mais_alto = monitores
+        .iter()
+        .filter(|m| sobrepoe(m))
+        .min_by_key(|m| m.work_y)
+        .copied()
+        .unwrap_or(principal);
+    Some(posicao_no_monitor(&mais_alto, w_log, h_log))
+}
 
-    let w_phys = (lw * escolhido.escala).round() as i32;
-    let h_phys = (lh * escolhido.escala).round() as i32;
-    let x = escolhido.work_direita() - w_phys;
-    let y = calcular_y(&escolhido, h_phys);
-    Some(PosicaoAba {
-        x,
-        y,
-        w: w_phys,
-        h: h_phys,
-        espelhada: false,
-    })
+/// Retângulo envolvente, em pixels físicos relativos à janela, da elipse que vira a região de
+/// recorte (`CreateEllipticRgn`): centro em `(w/2, 0)`, semieixos `w/2` e `h`. Só a metade de
+/// baixo cai dentro da janela, e o topo fica reto na borda da tela. O `+ 1` compensa a regra do GDI
+/// de excluir a borda direita e a de baixo do retângulo.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn regiao_meia_elipse(w: i32, h: i32) -> (i32, i32, i32, i32) {
+    (0, -h, w + 1, h + 1)
+}
+
+/// Teste de ponto do mesmo contorno (centro do pixel `(px, py)`), espelhando `regiao_meia_elipse`
+/// e o desenho em `pilula.html`. Usado nos testes de recorte e de encaixe dos controles.
+#[cfg(test)]
+pub fn dentro_da_meia_elipse(w: f64, h: f64, px: f64, py: f64) -> bool {
+    if w <= 0.0 || h <= 0.0 || py < 0.0 || py > h {
+        return false;
+    }
+    let a = w / 2.0;
+    let dx = (px - a) / a;
+    let dy = py / h;
+    dx * dx + dy * dy <= 1.0
 }
 
 /// Construtores puros das mensagens do protocolo da aba (testáveis sem janela).
@@ -207,10 +222,6 @@ pub fn msg_modelo(feito: Option<u64>, total: u64) -> Value {
     json!({"tipo": "modelo", "feito": feito, "total": total})
 }
 
-pub fn msg_borda(espelhada: bool) -> Value {
-    json!({"tipo": "borda", "lado": if espelhada { "esquerda" } else { "direita" }})
-}
-
 struct Interno {
     fase: Fase,
     modo: ModoJanela,
@@ -219,7 +230,8 @@ struct Interno {
     baixando_modelo: Option<(u64, u64)>,
     progresso_ativo: bool,
     aviso_ate: Option<Instant>,
-    espelhada: bool,
+    /// Tamanho lógico atual da ilha (largura exata do estado informada pela página).
+    geometria: (f64, f64),
     ultimo_nivel: Instant,
     atalho: String,
     canal: Option<Channel<Value>>,
@@ -233,6 +245,10 @@ struct Interno {
 /// fora de `Aberta` o vigia é sempre desligado (`0`); ao entrar em `Aberta` (quando ainda não
 /// havia vigia ativo), emite `(geracao_ativa, minha_geracao)` para a thread do vigia.
 fn atualizar_modo_e_vigia(i: &mut Interno, modo: ModoJanela) -> Option<(Arc<AtomicU64>, u64)> {
+    if i.modo != modo {
+        // Troca de modo comandada pelo Rust: usa o tamanho padrão até a página informar o exato.
+        i.geometria = modo.dimensoes_padrao();
+    }
     i.modo = modo;
     if modo == ModoJanela::Aberta {
         if i.vigia_geracao_ativa.load(Ordering::Acquire) == 0 {
@@ -285,7 +301,7 @@ pub struct Pilula {
 
 impl Pilula {
     pub fn criar(app: &AppHandle, sempre_visivel: bool, atalho: &str) -> Arc<Self> {
-        let (lw, lh) = ModoJanela::Repouso.dimensoes_logicas();
+        let (lw, lh) = ModoJanela::Repouso.dimensoes_padrao();
         let janela = WebviewWindowBuilder::new(app, ROTULO, WebviewUrl::App("pilula.html".into()))
             .title("Dita.se")
             .inner_size(lw, lh)
@@ -321,7 +337,7 @@ impl Pilula {
                 baixando_modelo: None,
                 progresso_ativo: false,
                 aviso_ate: None,
-                espelhada: false,
+                geometria: ModoJanela::Repouso.dimensoes_padrao(),
                 ultimo_nivel: Instant::now(),
                 atalho: atalho.to_string(),
                 canal: None,
@@ -364,7 +380,7 @@ impl Pilula {
         }
     }
 
-    /// A página da pílula carregou e entregou o canal IPC dela: guarda e reenvia atalho, borda, modelo e fase.
+    /// A página da ilha carregou e entregou o canal IPC dela: guarda e reenvia atalho, modelo e fase.
     pub fn conectar(&self, canal: Channel<Value>) {
         self.interno.lock().unwrap().canal = Some(canal);
         self.reenviar();
@@ -372,12 +388,11 @@ impl Pilula {
 
     /// Reenvia o estado completo para a página da aba.
     pub fn reenviar(&self) {
-        let (fase, atalho, espelhada, baixando) = {
+        let (fase, atalho, baixando) = {
             let i = self.interno.lock().unwrap();
-            (i.fase, i.atalho.clone(), i.espelhada, i.baixando_modelo)
+            (i.fase, i.atalho.clone(), i.baixando_modelo)
         };
         self.enviar(json!({"tipo": "atalho", "simbolo": atalho}));
-        self.enviar(msg_borda(espelhada));
         if let Some((feito, total)) = baixando {
             self.enviar(msg_modelo(Some(feito), total));
         }
@@ -397,14 +412,15 @@ impl Pilula {
         }
     }
 
-    /// Posiciona, redimensiona e mostra/esconde a janela sem nunca ativar (`SWP_NOACTIVATE`).
+    /// Posiciona, redimensiona, recorta e mostra/esconde a janela sem nunca ativar
+    /// (`SWP_NOACTIVATE`). Recalculado a cada troca de estado e de escala do monitor.
     pub fn aplicar_janela(&self) {
         let Some(j) = self.janela() else {
             return;
         };
-        let (visivel, modo) = {
+        let (visivel, (w_log, h_log)) = {
             let i = self.interno.lock().unwrap();
-            (Self::deve_estar_visivel(&i), i.modo)
+            (Self::deve_estar_visivel(&i), i.geometria)
         };
         if !visivel {
             #[cfg(windows)]
@@ -416,28 +432,15 @@ impl Pilula {
             return;
         }
         let monitores = coletar_monitores(&j);
-        let Some(pos) = escolher_borda(&monitores, modo) else {
+        let Some(pos) = escolher_topo(&monitores, w_log, h_log) else {
             return;
         };
-        let mudou_borda = {
-            let mut i = self.interno.lock().unwrap();
-            let antes = i.espelhada;
-            i.espelhada = pos.espelhada;
-            antes != pos.espelhada
-        };
-        if mudou_borda {
-            self.enviar(msg_borda(pos.espelhada));
-        }
         #[cfg(windows)]
         if let Ok(h) = j.hwnd() {
-            crate::nativo::janela::posicionar_sem_ativar(
-                h.0 as isize,
-                pos.x,
-                pos.y,
-                pos.w,
-                pos.h,
-                true,
-            );
+            let hwnd = h.0 as isize;
+            crate::nativo::janela::posicionar_sem_ativar(hwnd, pos.x, pos.y, pos.w, pos.h, true);
+            let (l, t, r, b) = regiao_meia_elipse(pos.w, pos.h);
+            crate::nativo::janela::recortar_elipse(hwnd, l, t, r, b);
         }
         #[cfg(not(windows))]
         let _ = pos;
@@ -474,16 +477,21 @@ impl Pilula {
             });
     }
 
-    pub fn definir_modo(&self, modo: ModoJanela) {
+    /// Pedido da página (`modo:{nome}[:{w}:{h}]`): troca o modo e, se vier, usa a geometria exata
+    /// do estado. A página só pede para encolher depois que a animação de saída terminou.
+    pub fn definir_modo(&self, modo: ModoJanela, geometria: Option<(f64, f64)>) {
         let iniciar = {
             let mut i = self.interno.lock().unwrap();
             if modo != ModoJanela::Aberta {
                 // Se o JS comandou o fechamento (ex.: fim de aviso após sair o hover), limpa aviso_ate.
                 i.aviso_ate = None;
             }
-            let mesmo = i.modo == modo;
+            let antes = (i.modo, i.geometria);
             let flag = atualizar_modo_e_vigia(&mut i, modo);
-            if mesmo && flag.is_none() {
+            if let Some(g) = geometria {
+                i.geometria = g;
+            }
+            if antes == (i.modo, i.geometria) && flag.is_none() {
                 return;
             }
             flag
@@ -731,56 +739,308 @@ mod testes {
     }
 
     #[test]
-    fn monitor_unico_posiciona_na_borda_direita_a_62_por_cento_em_varias_escalas() {
-        for escala in [1.0, 1.25, 1.5, 1.75, 2.0] {
-            let m = monitor(0, 0, 1920, 1080, escala, true);
-            for modo in [
-                ModoJanela::Repouso,
-                ModoJanela::Compacta,
-                ModoJanela::Aberta,
+    fn monitor_unico_centraliza_no_topo_em_varias_escalas() {
+        for escala in [1.0, 1.25, 1.5, 1.75, 2.0, 2.5] {
+            let m = monitor(0, 0, 3840, 2160, escala, true);
+            for (w_log, h_log) in [
+                (92.0, 7.0),
+                (112.0, 11.0),
+                (116.0, 40.0),
+                (248.0, 54.0),
+                (336.0, 56.0),
             ] {
-                let pos = escolher_borda(&[m], modo).unwrap();
-                assert!(!pos.espelhada);
-                // Sem folga de 1 px: x + w == borda direita física.
-                assert_eq!(pos.x + pos.w, m.work_direita());
-                let esperado_y = ((m.work_h as f64) * 0.62 - (pos.h as f64) / 2.0).round() as i32;
-                assert_eq!(pos.y, esperado_y);
+                let pos = escolher_topo(&[m], w_log, h_log).unwrap();
+                assert_eq!(pos.w, (w_log * escala).round() as i32);
+                assert_eq!(pos.h, (h_log * escala).round() as i32);
+                // Topo rente, sem folga de 1 px.
+                assert_eq!(pos.y, m.work_y);
+                // Centro: as sobras dos dois lados diferem no máximo 1 px físico.
+                let esquerda = pos.x - m.work_x;
+                let direita = m.work_x + m.work_w - (pos.x + pos.w);
+                assert!(
+                    (esquerda - direita).abs() <= 1,
+                    "escala {escala}: {esquerda} x {direita}"
+                );
             }
         }
     }
 
     #[test]
-    fn dois_monitores_escolhe_parede_mais_a_direita() {
-        let principal = monitor(0, 0, 1920, 1080, 1.0, true);
-        let direita = monitor(1920, 0, 2560, 1440, 1.5, false);
-        let pos = escolher_borda(&[principal, direita], ModoJanela::Repouso).unwrap();
-        assert!(!pos.espelhada);
-        assert_eq!(pos.x + pos.w, 1920 + 2560);
-    }
-
-    #[test]
-    fn monitor_a_esquerda_mantem_principal() {
-        let esquerda = monitor(-1920, 0, 1920, 1080, 1.0, false);
-        let principal = monitor(0, 0, 1920, 1080, 1.0, true);
-        let pos = escolher_borda(&[esquerda, principal], ModoJanela::Repouso).unwrap();
-        assert!(!pos.espelhada);
-        assert_eq!(pos.x + pos.w, 1920);
-    }
-
-    #[test]
-    fn barra_de_tarefas_a_direita_espelha_para_borda_esquerda() {
+    fn barra_de_tarefas_no_topo_encosta_logo_abaixo_dela() {
         let mut principal = monitor(0, 0, 1920, 1080, 1.0, true);
-        principal.work_w = 1860; // barra de tarefas à direita (60 px)
-        principal.work_h = 1080;
-        let pos = escolher_borda(&[principal], ModoJanela::Aberta).unwrap();
-        assert!(pos.espelhada);
-        assert_eq!(pos.x, 0);
+        principal.work_y = 48;
+        principal.work_h = 1032;
+        let pos = escolher_topo(&[principal], 248.0, 54.0).unwrap();
+        assert_eq!(pos.y, 48);
+        assert_eq!(pos.x, (1920 - 248) / 2);
+    }
+
+    #[test]
+    fn monitores_lado_a_lado_usam_o_principal() {
+        let esquerda = monitor(-2560, -200, 2560, 1440, 1.5, false);
+        let principal = monitor(0, 0, 1920, 1080, 1.0, true);
+        let direita = monitor(1920, 0, 1920, 1080, 1.0, false);
+        let pos = escolher_topo(&[esquerda, principal, direita], 116.0, 40.0).unwrap();
+        assert_eq!((pos.x, pos.y, pos.w, pos.h), ((1920 - 116) / 2, 0, 116, 40));
+    }
+
+    #[test]
+    fn monitores_empilhados_usam_o_mais_alto_com_a_escala_dele() {
+        let principal = monitor(0, 0, 1920, 1080, 1.0, true);
+        let acima = monitor(-320, -1440, 2560, 1440, 1.5, false);
+        let pos = escolher_topo(&[principal, acima], 248.0, 54.0).unwrap();
+        assert_eq!(pos.y, -1440);
+        assert_eq!(pos.w, 372);
+        assert_eq!(pos.h, 81);
+        assert_eq!(pos.x, -320 + (2560 - 372) / 2);
+    }
+
+    #[test]
+    fn monitor_acima_fora_da_faixa_da_ilha_mantem_o_principal() {
+        let principal = monitor(0, 0, 1920, 1080, 1.0, true);
+        // Encosta acima, mas só sobre o canto esquerdo, longe do centro onde fica a ilha.
+        let acima_canto = monitor(-1500, -1080, 1920, 1080, 1.0, false);
+        let pos = escolher_topo(&[principal, acima_canto], 248.0, 54.0).unwrap();
+        assert_eq!(pos.y, 0);
+        assert_eq!(pos.x, (1920 - 248) / 2);
+    }
+
+    #[test]
+    fn sem_monitores_nao_posiciona() {
+        assert!(escolher_topo(&[], 92.0, 7.0).is_none());
+    }
+
+    #[test]
+    fn regiao_e_meia_elipse_com_topo_reto_e_cantos_vazados() {
+        for escala in [1.0_f64, 1.25, 1.5, 2.0] {
+            for (w_log, h_log) in [(92.0, 7.0), (116.0, 40.0), (248.0, 54.0), (336.0, 56.0)] {
+                let w = (w_log * escala).round() as i32;
+                let h = (h_log * escala).round() as i32;
+                let (l, t, r, b) = regiao_meia_elipse(w, h);
+                // Elipse centrada na borda de cima da janela: só a metade de baixo fica dentro.
+                assert_eq!((l + r - 1) as f64 / 2.0, w as f64 / 2.0);
+                assert_eq!(t + b - 1, 0);
+                let (wf, hf) = (w as f64, h as f64);
+                // Topo: rente à borda em quase toda a largura.
+                assert!(dentro_da_meia_elipse(wf, hf, wf * 0.05, 0.5));
+                assert!(dentro_da_meia_elipse(wf, hf, wf * 0.95, 0.5));
+                // Parte mais baixa no centro.
+                assert!(dentro_da_meia_elipse(wf, hf, wf / 2.0, hf - 0.5));
+                // Cantos de baixo ficam fora: o clique ali atravessa para a janela de baixo.
+                for (px, py) in [(0.5, hf - 0.5), (wf - 0.5, hf - 0.5)] {
+                    assert!(
+                        !dentro_da_meia_elipse(wf, hf, px, py),
+                        "{w}x{h} ({px},{py})"
+                    );
+                }
+                // Curva contínua e simétrica: a altura da borda cai monotonicamente do centro às laterais.
+                let mut anterior = f64::MAX;
+                for k in 0..=20 {
+                    let px = wf / 2.0 + (wf / 2.0) * (k as f64 / 20.0) * 0.999;
+                    let a = wf / 2.0;
+                    let altura = hf * (1.0_f64 - ((px - a) / a).powi(2)).max(0.0).sqrt();
+                    assert!(altura <= anterior);
+                    anterior = altura;
+                    let espelho = wf - px;
+                    assert_eq!(
+                        dentro_da_meia_elipse(wf, hf, px, altura * 0.9),
+                        dentro_da_meia_elipse(wf, hf, espelho, altura * 0.9)
+                    );
+                }
+            }
+        }
+    }
+
+    /// Menor distância de `(px, py)` até a curva da meia elipse (o topo reto é a borda da tela e
+    /// não conta).
+    fn distancia_a_curva(w: f64, h: f64, px: f64, py: f64) -> f64 {
+        let a = w / 2.0;
+        (0..=4000)
+            .map(|k| {
+                let t = std::f64::consts::PI * k as f64 / 4000.0;
+                let (cx, cy) = (a - a * t.cos(), h * t.sin());
+                ((cx - px).powi(2) + (cy - py).powi(2)).sqrt()
+            })
+            .fold(f64::MAX, f64::min)
+    }
+
+    /// Controles (px lógicos, medidas da spec rev. 2 e do `pilula.html`) ficam dentro da curva com
+    /// folga de pelo menos 6 px nos modos aberto e gravando. Cada controle é uma caixa
+    /// `(largura, altura, raio)` na linha centrada em X, com `gap` de 8 px; o contorno real
+    /// (pílula, círculo ou retângulo) é amostrado e medido contra a curva.
+    #[test]
+    fn controles_cabem_dentro_da_curva() {
+        let pilula_ = |w: f64, h: f64| (w, h, h / 2.0);
+        let caixa = |w: f64, h: f64| (w, h, 0.0);
+        // (rótulo, W, H, centro da linha, gap, controles)
+        type Caso = (&'static str, f64, f64, f64, f64, Vec<(f64, f64, f64)>);
+        let casos: [Caso; 5] = [
+            (
+                "aberta, ociosa",
+                248.0,
+                54.0,
+                22.0,
+                8.0,
+                vec![pilula_(84.0, 32.0), pilula_(72.0, 24.0)],
+            ),
+            (
+                "gravando, aberta",
+                248.0,
+                54.0,
+                22.0,
+                8.0,
+                vec![caixa(51.0, 22.0), caixa(30.0, 18.0), pilula_(32.0, 32.0)],
+            ),
+            (
+                "mãos livres",
+                284.0,
+                56.0,
+                23.0,
+                8.0,
+                vec![
+                    pilula_(32.0, 32.0),
+                    caixa(51.0, 22.0),
+                    caixa(30.0, 18.0),
+                    pilula_(32.0, 32.0),
+                ],
+            ),
+            (
+                "gravando, compacta",
+                116.0,
+                40.0,
+                17.0,
+                0.0,
+                vec![caixa(31.0, 18.0)],
+            ),
+            (
+                "baixando, compacta",
+                132.0,
+                42.0,
+                18.0,
+                6.0,
+                vec![caixa(16.0, 16.0), caixa(28.0, 16.0)],
+            ),
+        ];
+        for (rotulo, w, h, centro, gap, controles) in casos {
+            let total: f64 =
+                controles.iter().map(|c| c.0).sum::<f64>() + gap * (controles.len() - 1) as f64;
+            let mut x = (w - total) / 2.0;
+            let mut menor = f64::MAX;
+            for (cw, ch, r) in controles {
+                let (x0, y0) = (x, centro - ch / 2.0);
+                // Contorno: lados retos + cantos arredondados de raio r (r = 0: retângulo).
+                for k in 0..360 {
+                    let t = (k as f64).to_radians();
+                    let (dx, dy) = (t.cos(), t.sin());
+                    let cx = if dx < 0.0 { x0 + r } else { x0 + cw - r };
+                    let cy = if dy < 0.0 { y0 + r } else { y0 + ch - r };
+                    let (px, py) = if r > 0.0 {
+                        (cx + r * dx, cy + r * dy)
+                    } else {
+                        (
+                            if dx < 0.0 { x0 } else { x0 + cw },
+                            if dy < 0.0 { y0 } else { y0 + ch },
+                        )
+                    };
+                    assert!(
+                        dentro_da_meia_elipse(w, h, px, py),
+                        "{rotulo}: ({px},{py}) fora"
+                    );
+                    menor = menor.min(distancia_a_curva(w, h, px, py));
+                }
+                x += cw + gap;
+            }
+            assert!(menor >= 6.0, "{rotulo}: folga de {menor:.1} px até a curva");
+        }
+    }
+
+    #[test]
+    fn protocolo_de_modo_aceita_geometria_exata_e_recusa_absurdos() {
+        assert_eq!(interpretar_modo("aberta"), Some((ModoJanela::Aberta, None)));
+        assert_eq!(
+            interpretar_modo("aberta:248:48"),
+            Some((ModoJanela::Aberta, Some((248.0, 48.0))))
+        );
+        assert_eq!(
+            interpretar_modo("repouso:104:8"),
+            Some((ModoJanela::Repouso, Some((104.0, 8.0))))
+        );
+        for ruim in [
+            "lateral",
+            "aberta:248",
+            "aberta:248:48:24",
+            "aberta:x:48",
+            "aberta:4000:48",
+            "aberta:248:900",
+            "aberta:NaN:48",
+            "aberta:inf:48",
+        ] {
+            assert_eq!(interpretar_modo(ruim), None, "{ruim}");
+        }
+    }
+
+    #[test]
+    fn troca_de_modo_pelo_rust_volta_ao_tamanho_padrao() {
+        let mut i = interno_teste();
+        i.geometria = (104.0, 8.0); // aceno informado pela página
+        let _ = atualizar_modo_e_vigia(&mut i, ModoJanela::Repouso);
+        assert_eq!(
+            i.geometria,
+            (104.0, 8.0),
+            "mesmo modo preserva a geometria da página"
+        );
+        let _ = atualizar_modo_e_vigia(&mut i, ModoJanela::Compacta);
+        assert_eq!(i.geometria, ModoJanela::Compacta.dimensoes_padrao());
+    }
+
+    #[test]
+    fn janela_nativa_recorta_e_nunca_ativa() {
+        let codigo = include_str!("nativo/win_janela.rs");
+        let producao = codigo.split("#[cfg(test)]").next().unwrap_or(codigo);
+        for exigido in [
+            "WS_EX_NOACTIVATE",
+            "WS_EX_TOOLWINDOW",
+            "WS_EX_TOPMOST",
+            "SWP_NOACTIVATE",
+            "CreateEllipticRgn",
+            "SetWindowRgn",
+        ] {
+            assert!(
+                producao.contains(exigido),
+                "falta {exigido} em win_janela.rs"
+            );
+        }
+        for proibido in [
+            "ShowWindow(",
+            "SetForegroundWindow",
+            "SetActiveWindow",
+            "SetFocus(",
+        ] {
+            assert!(
+                !producao.contains(proibido),
+                "win_janela.rs não pode usar {proibido}"
+            );
+        }
+        let pilula = include_str!("pilula.rs");
+        let producao = pilula
+            .split("#[cfg(test)]\nmod testes")
+            .next()
+            .unwrap_or(pilula);
+        assert!(
+            producao.contains("pub fn aplicar_janela"),
+            "corte do código de produção errado"
+        );
+        assert!(producao.contains("recortar_elipse"));
+        assert!(producao.contains("posicionar_sem_ativar"));
     }
 
     #[test]
     fn pilula_nunca_chama_show_do_tauri() {
         let codigo = include_str!("pilula.rs");
-        let producao = codigo.split("#[cfg(test)]").next().unwrap_or(codigo);
+        let producao = codigo
+            .split("#[cfg(test)]\nmod testes")
+            .next()
+            .unwrap_or(codigo);
         assert!(
             !producao.contains(".show()"),
             "pilula.rs não pode chamar WebviewWindow::show(), que pode ativar a janela"
@@ -796,7 +1056,7 @@ mod testes {
             baixando_modelo: None,
             progresso_ativo: false,
             aviso_ate: None,
-            espelhada: false,
+            geometria: ModoJanela::Repouso.dimensoes_padrao(),
             ultimo_nivel: Instant::now(),
             atalho: "Ctrl dir.".into(),
             canal: None,
