@@ -108,6 +108,7 @@ try {
         "--porta=$PortaCdp",
         "--modo=$Modo",
         "--esperado=$Esperado",
+        "--perfil-webview=$(Join-Path $env:LOCALAPPDATA 'se.dita.app')",
         "--prazo-modelo-ms=$($PrazoModeloMinutos * 60000)",
         "--wav=$wav",
         "--ref=$refJson",
@@ -117,6 +118,29 @@ try {
     )
     & node @nodeArgs
     $codigoQa = $LASTEXITCODE
+
+    # Diagnóstico do WebView2 com o app ainda aberto: argumentos efetivos, porta real e escutas.
+    $diag = Join-Path $Saida 'diagnostico-webview2.txt'
+    & {
+        "app vivo: $(-not $procApp.HasExited) pid=$($procApp.Id)"
+        "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS no processo do script: $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+        '--- msedgewebview2.exe (browser) ---'
+        Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe'" -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandLine -notmatch '--type=' } |
+            ForEach-Object { "pid=$($_.ProcessId) pai=$($_.ParentProcessId) $($_.CommandLine)" }
+        '--- DevToolsActivePort ---'
+        Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA 'se.dita.app') -Recurse -Filter DevToolsActivePort -ErrorAction SilentlyContinue |
+            ForEach-Object { "$($_.FullName): $((Get-Content -LiteralPath $_.FullName -ErrorAction SilentlyContinue) -join ' ')" }
+        '--- escutas TCP em 127.0.0.1/::1 ---'
+        Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
+            Where-Object { $_.LocalAddress -in '127.0.0.1', '::1', '0.0.0.0', '::' } |
+            ForEach-Object { "$($_.LocalAddress):$($_.LocalPort) pid=$($_.OwningProcess) $((Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName)" }
+        '--- política Edge/WebView2 ---'
+        foreach ($k in 'HKLM:\SOFTWARE\Policies\Microsoft\Edge', 'HKLM:\SOFTWARE\Policies\Microsoft\Edge\WebView2', 'HKCU:\SOFTWARE\Policies\Microsoft\Edge\WebView2') {
+            if (Test-Path $k) { "$k"; Get-ItemProperty $k | Out-String }
+        }
+    } *>&1 | Out-File -LiteralPath $diag -Encoding UTF8
+    Get-Content -LiteralPath $diag | Write-Host
 
     # Copia o log do app para diagnóstico junto aos screenshots.
     $logApp = Join-Path $raizDados 'ditado.log'

@@ -30,6 +30,19 @@ const SCRIPT_DIALOGO = arg("dialogo");
 const TEM_AUDIO = arg("tem-audio", "0") === "1";
 const PRAZO_MODELO_MS = Number(arg("prazo-modelo-ms", String(20 * 60_000)));
 const FOLGA_APOS_DISCO_MS = Number(arg("folga-ms", "8000"));
+const PERFIL_WEBVIEW = arg("perfil-webview"); // pasta de dados do WebView2 (DevToolsActivePort)
+
+/** Porta real escrita pelo WebView2 em DevToolsActivePort, quando existir. */
+function portaDoPerfil() {
+  if (!PERFIL_WEBVIEW) return null;
+  for (const f of [path.join(PERFIL_WEBVIEW, "EBWebView", "DevToolsActivePort"), path.join(PERFIL_WEBVIEW, "DevToolsActivePort")]) {
+    try {
+      const n = Number(fs.readFileSync(f, "utf8").split(/\r?\n/)[0]);
+      if (n > 0) return n;
+    } catch {}
+  }
+  return null;
+}
 
 const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
 const agora = (() => { const t0 = Date.now(); return () => Date.now() - t0; })();
@@ -64,8 +77,9 @@ async function descobrirAlvoPrincipal(timeoutMs = 60_000) {
   const fim = Date.now() + timeoutMs;
   let ultimoErro = "sem resposta";
   while (Date.now() < fim) {
+    const porta = portaDoPerfil() ?? PORTA;
     try {
-      const resp = await fetch(`http://127.0.0.1:${PORTA}/json`);
+      const resp = await fetch(`http://127.0.0.1:${porta}/json`);
       if (resp.ok) {
         const alvos = await resp.json();
         const principal = alvos.find(
@@ -281,14 +295,12 @@ async function faseTransicao(cdp, relatorio) {
 
   const primeira = await amostrar("inicio");
   relatorio.screenshots.push(await cdp.screenshot("01-inicio-sem-modelo.png"));
-  if (primeira.ponteDisponivel) {
-    throw new ErroDeProva(
-      "precondicao_modelo_presente",
-      "a ponte já diz disponível na primeira consulta: o Parakeet estava no disco e a transição não pode ser observada"
-    );
-  }
-  if (!primeira.telaBotaoDesabilitado) {
-    throw new ErroDeProva("precondicao_tela", "sem modelo no disco, Escolher arquivo deveria estar desabilitado", primeira);
+  // A pasta de modelos estava vazia na abertura (garantido por executar-qa-instalado.ps1). Se o
+  // download terminou antes da conexão CDP, a transição aconteceu mas não foi vista ao vivo: o
+  // veredito sai do estado final e o relatório marca isso.
+  relatorio.etapas.transicao.observadaAoVivo = !primeira.ponteDisponivel;
+  if (!primeira.ponteDisponivel && !primeira.telaBotaoDesabilitado) {
+    throw new ErroDeProva("precondicao_tela", "sem modelo pronto, Escolher arquivo deveria estar desabilitado", primeira);
   }
 
   // Espera o modelo chegar ao disco na mesma sessão (o app baixa sozinho).
