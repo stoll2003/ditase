@@ -178,6 +178,17 @@ struct VistaDaPilula: View {
                 ContornoDaPilula(evento: modelo.progresso, largura: largura, altura: altura,
                                  reduzido: semMovimento, trilho: $trilho)
             }
+            .overlay(alignment: .bottom) {
+                // Ditado (ou retranscrição) processando sem fração conhecida: o motor não manda
+                // progresso, e o contorno acima só desenha com fração. O arco gira até a fase mudar.
+                if modelo.fase == .processando && modelo.progresso == nil {
+                    // Entrada em 120 ms e saída em 160 ms da posição atual (§2.5).
+                    ArcoDeProcessamento(largura: largura, altura: altura, reduzido: semMovimento)
+                        .transition(semMovimento ? .opacity.animation(.easeOut(duration: 0.12)) : .asymmetric(
+                            insertion: .opacity.animation(.easeOut(duration: 0.12)),
+                            removal: .opacity.animation(.easeIn(duration: 0.16))))
+                }
+            }
     }
 
     /// Largura do palco: a do maior aviso possível.

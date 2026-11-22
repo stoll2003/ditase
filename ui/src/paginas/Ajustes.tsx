@@ -182,9 +182,9 @@ export function Ajustes({ estado }: { estado?: Estado }) {
           </Linha>
           <Linha>
             <Switch
-              label={win ? "Mostrar a aba na borda da tela quando parado" : "Mostrar o botão flutuante quando parado"}
+              label={win ? "Mostrar a ilha no topo da tela quando parado" : "Mostrar o botão flutuante quando parado"}
               description={win
-                ? "Uma faixa fina na borda direita. Passe o mouse ou clique nela para ditar em mãos livres. Desligada, a aba só aparece durante o ditado."
+                ? "Uma barrinha no topo da tela. Passe o mouse ou clique nela para ditar em mãos livres. Desligada, a ilha só aparece durante o ditado."
                 : "A marca pequena na base da tela. Passe o mouse e clique nela para ditar em mãos livres. Desligada, só aparece durante o ditado."}
               checked={v.pilulaSempreVisivel === "1"}
               onCheckedChange={(l) => definir("pilulaSempreVisivel", l ? "1" : "0")}

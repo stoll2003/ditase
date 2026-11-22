@@ -115,8 +115,17 @@ fn parcial_anterior_e_range_ignorado() {
         let (_dir, b, mut t) = ambiente();
         t.ignorar = ignorar;
         fs::write(b.parcial(), &t.dados[..900]).unwrap();
-        baixar(&b, &t).unwrap();
+        let mut etapas = Vec::new();
+        b.baixar(&t, |_| None, || false, |etapa| etapas.push(etapa))
+            .unwrap();
         assert_eq!(*t.pedidos.borrow(), [900]);
+        assert_eq!(
+            etapas.first(),
+            Some(&Etapa::Baixando {
+                feito: if ignorar { 0 } else { 900 },
+                total: b.modelo.tamanho,
+            })
+        );
         assert!(b.instalado())
     }
 }

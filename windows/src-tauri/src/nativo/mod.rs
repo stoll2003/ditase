@@ -58,16 +58,23 @@ pub mod colagem {
 #[cfg(not(windows))]
 #[allow(dead_code)]
 pub mod janela {
+    pub fn pintar_barra_de_titulo(
+        _janela: &tauri::WebviewWindow,
+        _fundo: tauri::window::Color,
+        _texto: tauri::window::Color,
+    ) {
+    }
+
     use std::sync::Arc;
     pub fn sem_foco(_hwnd: isize) {}
     pub fn posicionar_sem_ativar(_hwnd: isize, _x: i32, _y: i32, _w: i32, _h: i32, _mostrar: bool) {
     }
     pub fn esconder(_hwnd: isize) {}
-    pub fn recortar_elipse(_hwnd: isize, _l: i32, _t: i32, _r: i32, _b: i32) {}
+    pub fn recortar(_hwnd: isize, _regiao: Option<(i32, i32, i32, i32, i32)>) {}
     pub fn tela_cheia_ativa() -> bool {
         false
     }
-    pub fn cursor_fora_da_janela(_hwnd: isize) -> bool {
+    pub fn cursor_fora_da_zona(_hwnd: isize, _lado: i32, _baixo: i32, _ate_o_topo: bool) -> bool {
         false
     }
     pub fn observar(
@@ -91,7 +98,7 @@ pub mod janela {
     pub fn estado_da_regiao(_hwnd: isize) -> (i32, bool) {
         (3, true)
     }
-    pub fn regiao_eliptica(_hwnd: isize) -> bool {
+    pub fn regiao_recortada(_hwnd: isize) -> bool {
         true
     }
 }
@@ -113,9 +120,6 @@ pub mod sistema {
         false
     }
     pub fn tema_app_escuro() -> bool {
-        false
-    }
-    pub fn suporta_mica() -> bool {
         false
     }
     /// Programa em primeiro plano: (nome do executável, nome para exibir). Nunca o título da janela.

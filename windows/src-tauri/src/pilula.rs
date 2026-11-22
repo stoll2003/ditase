@@ -3,7 +3,10 @@
 //! fora da barra de tarefas e sem nunca roubar o foco (`WS_EX_NOACTIVATE`, posicionamento e
 //! exibição só por `SetWindowPos` com `SWP_NOACTIVATE`, nunca `WebviewWindow::show()`).
 //!
-//! Contorno único: meia elipse com o topo reto rente à borda da tela (centro em `(w/2, 0)`,
+//! Forma (SPEC-windows-identidade.md §2): barrinha em repouso e cápsula escura solta 6 DIP do
+//! topo, raio = altura / 2. A janela fica presa em `y = work_y`; a região de clique é a cápsula
+//! 1 px físico maior (`CreateRoundRectRgn`), e o vão de cima e as quinas atravessam o clique.
+//! Histórico: a v1.0.2 inicial usava meia elipse com o topo reto rente à borda (centro em `(w/2, 0)`,
 //! semieixos `w/2` e `h`). É o mesmo contorno no desenho (`pilula.html`), no contorno de progresso e
 //! no recorte nativo (`CreateEllipticRgn` + `SetWindowRgn`), para que o clique fora da curva atravesse
 //! para a janela de baixo.
@@ -65,17 +68,37 @@ pub enum ModoJanela {
 }
 
 /// Limites de sanidade para a geometria pedida pela página (px lógicos).
-const LARGURA_MIN: f64 = 40.0;
-const LARGURA_MAX: f64 = 340.0;
-const ALTURA_MIN: f64 = 4.0;
-const ALTURA_MAX: f64 = 56.0;
+const JANELA_W: (f64, f64) = (40.0, 380.0);
+const JANELA_H: (f64, f64) = (8.0, 64.0);
+
+/// Geometria pedida pela página (px lógicos): tamanho da janela (sempre presa em `y = work_y`) e
+/// a cápsula dentro dela (centrada em X, topo em `cap_y`). Com `recorte_capsula`, a região de
+/// clique é a cápsula 1 px físico maior; sem, a janela inteira (barrinha e transições).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Geometria {
+    pub w: f64,
+    pub h: f64,
+    pub cap_w: f64,
+    pub cap_h: f64,
+    pub cap_y: f64,
+    pub recorte_capsula: bool,
+}
 
 impl ModoJanela {
-    pub fn dimensoes_padrao(self) -> (f64, f64) {
-        match self {
-            ModoJanela::Repouso => (92.0, 7.0),
-            ModoJanela::Compacta => (116.0, 40.0),
-            ModoJanela::Aberta => (248.0, 54.0),
+    /// Tamanhos da §2.3 usados enquanto a página não informa os exatos.
+    pub fn geometria_padrao(self) -> Geometria {
+        let (cap_w, cap_h, cap_y, w, h, recorte_capsula) = match self {
+            ModoJanela::Repouso => (40.0, 5.0, 3.0, 72.0, 14.0, false),
+            ModoJanela::Compacta => (112.0, 30.0, 6.0, 116.0, 38.0, true),
+            ModoJanela::Aberta => (184.0, 36.0, 6.0, 188.0, 44.0, true),
+        };
+        Geometria {
+            w,
+            h,
+            cap_w,
+            cap_h,
+            cap_y,
+            recorte_capsula,
         }
     }
 
@@ -89,21 +112,43 @@ impl ModoJanela {
     }
 }
 
-/// Interpreta o pedido de modo da página: `aberta` ou `aberta:248:48` (px lógicos).
-/// Medidas fora dos limites são recusadas, para a página nunca pedir janela absurda.
-pub fn interpretar_modo(s: &str) -> Option<(ModoJanela, Option<(f64, f64)>)> {
-    let mut partes = s.split(':');
-    let modo = ModoJanela::de_nome(partes.next()?)?;
-    let (w, h) = match (partes.next(), partes.next(), partes.next()) {
-        (None, None, None) => return Some((modo, None)),
-        (Some(w), Some(h), None) => (w.parse::<f64>().ok()?, h.parse::<f64>().ok()?),
+/// Interpreta o pedido da página: `aberta` ou
+/// `aberta:{janela w}:{janela h}:{cápsula w}:{cápsula h}:{cápsula y}:{c|r}` (px lógicos).
+/// Medidas fora dos limites, ou cápsula fora da janela, são recusadas.
+pub fn interpretar_modo(s: &str) -> Option<(ModoJanela, Option<Geometria>)> {
+    let partes: Vec<&str> = s.split(':').collect();
+    let modo = ModoJanela::de_nome(partes.first()?)?;
+    if partes.len() == 1 {
+        return Some((modo, None));
+    }
+    if partes.len() != 7 {
+        return None;
+    }
+    let n: Vec<f64> = partes[1..6]
+        .iter()
+        .map(|p| p.parse::<f64>().ok().filter(|v| v.is_finite()))
+        .collect::<Option<_>>()?;
+    let recorte_capsula = match partes[6] {
+        "c" => true,
+        "r" => false,
         _ => return None,
     };
-    let valido = w.is_finite()
-        && h.is_finite()
-        && (LARGURA_MIN..=LARGURA_MAX).contains(&w)
-        && (ALTURA_MIN..=ALTURA_MAX).contains(&h);
-    valido.then_some((modo, Some((w, h))))
+    let g = Geometria {
+        w: n[0],
+        h: n[1],
+        cap_w: n[2],
+        cap_h: n[3],
+        cap_y: n[4],
+        recorte_capsula,
+    };
+    let valido = (JANELA_W.0..=JANELA_W.1).contains(&g.w)
+        && (JANELA_H.0..=JANELA_H.1).contains(&g.h)
+        && g.cap_w > 0.0
+        && g.cap_h > 0.0
+        && g.cap_y >= 0.0
+        && g.cap_w <= g.w
+        && g.cap_y + g.cap_h <= g.h;
+    valido.then_some((modo, Some(g)))
 }
 
 /// Dados geométricos de um monitor em pixels físicos (para testes determinísticos sem janela).
@@ -137,8 +182,8 @@ pub struct PosicaoIlha {
 }
 
 fn posicao_no_monitor(m: &RetanguloMonitor, w_log: f64, h_log: f64) -> PosicaoIlha {
-    let w = (w_log * m.escala).round() as i32;
-    let h = (h_log * m.escala).round() as i32;
+    let w = (w_log * m.escala).ceil() as i32;
+    let h = (h_log * m.escala).ceil() as i32;
     let x = m.work_x + ((m.work_w - w) as f64 / 2.0).round() as i32;
     // Topo rente: sem folga de 1 px, também em escalas fracionárias.
     PosicaoIlha {
@@ -184,26 +229,36 @@ pub fn escolher_topo(
     Some(posicao_no_monitor(&mais_alto, w_log, h_log))
 }
 
-/// Retângulo envolvente, em pixels físicos relativos à janela, da elipse que vira a região de
-/// recorte (`CreateEllipticRgn`): centro em `(w/2, 0)`, semieixos `w/2` e `h`. Só a metade de
-/// baixo cai dentro da janela, e o topo fica reto na borda da tela. O `+ 1` compensa a regra do GDI
-/// de excluir a borda direita e a de baixo do retângulo.
+/// Região de clique da cápsula em pixels físicos relativos à janela de largura `janela_w`:
+/// `(esquerda, topo, direita, base, diâmetro do canto)` para `CreateRoundRectRgn`, 1 px físico
+/// maior que a cápsula em toda a volta (§2.7: a região nunca pode cortar o desenho antisserrilhado).
 #[cfg_attr(not(windows), allow(dead_code))]
-pub fn regiao_meia_elipse(w: i32, h: i32) -> (i32, i32, i32, i32) {
-    (0, -h, w + 1, h + 1)
+pub fn regiao_capsula(janela_w: i32, g: &Geometria, escala: f64) -> (i32, i32, i32, i32, i32) {
+    let cap_w = (g.cap_w * escala).round() as i32;
+    let cap_h = (g.cap_h * escala).round() as i32;
+    let cap_t = (g.cap_y * escala).round() as i32;
+    let cap_l = (janela_w - cap_w) / 2;
+    (
+        cap_l - 1,
+        cap_t - 1,
+        cap_l + cap_w + 1,
+        cap_t + cap_h + 1,
+        cap_h + 2,
+    )
 }
 
-/// Teste de ponto do mesmo contorno (centro do pixel `(px, py)`), espelhando `regiao_meia_elipse`
-/// e o desenho em `pilula.html`. Usado nos testes de recorte e de encaixe dos controles.
+/// Teste de ponto da região (`CreateRoundRectRgn` exclui a borda direita e a de baixo).
 #[cfg(test)]
-pub fn dentro_da_meia_elipse(w: f64, h: f64, px: f64, py: f64) -> bool {
-    if w <= 0.0 || h <= 0.0 || py < 0.0 || py > h {
+pub fn dentro_da_regiao(r: (i32, i32, i32, i32, i32), px: f64, py: f64) -> bool {
+    let (l, t, rr, b, d) = r;
+    let (l, t, rr, b) = (l as f64, t as f64, rr as f64, b as f64);
+    if px < l || px >= rr || py < t || py >= b {
         return false;
     }
-    let a = w / 2.0;
-    let dx = (px - a) / a;
-    let dy = py / h;
-    dx * dx + dy * dy <= 1.0
+    let raio = d as f64 / 2.0;
+    let cx = px.clamp(l + raio, rr - raio);
+    let cy = py.clamp(t + raio, b - raio);
+    (px - cx).powi(2) + (py - cy).powi(2) <= raio * raio
 }
 
 /// Retângulo físico `(x, y, w, h)`.
@@ -231,14 +286,14 @@ pub fn decidir_conserto(
     esperado: Option<Retangulo>,
     real: Option<Retangulo>,
     calculado: Option<Retangulo>,
-    regiao_eliptica: bool,
+    regiao_ok: bool,
 ) -> Conserto {
     if dpi_janela != 0 && dpi_monitor != 0 && dpi_janela != dpi_monitor {
         return Conserto::Recriar;
     }
     // Achado do Par: depois de recriar, a região às vezes volta a ser retângulo (tipo 2) sem mudar
     // o retângulo da janela; os cantos passariam a engolir o clique.
-    if calculado.is_some() && esperado.is_some() && !regiao_eliptica {
+    if calculado.is_some() && esperado.is_some() && !regiao_ok {
         return Conserto::Reaplicar;
     }
     match (calculado, esperado) {
@@ -340,8 +395,9 @@ struct Interno {
     baixando_modelo: Option<(u64, u64)>,
     progresso_ativo: bool,
     aviso_ate: Option<Instant>,
+    saida_ate: Option<Instant>,
     /// Tamanho lógico atual da ilha (largura exata do estado informada pela página).
-    geometria: (f64, f64),
+    geometria: Geometria,
     ultimo_nivel: Instant,
     atalho: String,
     canal: Option<Channel<Value>>,
@@ -369,7 +425,7 @@ fn modo_da_fase(i: &Interno) -> ModoJanela {
 fn atualizar_modo_e_vigia(i: &mut Interno, modo: ModoJanela) -> Option<(Arc<AtomicU64>, u64)> {
     if i.modo != modo {
         // Troca de modo comandada pelo Rust: usa o tamanho padrão até a página informar o exato.
-        i.geometria = modo.dimensoes_padrao();
+        i.geometria = modo.geometria_padrao();
     }
     i.modo = modo;
     if modo == ModoJanela::Aberta {
@@ -428,13 +484,16 @@ pub struct Pilula {
 /// Cria a janela da ilha: transparente, sem foco, fora da barra de tarefas, escondida até o
 /// primeiro `SetWindowPos`. Também usada para recriá-la quando o DPI dela fica preso.
 fn construir_janela(app: &AppHandle, eu: Weak<Pilula>) -> Option<WebviewWindow> {
-    let (lw, lh) = ModoJanela::Repouso.dimensoes_padrao();
+    let g = ModoJanela::Repouso.geometria_padrao();
+    let (lw, lh) = (g.w, g.h);
     let janela = WebviewWindowBuilder::new(app, ROTULO, WebviewUrl::App("pilula.html".into()))
         .title("Dita.se")
         .inner_size(lw, lh)
         .resizable(false)
         .decorations(false)
         .transparent(true)
+        // Fundo do WebView2 com alfa 0 (§2.7): nada cinza ou branco fora da cápsula.
+        .background_color(tauri::window::Color(0, 0, 0, 0))
         .shadow(false)
         .always_on_top(true)
         .skip_taskbar(true)
@@ -479,7 +538,8 @@ impl Pilula {
                 baixando_modelo: None,
                 progresso_ativo: false,
                 aviso_ate: None,
-                geometria: ModoJanela::Repouso.dimensoes_padrao(),
+                saida_ate: None,
+                geometria: ModoJanela::Repouso.geometria_padrao(),
                 ultimo_nivel: Instant::now(),
                 atalho: atalho.to_string(),
                 canal: None,
@@ -580,10 +640,11 @@ impl Pilula {
         let Some(j) = self.janela() else {
             return;
         };
-        let (visivel, (w_log, h_log)) = {
+        let (visivel, g) = {
             let i = self.interno.lock().unwrap();
             (Self::deve_estar_visivel(&i), i.geometria)
         };
+        let (w_log, h_log) = (g.w, g.h);
         if !visivel {
             return;
         }
@@ -598,9 +659,17 @@ impl Pilula {
         let esperado = crate::nativo::janela::retangulo_esperado();
         let real = crate::nativo::janela::retangulo(hwnd);
         let (tipo_regiao, canto_fora) = crate::nativo::janela::estado_da_regiao(hwnd);
-        let eliptica = crate::nativo::janela::regiao_eliptica(hwnd);
-        let conserto =
-            decidir_conserto(dpi_janela, dpi_monitor, esperado, real, calculado, eliptica);
+        // Com cápsula, a região tem de ser complexa e deixar o canto de baixo fora; na barrinha e
+        // na transição, a janela inteira pega o clique e não há o que conferir.
+        let regiao_ok = !g.recorte_capsula || crate::nativo::janela::regiao_recortada(hwnd);
+        let conserto = decidir_conserto(
+            dpi_janela,
+            dpi_monitor,
+            esperado,
+            real,
+            calculado,
+            regiao_ok,
+        );
         if conserto == Conserto::Nada && motivo != "abertura" {
             return;
         }
@@ -744,6 +813,7 @@ impl Pilula {
         let aviso_ativo = i.aviso_ate.is_some_and(|ate| Instant::now() < ate);
         let em_atividade = i.fase != Fase::Ociosa
             || aviso_ativo
+            || i.saida_ate.is_some_and(|ate| Instant::now() < ate)
             || i.baixando_modelo.is_some()
             || i.progresso_ativo;
         if em_atividade {
@@ -759,10 +829,11 @@ impl Pilula {
         let Some(j) = self.janela() else {
             return;
         };
-        let (visivel, (w_log, h_log)) = {
+        let (visivel, g) = {
             let i = self.interno.lock().unwrap();
             (Self::deve_estar_visivel(&i), i.geometria)
         };
+        let (w_log, h_log) = (g.w, g.h);
         if !visivel {
             #[cfg(windows)]
             if let Ok(h) = j.hwnd() {
@@ -780,8 +851,9 @@ impl Pilula {
         if let Ok(h) = j.hwnd() {
             let hwnd = h.0 as isize;
             crate::nativo::janela::posicionar_sem_ativar(hwnd, pos.x, pos.y, pos.w, pos.h, true);
-            let (l, t, r, b) = regiao_meia_elipse(pos.w, pos.h);
-            crate::nativo::janela::recortar_elipse(hwnd, l, t, r, b);
+            let escala = pos.w as f64 / g.w;
+            let regiao = g.recorte_capsula.then(|| regiao_capsula(pos.w, &g, escala));
+            crate::nativo::janela::recortar(hwnd, regiao);
         }
         #[cfg(not(windows))]
         let _ = pos;
@@ -806,7 +878,13 @@ impl Pilula {
                     };
                     #[cfg(windows)]
                     if let Ok(h) = j.hwnd() {
-                        if crate::nativo::janela::cursor_fora_da_janela(h.0 as isize) {
+                        // Zona de manter aberta (§2.7): 16 DIP para os lados e para baixo, e até a
+                        // borda de cima da tela.
+                        let hwnd = h.0 as isize;
+                        let margem = (16.0 * crate::nativo::janela::dpi_da_janela(hwnd) as f64
+                            / 96.0)
+                            .round() as i32;
+                        if crate::nativo::janela::cursor_fora_da_zona(hwnd, margem, margem, true) {
                             if let Some(casca) = app.try_state::<Arc<crate::Casca>>() {
                                 casca.pilula.enviar(json!({"tipo": "ponteiroFora"}));
                             }
@@ -818,9 +896,9 @@ impl Pilula {
             });
     }
 
-    /// Pedido da página (`modo:{nome}[:{w}:{h}]`): troca o modo e, se vier, usa a geometria exata
+    /// Pedido da página (`modo:{nome}[:…7 campos]`): troca o modo e, se vier, usa a geometria exata
     /// do estado. A página só pede para encolher depois que a animação de saída terminou.
-    pub fn definir_modo(&self, modo: ModoJanela, geometria: Option<(f64, f64)>) {
+    pub fn definir_modo(&self, modo: ModoJanela, geometria: Option<Geometria>) {
         let iniciar = {
             let mut i = self.interno.lock().unwrap();
             if modo != ModoJanela::Aberta {
@@ -829,10 +907,13 @@ impl Pilula {
             }
             let antes = (i.modo, i.geometria);
             let flag = atualizar_modo_e_vigia(&mut i, modo);
+            let recolheu = modo == ModoJanela::Repouso
+                && geometria.is_some_and(|g| g.w == 72.0 && g.h == 14.0);
+            let fim_da_saida = recolheu && i.saida_ate.take().is_some();
             if let Some(g) = geometria {
                 i.geometria = g;
             }
-            if antes == (i.modo, i.geometria) && flag.is_none() {
+            if antes == (i.modo, i.geometria) && flag.is_none() && !fim_da_saida {
                 return;
             }
             flag
@@ -857,18 +938,54 @@ impl Pilula {
     }
 
     pub fn mostrar(&self, fase: Fase) {
-        let iniciar = {
+        let (iniciar, saida) = {
             let mut i = self.interno.lock().unwrap();
+            let saindo = i.fase == Fase::Processando && fase == Fase::Ociosa && i.canal.is_some();
             i.fase = fase;
             if fase != Fase::Ociosa {
                 i.aviso_ate = None;
+                i.saida_ate = None;
             }
-            let modo = modo_da_fase(&i);
-            atualizar_modo_e_vigia(&mut i, modo)
+            if saindo {
+                // A página ainda precisa da cápsula para apagar o segmento antes de recolher.
+                let ate = Instant::now() + Duration::from_millis(450);
+                i.saida_ate = Some(ate);
+                (None, Some(ate))
+            } else if i.saida_ate.is_some() {
+                (None, None)
+            } else {
+                let modo = modo_da_fase(&i);
+                (atualizar_modo_e_vigia(&mut i, modo), None)
+            }
         };
         self.aplicar_janela();
         self.iniciar_vigia_se_preciso(iniciar);
         self.enviar(msg_fase(fase));
+
+        if let Some(ate) = saida {
+            let app = self.app.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(ate.saturating_duration_since(Instant::now()));
+                let app2 = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    let Some(casca) = app2.try_state::<Arc<crate::Casca>>() else {
+                        return;
+                    };
+                    let p = &casca.pilula;
+                    let mut i = p.interno.lock().unwrap();
+                    if i.saida_ate != Some(ate) {
+                        return;
+                    }
+                    i.saida_ate = None;
+                    if i.canal.is_none() {
+                        let modo = modo_da_fase(&i);
+                        atualizar_modo_e_vigia(&mut i, modo);
+                    }
+                    drop(i);
+                    p.aplicar_janela();
+                });
+            });
+        }
     }
 
     /// Mensagem curta com nível (`info` ou `erro`); a aba volta sozinha a ociosa depois de `segundos`.
@@ -879,9 +996,16 @@ impl Pilula {
         };
         let iniciar = {
             let mut i = self.interno.lock().unwrap();
+            let manter_forma = i.fase == Fase::Processando || i.saida_ate.is_some();
+            let geometria = i.geometria;
             i.fase = Fase::Ociosa;
+            i.saida_ate = None;
             i.aviso_ate = Some(Instant::now() + Duration::from_secs_f64(duracao + 0.4));
-            atualizar_modo_e_vigia(&mut i, ModoJanela::Aberta)
+            let vigia = atualizar_modo_e_vigia(&mut i, ModoJanela::Aberta);
+            if manter_forma {
+                i.geometria = geometria;
+            }
+            vigia
         };
         self.aplicar_janela();
         self.iniciar_vigia_se_preciso(iniciar);
@@ -910,7 +1034,9 @@ impl Pilula {
                         .pilula
                         .janela()
                         .and_then(|j| j.hwnd().ok())
-                        .is_none_or(|h| crate::nativo::janela::cursor_fora_da_janela(h.0 as isize))
+                        .is_none_or(|h| {
+                            crate::nativo::janela::cursor_fora_da_zona(h.0 as isize, 0, 0, false)
+                        })
                 }
                 #[cfg(not(windows))]
                 {
@@ -1087,8 +1213,8 @@ mod testes {
                 (336.0, 56.0),
             ] {
                 let pos = escolher_topo(&[m], w_log, h_log).unwrap();
-                assert_eq!(pos.w, (w_log * escala).round() as i32);
-                assert_eq!(pos.h, (h_log * escala).round() as i32);
+                assert_eq!(pos.w, (w_log * escala).ceil() as i32);
+                assert_eq!(pos.h, (h_log * escala).ceil() as i32);
                 // Topo rente, sem folga de 1 px.
                 assert_eq!(pos.y, m.work_y);
                 // Centro: as sobras dos dois lados diferem no máximo 1 px físico.
@@ -1147,150 +1273,6 @@ mod testes {
         assert!(escolher_topo(&[], 92.0, 7.0).is_none());
     }
 
-    #[test]
-    fn regiao_e_meia_elipse_com_topo_reto_e_cantos_vazados() {
-        for escala in [1.0_f64, 1.25, 1.5, 2.0] {
-            for (w_log, h_log) in [(92.0, 7.0), (116.0, 40.0), (248.0, 54.0), (336.0, 56.0)] {
-                let w = (w_log * escala).round() as i32;
-                let h = (h_log * escala).round() as i32;
-                let (l, t, r, b) = regiao_meia_elipse(w, h);
-                // Elipse centrada na borda de cima da janela: só a metade de baixo fica dentro.
-                assert_eq!((l + r - 1) as f64 / 2.0, w as f64 / 2.0);
-                assert_eq!(t + b - 1, 0);
-                let (wf, hf) = (w as f64, h as f64);
-                // Topo: rente à borda em quase toda a largura.
-                assert!(dentro_da_meia_elipse(wf, hf, wf * 0.05, 0.5));
-                assert!(dentro_da_meia_elipse(wf, hf, wf * 0.95, 0.5));
-                // Parte mais baixa no centro.
-                assert!(dentro_da_meia_elipse(wf, hf, wf / 2.0, hf - 0.5));
-                // Cantos de baixo ficam fora: o clique ali atravessa para a janela de baixo.
-                for (px, py) in [(0.5, hf - 0.5), (wf - 0.5, hf - 0.5)] {
-                    assert!(
-                        !dentro_da_meia_elipse(wf, hf, px, py),
-                        "{w}x{h} ({px},{py})"
-                    );
-                }
-                // Curva contínua e simétrica: a altura da borda cai monotonicamente do centro às laterais.
-                let mut anterior = f64::MAX;
-                for k in 0..=20 {
-                    let px = wf / 2.0 + (wf / 2.0) * (k as f64 / 20.0) * 0.999;
-                    let a = wf / 2.0;
-                    let altura = hf * (1.0_f64 - ((px - a) / a).powi(2)).max(0.0).sqrt();
-                    assert!(altura <= anterior);
-                    anterior = altura;
-                    let espelho = wf - px;
-                    assert_eq!(
-                        dentro_da_meia_elipse(wf, hf, px, altura * 0.9),
-                        dentro_da_meia_elipse(wf, hf, espelho, altura * 0.9)
-                    );
-                }
-            }
-        }
-    }
-
-    /// Menor distância de `(px, py)` até a curva da meia elipse (o topo reto é a borda da tela e
-    /// não conta).
-    fn distancia_a_curva(w: f64, h: f64, px: f64, py: f64) -> f64 {
-        let a = w / 2.0;
-        (0..=4000)
-            .map(|k| {
-                let t = std::f64::consts::PI * k as f64 / 4000.0;
-                let (cx, cy) = (a - a * t.cos(), h * t.sin());
-                ((cx - px).powi(2) + (cy - py).powi(2)).sqrt()
-            })
-            .fold(f64::MAX, f64::min)
-    }
-
-    /// Controles (px lógicos, medidas da spec rev. 2 e do `pilula.html`) ficam dentro da curva com
-    /// folga de pelo menos 6 px nos modos aberto e gravando. Cada controle é uma caixa
-    /// `(largura, altura, raio)` na linha centrada em X, com `gap` de 8 px; o contorno real
-    /// (pílula, círculo ou retângulo) é amostrado e medido contra a curva.
-    #[test]
-    fn controles_cabem_dentro_da_curva() {
-        let pilula_ = |w: f64, h: f64| (w, h, h / 2.0);
-        let caixa = |w: f64, h: f64| (w, h, 0.0);
-        // (rótulo, W, H, centro da linha, gap, controles)
-        type Caso = (&'static str, f64, f64, f64, f64, Vec<(f64, f64, f64)>);
-        let casos: [Caso; 5] = [
-            (
-                "aberta, ociosa",
-                248.0,
-                54.0,
-                22.0,
-                8.0,
-                vec![pilula_(84.0, 32.0), pilula_(72.0, 24.0)],
-            ),
-            (
-                "gravando, aberta",
-                248.0,
-                54.0,
-                22.0,
-                8.0,
-                vec![caixa(51.0, 22.0), caixa(30.0, 18.0), pilula_(32.0, 32.0)],
-            ),
-            (
-                "mãos livres",
-                284.0,
-                56.0,
-                23.0,
-                8.0,
-                vec![
-                    pilula_(32.0, 32.0),
-                    caixa(51.0, 22.0),
-                    caixa(30.0, 18.0),
-                    pilula_(32.0, 32.0),
-                ],
-            ),
-            (
-                "gravando, compacta",
-                116.0,
-                40.0,
-                17.0,
-                0.0,
-                vec![caixa(31.0, 18.0)],
-            ),
-            (
-                "baixando, compacta",
-                132.0,
-                42.0,
-                18.0,
-                6.0,
-                vec![caixa(16.0, 16.0), caixa(28.0, 16.0)],
-            ),
-        ];
-        for (rotulo, w, h, centro, gap, controles) in casos {
-            let total: f64 =
-                controles.iter().map(|c| c.0).sum::<f64>() + gap * (controles.len() - 1) as f64;
-            let mut x = (w - total) / 2.0;
-            let mut menor = f64::MAX;
-            for (cw, ch, r) in controles {
-                let (x0, y0) = (x, centro - ch / 2.0);
-                // Contorno: lados retos + cantos arredondados de raio r (r = 0: retângulo).
-                for k in 0..360 {
-                    let t = (k as f64).to_radians();
-                    let (dx, dy) = (t.cos(), t.sin());
-                    let cx = if dx < 0.0 { x0 + r } else { x0 + cw - r };
-                    let cy = if dy < 0.0 { y0 + r } else { y0 + ch - r };
-                    let (px, py) = if r > 0.0 {
-                        (cx + r * dx, cy + r * dy)
-                    } else {
-                        (
-                            if dx < 0.0 { x0 } else { x0 + cw },
-                            if dy < 0.0 { y0 } else { y0 + ch },
-                        )
-                    };
-                    assert!(
-                        dentro_da_meia_elipse(w, h, px, py),
-                        "{rotulo}: ({px},{py}) fora"
-                    );
-                    menor = menor.min(distancia_a_curva(w, h, px, py));
-                }
-                x += cw + gap;
-            }
-            assert!(menor >= 6.0, "{rotulo}: folga de {menor:.1} px até a curva");
-        }
-    }
-
     fn tela_runner(w: i32, h: i32, escala: f64) -> RetanguloMonitor {
         RetanguloMonitor {
             x: 0,
@@ -1313,10 +1295,10 @@ mod testes {
     /// Defeito 1 do runner: 1024x768 -> 1920x1080 a 100% deixava a ilha em x=466.
     #[test]
     fn troca_de_resolucao_reaplica_no_centro_novo() {
-        let antes = ret(escolher_topo(&[tela_runner(1024, 768, 1.0)], 92.0, 7.0).unwrap());
-        assert_eq!(antes, (466, 0, 92, 7));
-        let depois = ret(escolher_topo(&[tela_runner(1920, 1080, 1.0)], 92.0, 7.0).unwrap());
-        assert_eq!(depois, (914, 0, 92, 7));
+        let antes = ret(escolher_topo(&[tela_runner(1024, 768, 1.0)], 72.0, 14.0).unwrap());
+        assert_eq!(antes, (476, 0, 72, 14));
+        let depois = ret(escolher_topo(&[tela_runner(1920, 1080, 1.0)], 72.0, 14.0).unwrap());
+        assert_eq!(depois, (924, 0, 72, 14));
         assert_eq!(
             decidir_conserto(96, 96, Some(antes), Some(antes), Some(depois), true),
             Conserto::Reaplicar
@@ -1327,13 +1309,13 @@ mod testes {
     #[test]
     fn janela_presa_em_dpi_antigo_e_recriada() {
         for (dpi, escala, esperado) in [
-            (120, 1.25, (903, 0, 115, 9)),
-            (144, 1.5, (891, 0, 138, 11)),
-            (168, 1.75, (880, 0, 161, 12)),
+            (120, 1.25, (915, 0, 90, 18)),
+            (144, 1.5, (906, 0, 108, 21)),
+            (168, 1.75, (897, 0, 126, 25)),
         ] {
-            let calc = ret(escolher_topo(&[tela_runner(1920, 1080, escala)], 92.0, 7.0).unwrap());
+            let calc = ret(escolher_topo(&[tela_runner(1920, 1080, escala)], 72.0, 14.0).unwrap());
             assert_eq!(calc, esperado, "escala {escala}");
-            let antigo = Some((466, 0, 92, 7));
+            let antigo = Some((476, 0, 72, 14));
             assert_eq!(
                 decidir_conserto(96, dpi, antigo, antigo, Some(calc), true),
                 Conserto::Recriar
@@ -1349,8 +1331,8 @@ mod testes {
     /// Defeito 3: abertura em 175% com a ilha 24x24 em (0,0) depois do SetWindowPos do tao.
     #[test]
     fn deriva_depois_do_tao_e_reaplicada() {
-        let calc = ret(escolher_topo(&[tela_runner(1920, 1080, 1.75)], 92.0, 7.0).unwrap());
-        assert_eq!(calc, (880, 0, 161, 12));
+        let calc = ret(escolher_topo(&[tela_runner(1920, 1080, 1.75)], 72.0, 14.0).unwrap());
+        assert_eq!(calc, (897, 0, 126, 25));
         assert_eq!(
             decidir_conserto(168, 168, Some(calc), Some((0, 0, 24, 24)), Some(calc), true),
             Conserto::Reaplicar
@@ -1364,7 +1346,7 @@ mod testes {
     /// Achado do Par (run 44888186295): depois de recriar, retângulo certo mas região tipo 2.
     #[test]
     fn regiao_retangular_com_retangulo_certo_e_reaplicada() {
-        let r = Some((891, 0, 138, 11));
+        let r = Some((906, 0, 108, 21));
         assert_eq!(
             decidir_conserto(144, 144, r, r, r, false),
             Conserto::Reaplicar
@@ -1396,7 +1378,7 @@ mod testes {
 
     #[test]
     fn leitura_de_dpi_indisponivel_nao_recria() {
-        let r = Some((466, 0, 92, 7));
+        let r = Some((476, 0, 72, 14));
         assert_eq!(decidir_conserto(0, 168, r, r, r, true), Conserto::Nada);
         assert_eq!(decidir_conserto(96, 0, r, r, r, true), Conserto::Nada);
         assert_eq!(decidir_conserto(96, 96, r, r, None, true), Conserto::Nada);
@@ -1469,26 +1451,116 @@ mod testes {
         }
     }
 
+    fn geo(w: f64, h: f64, cap_w: f64, cap_h: f64, cap_y: f64, c: bool) -> Geometria {
+        Geometria {
+            w,
+            h,
+            cap_w,
+            cap_h,
+            cap_y,
+            recorte_capsula: c,
+        }
+    }
+
+    /// Região da cápsula (§2.7): 1 px físico maior que o desenho, quinas e vão de cima de fora.
+    #[test]
+    fn regiao_e_capsula_um_pixel_maior_com_quinas_e_vao_de_fora() {
+        for escala in [1.0_f64, 1.25, 1.5, 1.75, 2.0] {
+            for (cap_w, cap_h) in [(184.0, 36.0), (112.0, 30.0), (252.0, 36.0), (360.0, 52.0)] {
+                let g = geo(cap_w + 4.0, 6.0 + cap_h + 2.0, cap_w, cap_h, 6.0, true);
+                let jw = (g.w * escala).round() as i32;
+                let jh = (g.h * escala).round() as i32;
+                let r = regiao_capsula(jw, &g, escala);
+                let (l, t, rr, b, d) = r;
+                let cw = (cap_w * escala).round() as i32;
+                let ch = (cap_h * escala).round() as i32;
+                let ct = (6.0 * escala).round() as i32;
+                assert_eq!((rr - l, b - t, d), (cw + 2, ch + 2, ch + 2));
+                assert_eq!(t, ct - 1);
+                assert!(l >= 0 && rr <= jw && b <= jh, "região dentro da janela");
+                // Toda a cápsula desenhada fica dentro da região (nunca corta o desenho).
+                let cl = (jw - cw) / 2;
+                let raio = ch as f64 / 2.0;
+                for k in 0..=72 {
+                    let ang = (k as f64) * std::f64::consts::PI / 36.0;
+                    let (cx, cy) = if ang.cos() >= 0.0 {
+                        (cl as f64 + cw as f64 - raio, ct as f64 + raio)
+                    } else {
+                        (cl as f64 + raio, ct as f64 + raio)
+                    };
+                    let px = cx + (raio - 0.5) * ang.cos();
+                    let py = cy + (raio - 0.5) * ang.sin();
+                    assert!(dentro_da_regiao(r, px, py), "{escala} {cap_w}: ({px},{py})");
+                }
+                // Quinas da janela e vão de cima atravessam o clique.
+                let (jwf, jhf) = (jw as f64, jh as f64);
+                for (px, py) in [(0.5, 0.5), (0.5, jhf - 0.5), (jwf - 0.5, jhf - 0.5)] {
+                    assert!(!dentro_da_regiao(r, px, py));
+                }
+                assert!(!dentro_da_regiao(
+                    r,
+                    jwf / 2.0,
+                    (ct as f64 - 2.0).max(0.0) - 0.5 + 0.5 * 0.0
+                ));
+                // Centro pega o clique.
+                assert!(dentro_da_regiao(r, jwf / 2.0, ct as f64 + raio));
+            }
+        }
+    }
+
+    /// Controles (medidas da §2.3) ficam a pelo menos 6 DIP da ponta curva.
+    #[test]
+    fn controles_cabem_dentro_da_capsula() {
+        // (rótulo, cápsula w, h, largura do conteúdo, raio do controle da ponta)
+        // ociosa: Ditar (12+12+6+28=58) + 8 + divisor 1 + 8 + chip (~59) = 134.
+        // gravando aberta: ponto 6 + 8 + barras 51 + 8 + tempo 34 + 8 + cancelar 28 = 143.
+        // mãos livres: 28 + 8 + 51 + 8 + 34 + 8 + 28 = 165.
+        let casos = [
+            ("aberta, ociosa", 184.0, 36.0, 134.0, 14.0),
+            ("gravando, aberta", 216.0, 36.0, 143.0, 14.0),
+            ("mãos livres", 252.0, 36.0, 165.0, 14.0),
+            ("gravando, recolhida", 112.0, 30.0, 6.0 + 8.0 + 51.0, 0.0),
+            ("processando, aberta", 196.0, 36.0, 23.0 + 8.0 + 80.0, 0.0),
+        ];
+        for (rotulo, w, h, conteudo, raio_ctl) in casos {
+            let r = h / 2.0;
+            let x0 = (w - conteudo) / 2.0;
+            // Botão redondo na ponta: margem até a borda >= r - raio (concêntrico, §2.3).
+            // Texto, ponto ou barras na ponta: margem >= 14 DIP.
+            let minimo = if raio_ctl > 0.0 { r - raio_ctl } else { 14.0 };
+            assert!(x0 >= minimo, "{rotulo}: margem {x0:.1} < {minimo:.1}");
+        }
+    }
+
     #[test]
     fn protocolo_de_modo_aceita_geometria_exata_e_recusa_absurdos() {
         assert_eq!(interpretar_modo("aberta"), Some((ModoJanela::Aberta, None)));
         assert_eq!(
-            interpretar_modo("aberta:248:48"),
-            Some((ModoJanela::Aberta, Some((248.0, 48.0))))
+            interpretar_modo("aberta:188:44:184:36:6:c"),
+            Some((
+                ModoJanela::Aberta,
+                Some(geo(188.0, 44.0, 184.0, 36.0, 6.0, true))
+            ))
         );
         assert_eq!(
-            interpretar_modo("repouso:104:8"),
-            Some((ModoJanela::Repouso, Some((104.0, 8.0))))
+            interpretar_modo("repouso:72:14:40:5:3:r"),
+            Some((
+                ModoJanela::Repouso,
+                Some(geo(72.0, 14.0, 40.0, 5.0, 3.0, false))
+            ))
         );
         for ruim in [
             "lateral",
-            "aberta:248",
-            "aberta:248:48:24",
-            "aberta:x:48",
-            "aberta:4000:48",
-            "aberta:248:900",
-            "aberta:NaN:48",
-            "aberta:inf:48",
+            "aberta:188:44",
+            "aberta:188:44:184:36:6",
+            "aberta:188:44:184:36:6:x",
+            "aberta:188:44:184:36:6:c:1",
+            "aberta:4000:44:184:36:6:c",
+            "aberta:188:900:184:36:6:c",
+            "aberta:188:44:200:36:6:c",
+            "aberta:188:44:184:36:20:c",
+            "aberta:NaN:44:184:36:6:c",
+            "aberta:inf:44:184:36:6:c",
         ] {
             assert_eq!(interpretar_modo(ruim), None, "{ruim}");
         }
@@ -1497,15 +1569,21 @@ mod testes {
     #[test]
     fn troca_de_modo_pelo_rust_volta_ao_tamanho_padrao() {
         let mut i = interno_teste();
-        i.geometria = (104.0, 8.0); // aceno informado pela página
+        i.geometria = geo(72.0, 14.0, 56.0, 6.0, 3.0, false); // aceno informado pela página
         let _ = atualizar_modo_e_vigia(&mut i, ModoJanela::Repouso);
         assert_eq!(
-            i.geometria,
-            (104.0, 8.0),
+            i.geometria.cap_w, 56.0,
             "mesmo modo preserva a geometria da página"
         );
         let _ = atualizar_modo_e_vigia(&mut i, ModoJanela::Compacta);
-        assert_eq!(i.geometria, ModoJanela::Compacta.dimensoes_padrao());
+        assert_eq!(i.geometria, ModoJanela::Compacta.geometria_padrao());
+        // Padrões da §2.3: barrinha 40x5 em 72x14 sem recorte; cápsulas com recorte.
+        let r = ModoJanela::Repouso.geometria_padrao();
+        assert_eq!(
+            (r.w, r.h, r.cap_w, r.cap_h, r.recorte_capsula),
+            (72.0, 14.0, 40.0, 5.0, false)
+        );
+        assert!(ModoJanela::Aberta.geometria_padrao().recorte_capsula);
     }
 
     #[test]
@@ -1517,7 +1595,7 @@ mod testes {
             "WS_EX_TOOLWINDOW",
             "WS_EX_TOPMOST",
             "SWP_NOACTIVATE",
-            "CreateEllipticRgn",
+            "CreateRoundRectRgn",
             "SetWindowRgn",
         ] {
             assert!(
@@ -1545,8 +1623,42 @@ mod testes {
             producao.contains("pub fn aplicar_janela"),
             "corte do código de produção errado"
         );
-        assert!(producao.contains("recortar_elipse"));
+        assert!(producao.contains("janela::recortar("));
         assert!(producao.contains("posicionar_sem_ativar"));
+    }
+
+    /// O Tauri põe hashes na style-src; com hash, o navegador ignora 'unsafe-inline' e descarta
+    /// atributos style="" (no Windows real a casca andava meia largura para a direita).
+    #[test]
+    fn pagina_da_ilha_nao_usa_atributo_style() {
+        let html = include_str!("../../pilula/pilula.html");
+        assert!(
+            !html.contains(" style=\""),
+            "pilula.html não pode ter atributo style"
+        );
+        let js = include_str!("../../pilula/pilula.js");
+        assert!(!js.contains("setAttribute(\"style\""));
+    }
+
+    /// O ditado processa sem fração conhecida: o segmento da §2.5 (22%, 1,2 s linear) circula
+    /// nesse caso; no movimento reduzido, perímetro inteiro parado a 70%.
+    #[test]
+    fn arco_circula_no_processamento_sem_fracao() {
+        let js = include_str!("../../pilula/pilula.js");
+        assert!(js.contains("palco.dataset.segmento = \"girando\""));
+        assert!(js.contains("const indeterminado = processando && (pct == null"));
+        let html = include_str!("../../pilula/pilula.html");
+        assert!(html.contains("stroke-dasharray: 0.22 0.78"));
+        assert!(html.contains("animation: girar-arco 1.2s linear infinite"));
+        assert!(html.contains("--ilha-progresso: #0A84FF"));
+        let reduzido = html
+            .split("prefers-reduced-motion: reduce")
+            .nth(1)
+            .unwrap_or("");
+        assert!(reduzido.contains("[data-segmento=\"girando\"] .tracos .inteiro { opacity: 0.7; }"));
+        assert!(
+            reduzido.contains("[data-segmento] .tracos .segmento { animation: none; opacity: 0; }")
+        );
     }
 
     #[test]
@@ -1571,7 +1683,8 @@ mod testes {
             baixando_modelo: None,
             progresso_ativo: false,
             aviso_ate: None,
-            geometria: ModoJanela::Repouso.dimensoes_padrao(),
+            saida_ate: None,
+            geometria: ModoJanela::Repouso.geometria_padrao(),
             ultimo_nivel: Instant::now(),
             atalho: "Ctrl dir.".into(),
             canal: None,

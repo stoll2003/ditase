@@ -201,3 +201,51 @@ private struct PontaDeProgresso: View {
             .onAppear { respirar = true }
     }
 }
+
+/// Segmento azul do processamento sem fração conhecida (ditado e retranscrição), pela §2.5 de
+/// SPEC-windows-identidade.md, a mesma regra do Windows: 22% do perímetro fechado da cápsula,
+/// 2 pt, pontas redondas, uma volta linear a cada 1,2 s no sentido horário a partir do centro do
+/// topo, enquanto durar o estado real. Sem estimativa nem percentual. Com redução de movimento,
+/// o perímetro inteiro fica azul parado, 1,5 pt a 70%.
+struct ArcoDeProcessamento: View {
+    let largura: CGFloat
+    let altura: CGFloat
+    let reduzido: Bool
+    @State private var inicio = Date()
+    static let comprimento = 0.22
+    static let volta = 1.2
+    private static let azul = Color(red: 10 / 255, green: 132 / 255, blue: 1)
+
+    /// Início e fim do segmento no instante `t` (segundos), em frações do contorno. Passando de 1,
+    /// o segmento vira dois trechos para atravessar o ponto das 12h sem salto.
+    static func trechos(em t: Double) -> [(Double, Double)] {
+        let inicio = (t / volta).truncatingRemainder(dividingBy: 1)
+        let fim = inicio + comprimento
+        return fim <= 1 ? [(inicio, fim)] : [(inicio, 1), (0, fim - 1)]
+    }
+
+    var body: some View {
+        Group {
+            if reduzido {
+                CapsulaHoraria()
+                    .stroke(Self.azul, style: StrokeStyle(lineWidth: 1.5, lineCap: .round))
+                    .opacity(0.7)
+            } else {
+                // TimelineView(.animation) só existe enquanto este arco está na tela (processando).
+                TimelineView(.animation) { contexto in
+                    let t = max(0, contexto.date.timeIntervalSince(inicio))
+                    ZStack {
+                        ForEach(Array(Self.trechos(em: t).enumerated()), id: \.offset) { _, trecho in
+                            CapsulaHoraria().trim(from: trecho.0, to: trecho.1)
+                                .stroke(Self.azul, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                        }
+                    }
+                }
+            }
+        }
+        .padding(1)
+        .frame(width: largura, height: altura)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}

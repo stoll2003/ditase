@@ -3,8 +3,9 @@
 //! - `WS_EX_TOOLWINDOW` tira da barra de tarefas e do Alt+Tab.
 //! - `SetWindowPos` com `SWP_NOACTIVATE | SWP_NOZORDER` posiciona, redimensiona e mostra numa
 //!   chamada só, sem ativar a janela nem mostrar quadro deslocado.
-//! - `SetWindowRgn` com uma `CreateEllipticRgn` recorta a janela na meia elipse da ilha: o clique
-//!   fora da curva atravessa para a janela de baixo (pixel transparente do WebView2 ainda pegaria).
+//! - `SetWindowRgn` com uma `CreateRoundRectRgn` recorta a janela na cápsula da ilha (1 px físico
+//!   maior que o desenho): o clique nas quinas e no vão de cima atravessa para a janela de baixo
+//!   (pixel transparente do WebView2 ainda pegaria).
 //! - Tela que muda com o app aberto (resolução, escala, área de trabalho): uma janela oculta recebe
 //!   `WM_DISPLAYCHANGE` e `WM_SETTINGCHANGE`, e um gancho `EVENT_OBJECT_LOCATIONCHANGE` só do nosso
 //!   processo avisa quando alguém (o tao no `WM_DPICHANGED`, por exemplo) move a ilha para fora do
@@ -19,7 +20,7 @@ use std::sync::{
 use windows::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
     Graphics::Gdi::{
-        CreateEllipticRgn, CreateRectRgn, DeleteObject, GetWindowRgn, MonitorFromWindow,
+        CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetWindowRgn, MonitorFromWindow,
         PtInRegion, SetWindowRgn, COMPLEXREGION, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY,
     },
     System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentProcessId},
@@ -75,6 +76,37 @@ pub fn retangulo(hwnd: isize) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
+/// Mantém a moldura e seus botões nativos. Versões antigas do Windows mantêm as cores do sistema
+/// quando o DWM não oferece estes atributos.
+pub fn pintar_barra_de_titulo(
+    janela: &tauri::WebviewWindow,
+    fundo: tauri::window::Color,
+    texto: tauri::window::Color,
+) {
+    use windows::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_CAPTION_COLOR, DWMWA_SYSTEMBACKDROP_TYPE,
+        DWMWA_TEXT_COLOR,
+    };
+
+    let Ok(hwnd) = janela.hwnd() else { return };
+    let colorref = |cor: tauri::window::Color| u32::from_le_bytes([cor.0, cor.1, cor.2, 0]);
+    let atributos = [
+        (DWMWA_SYSTEMBACKDROP_TYPE, DWMSBT_NONE.0 as u32),
+        (DWMWA_CAPTION_COLOR, colorref(fundo)),
+        (DWMWA_TEXT_COLOR, colorref(texto)),
+    ];
+    for (atributo, valor) in atributos {
+        let _ = unsafe {
+            DwmSetWindowAttribute(
+                HWND(hwnd.0),
+                atributo,
+                (&valor as *const u32).cast(),
+                size_of::<u32>() as u32,
+            )
+        };
+    }
+}
+
 /// DPI que a janela usa de fato (é a escala em que o WebView2 desenha).
 pub fn dpi_da_janela(hwnd: isize) -> u32 {
     unsafe { GetDpiForWindow(HWND(hwnd as *mut _)) }
@@ -94,7 +126,7 @@ pub fn dpi_do_monitor(hwnd: isize) -> u32 {
 }
 
 /// Tipo da região da janela (`GetWindowRgn`: 0 sem região, 1 vazia, 2 retângulo, 3 complexa) e
-/// se o canto inferior esquerdo está fora dela (como deve estar na meia elipse).
+/// se o canto inferior esquerdo está fora dela (como deve estar na cápsula).
 pub fn estado_da_regiao(hwnd: isize) -> (i32, bool) {
     unsafe {
         let rgn = CreateRectRgn(0, 0, 0, 0);
@@ -111,8 +143,8 @@ pub fn estado_da_regiao(hwnd: isize) -> (i32, bool) {
     }
 }
 
-/// Verdadeiro quando a região é a meia elipse: complexa e com o canto inferior esquerdo fora.
-pub fn regiao_eliptica(hwnd: isize) -> bool {
+/// Verdadeiro quando a região é a cápsula: complexa e com o canto inferior esquerdo fora.
+pub fn regiao_recortada(hwnd: isize) -> bool {
     let (tipo, canto_fora) = estado_da_regiao(hwnd);
     tipo == COMPLEXREGION.0 && canto_fora
 }
@@ -132,12 +164,17 @@ pub fn posicionar_sem_ativar(hwnd: isize, x: i32, y: i32, w: i32, h: i32, mostra
     }
 }
 
-/// Recorta a janela na elipse de retângulo envolvente `(l, t, r, b)` (pixels físicos relativos à
-/// janela; ver `pilula::regiao_meia_elipse`). Em sucesso o sistema passa a ser dono da região; em
-/// falha ela é apagada aqui e a janela fica retangular (só perde o clique atravessando os cantos).
-pub fn recortar_elipse(hwnd: isize, l: i32, t: i32, r: i32, b: i32) {
+/// Recorta a janela na cápsula `(esquerda, topo, direita, base, diâmetro)` em pixels físicos
+/// relativos à janela (ver `pilula::regiao_capsula`), ou tira o recorte (`None`: a janela inteira
+/// pega o clique, na barrinha e durante a transição). Em sucesso o sistema passa a ser dono da
+/// região; em falha ela é apagada aqui.
+pub fn recortar(hwnd: isize, regiao: Option<(i32, i32, i32, i32, i32)>) {
     unsafe {
-        let rgn = CreateEllipticRgn(l, t, r, b);
+        let Some((l, t, r, b, d)) = regiao else {
+            let _ = SetWindowRgn(HWND(hwnd as *mut _), None, true);
+            return;
+        };
+        let rgn = CreateRoundRectRgn(l, t, r, b, d, d);
         if rgn.is_invalid() {
             return;
         }
@@ -179,15 +216,17 @@ pub fn tela_cheia_ativa() -> bool {
     }
 }
 
-/// Verdadeiro quando o ponteiro do mouse está fora do retângulo da janela.
-pub fn cursor_fora_da_janela(hwnd: isize) -> bool {
+/// Verdadeiro quando o ponteiro está fora do retângulo da janela ampliado em `lado` px para os
+/// lados e `baixo` px para baixo; com `ate_o_topo`, a zona sobe até a borda de cima da tela.
+pub fn cursor_fora_da_zona(hwnd: isize, lado: i32, baixo: i32, ate_o_topo: bool) -> bool {
     unsafe {
         let mut pt = POINT::default();
         let mut rc = RECT::default();
         if GetCursorPos(&mut pt).is_err() || GetWindowRect(HWND(hwnd as *mut _), &mut rc).is_err() {
             return false;
         }
-        pt.x < rc.left || pt.x >= rc.right || pt.y < rc.top || pt.y >= rc.bottom
+        let topo = if ate_o_topo { i32::MIN } else { rc.top };
+        pt.x < rc.left - lado || pt.x >= rc.right + lado || pt.y < topo || pt.y >= rc.bottom + baixo
     }
 }
 

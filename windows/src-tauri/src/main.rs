@@ -29,9 +29,8 @@ use std::{
 
 use serde_json::{json, Value};
 use tauri::{
-    window::{Color, Effect, EffectState, EffectsBuilder},
-    AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder,
-    WindowEvent,
+    window::Color, AppHandle, DragDropEvent, Manager, RunEvent, State, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::ManagerExt as _;
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
@@ -164,34 +163,25 @@ pub fn mostrar_principal(app: &AppHandle) {
     }
 }
 
-fn abrir_principal(app: &AppHandle) -> tauri::Result<()> {
-    let escuro = nativo::sistema::tema_app_escuro();
-    let fundo = if escuro {
-        Color(0x20, 0x20, 0x20, 0xFF)
+fn cores_da_janela(escuro: bool) -> (Color, Color) {
+    if escuro {
+        (Color(0x19, 0x19, 0x19, 0xFF), Color(0xF5, 0xF5, 0xF5, 0xFF))
     } else {
-        Color(0xF3, 0xF3, 0xF3, 0xFF)
-    };
-    let usar_mica = nativo::sistema::suporta_mica();
-    let mut construtor =
-        WebviewWindowBuilder::new(app, "principal", WebviewUrl::App("index.html".into()))
-            .title("Dita.se")
-            .inner_size(1120.0, 760.0)
-            .min_inner_size(820.0, 560.0)
-            .background_color(fundo)
-            .on_navigation(navegacao_permitida)
-            .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
-    if usar_mica {
-        construtor = construtor
-            .transparent(true)
-            .effects(
-                EffectsBuilder::new()
-                    .effect(Effect::Mica)
-                    .state(EffectState::FollowsWindowActiveState)
-                    .build(),
-            )
-            .initialization_script("document.documentElement.dataset.mica='1';");
+        (Color(0xED, 0xED, 0xEF, 0xFF), Color(0x17, 0x17, 0x17, 0xFF))
     }
-    let janela = construtor.build()?;
+}
+
+fn abrir_principal(app: &AppHandle) -> tauri::Result<()> {
+    let (fundo, texto) = cores_da_janela(nativo::sistema::tema_app_escuro());
+    let janela = WebviewWindowBuilder::new(app, "principal", WebviewUrl::App("index.html".into()))
+        .title("Dita.se")
+        .inner_size(1120.0, 760.0)
+        .min_inner_size(820.0, 560.0)
+        .background_color(fundo)
+        .on_navigation(navegacao_permitida)
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        .build()?;
+    nativo::janela::pintar_barra_de_titulo(&janela, fundo, texto);
     #[cfg(windows)]
     if let Ok(h) = janela.hwnd() {
         nativo::colagem::definir_dono(h.0 as isize);
@@ -212,6 +202,13 @@ fn abrir_principal(app: &AppHandle) -> tauri::Result<()> {
                 if let Some(b) = c.bandeja.get() {
                     b.janela_aberta();
                 }
+            }
+        }
+        WindowEvent::ThemeChanged(tema) => {
+            if let Some(j) = app2.get_webview_window("principal") {
+                let (fundo, texto) = cores_da_janela(*tema == tauri::Theme::Dark);
+                let _ = j.set_background_color(Some(fundo));
+                nativo::janela::pintar_barra_de_titulo(&j, fundo, texto);
             }
         }
         // O arraste nativo entrega o caminho real (o WebKit do Mac só entregava o nome).

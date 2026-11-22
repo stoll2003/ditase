@@ -71,8 +71,7 @@ export function Segmented<T extends string = string>({
         aria-label={label}
         onKeyDown={onKeyDown}
         className={cn(
-          "inline-flex items-center bg-foreground/[0.05] p-0.5",
-          win ? "rounded-[5px]" : "rounded-full",
+          "inline-flex items-center rounded-full bg-foreground/[0.05] p-0.5",
           size === "sm" ? "h-8" : "h-9",
           className,
         )}
@@ -91,9 +90,8 @@ export function Segmented<T extends string = string>({
               onClick={(e) => select(option.value, e.detail === 0)}
               className={cn(
                 "relative h-full font-medium transition-[color,scale] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] disabled:opacity-40",
-                win
-                  ? "rounded-[3px] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-                  : "rounded-full active:scale-[0.97]",
+                "rounded-full",
+                !win && "active:scale-[0.97]",
                 size === "sm" ? "px-3 text-[0.8125rem]" : "px-4 text-sm",
                 active
                   ? "text-foreground"
@@ -104,7 +102,7 @@ export function Segmented<T extends string = string>({
                 <motion.span
                   layoutId={pillId}
                   transition={instant ? { duration: 0 } : spring}
-                  className={cn("absolute inset-0 bg-surface-raised", win ? "rounded-[3px]" : "rounded-full")}
+                  className="absolute inset-0 rounded-full bg-surface-raised"
                 />
               )}
               <span className="relative">{option.label}</span>

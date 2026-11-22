@@ -24,17 +24,6 @@ const sizes: Record<ButtonSize, { base: string; icon: string; glyph: string }> =
 const base =
   "inline-flex shrink-0 items-center justify-center rounded-full font-medium whitespace-nowrap transition-[background-color,color,scale,opacity] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] select-none active:scale-[0.97] disabled:pointer-events-none disabled:opacity-40";
 
-const baseWin =
-  "inline-flex shrink-0 items-center justify-center rounded-[4px] font-medium whitespace-nowrap transition-[background-color,color,opacity] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40";
-
-const winVariantExtra: Record<ButtonVariant, string> = {
-  primary: "",
-  secondary:
-    "border border-[rgba(0,0,0,0.0578)] border-b-[rgba(0,0,0,0.1622)] dark:border-[rgba(255,255,255,0.0698)] dark:border-t-[rgba(255,255,255,0.093)] active:text-muted-foreground",
-  quiet: "active:text-muted-foreground",
-  danger: "active:text-muted-foreground",
-};
-
 export type ButtonProps = React.ComponentProps<"button"> & {
   variant?: ButtonVariant;
   size?: ButtonSize;
@@ -64,7 +53,7 @@ export function Button({
       type={type}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
-      className={cn(win ? baseWin : base, sizes[size].base, variants[variant], win && winVariantExtra[variant], className)}
+      className={cn(base, win && "active:scale-100", sizes[size].base, variants[variant], className)}
       {...props}
     >
       {loading ? (
@@ -120,7 +109,7 @@ export function IconButton({
       title={tooltip ? undefined : label}
       disabled={disabled || loading}
       aria-busy={loading || undefined}
-      className={cn(win ? baseWin : base, sizes[size].icon, variants[variant], win && winVariantExtra[variant], className)}
+      className={cn(base, win && "active:scale-100", sizes[size].icon, variants[variant], className)}
       {...props}
     >
       {loading ? (

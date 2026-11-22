@@ -54,6 +54,7 @@ enum EstadoFala {
 #[derive(Clone)]
 enum EstadoModelo {
     Parado,
+    Conectando(&'static ConjuntoDeModelo, u64),
     Baixando(&'static ConjuntoDeModelo, u64, u64),
     Conferindo(&'static ConjuntoDeModelo),
     Falhou(&'static ConjuntoDeModelo, String),
@@ -102,6 +103,10 @@ fn instalado(pasta: &Path, conjunto: &ConjuntoDeModelo) -> bool {
     })
 }
 
+fn progresso_parcial(pasta: &Path, modelo: &ConjuntoDeModelo) -> u64 {
+    baixador(pasta, modelo, &modelo.arquivos[0]).map_or(0, |b| b.ja_baixado())
+}
+
 /// HTTP com Range para o baixador do núcleo.
 struct TransporteHttp(ureq::Agent);
 
@@ -125,7 +130,16 @@ impl TransporteDeDownload for TransporteHttp {
             pedido = pedido.set("Range", &format!("bytes={a_partir_de}-"));
         }
         match pedido.call() {
-            Ok(r) => Ok((r.status(), Box::new(r.into_reader()))),
+            Ok(r) => {
+                if a_partir_de > 0 {
+                    let intervalo = r.header("Content-Range").unwrap_or("ausente");
+                    nota(format!(
+                        "retomada de modelo: solicitado byte {a_partir_de}, HTTP {}, Content-Range {intervalo}",
+                        r.status()
+                    ));
+                }
+                Ok((r.status(), Box::new(r.into_reader())))
+            }
             Err(ureq::Error::Status(codigo, _)) => Ok((codigo, Box::new(io::empty()))),
             Err(e) => Err(io::Error::other(e.to_string())),
         }
@@ -265,6 +279,20 @@ impl MotoresLocais {
                 }
             }
         });
+    }
+
+    fn iniciar_download_modelo(&self, alvo: &'static ConjuntoDeModelo) -> bool {
+        let mut estado = self.modelo.lock().unwrap();
+        if matches!(
+            *estado,
+            EstadoModelo::Conectando(..) | EstadoModelo::Baixando(..) | EstadoModelo::Conferindo(_)
+        ) {
+            return false;
+        }
+        self.cancelar.store(false, Ordering::Release);
+        let parcial = progresso_parcial(&self.pasta, alvo);
+        *estado = EstadoModelo::Conectando(alvo, parcial);
+        true
     }
 
     fn modelo_ia_caminho(&self) -> Option<PathBuf> {
@@ -501,7 +529,9 @@ impl Motores for MotoresLocais {
         let estado = self.modelo.lock().unwrap().clone();
         let escolhido = modelo_do_catalogo(&self.prefs.modelo());
         let alvo = match &estado {
-            EstadoModelo::Baixando(modelo, ..) | EstadoModelo::Conferindo(modelo) => *modelo,
+            EstadoModelo::Conectando(modelo, _)
+            | EstadoModelo::Baixando(modelo, ..)
+            | EstadoModelo::Conferindo(modelo) => *modelo,
             _ => escolhido.unwrap_or(&QWEN),
         };
         let a = &alvo.arquivos[0];
@@ -511,6 +541,12 @@ impl Motores for MotoresLocais {
             return v;
         }
         match estado {
+            EstadoModelo::Conectando(_, parcial) => {
+                v["estado"] = json!("baixando");
+                v["feito"] = json!(parcial);
+                // A resposta HTTP ainda pode confirmar o Range ou mandar recomeçar.
+                v["conectando"] = json!(true);
+            }
             EstadoModelo::Baixando(_, feito, total) => {
                 v["estado"] = json!("baixando");
                 v["feito"] = json!(feito);
@@ -525,9 +561,7 @@ impl Motores for MotoresLocais {
             }
             _ => {
                 v["estado"] = json!("ausente");
-                v["feito"] = json!(baixador(&self.pasta, alvo, a)
-                    .map(|b| b.ja_baixado())
-                    .unwrap_or(0));
+                v["feito"] = json!(progresso_parcial(&self.pasta, alvo));
                 if let EstadoModelo::Falhou(modelo, mensagem) = estado {
                     if modelo == alvo {
                         v["estado"] = json!("falhou");
@@ -545,13 +579,8 @@ impl Motores for MotoresLocais {
             return Err("A IA local não está disponível nesta instalação.".into());
         }
         let alvo = modelo_do_catalogo(&self.prefs.modelo()).unwrap_or(&QWEN);
-        {
-            let mut m = self.modelo.lock().unwrap();
-            if matches!(*m, EstadoModelo::Baixando(..) | EstadoModelo::Conferindo(_)) {
-                return Ok(());
-            }
-            self.cancelar.store(false, Ordering::Release);
-            *m = EstadoModelo::Baixando(alvo, 0, alvo.tamanho());
+        if !self.iniciar_download_modelo(alvo) {
+            return Ok(());
         }
         // O modelo de fala que falhou ao baixar tenta de novo junto.
         if let Some(eu) = self.eu.upgrade() {
@@ -708,6 +737,28 @@ mod testes {
             m.falantes().is_none(),
             "falantes sem conferência foram carregados"
         );
+    }
+
+    #[test]
+    fn retomada_preserva_progresso_enquanto_conecta() {
+        let tmp = crate::caminhos::pasta_de_teste();
+        let prefs = Arc::new(Preferencias::abrir(tmp.path().join("p.json")));
+        let m = MotoresLocais::novo(tmp.path().to_path_buf(), prefs, Arc::new(|| {}));
+        let parcial = 466_076_318;
+        let baixador = baixador(tmp.path(), &QWEN, &QWEN.arquivos[0]).unwrap();
+        std::fs::File::create(baixador.parcial())
+            .unwrap()
+            .set_len(parcial)
+            .unwrap();
+
+        assert!(m.iniciar_download_modelo(&QWEN));
+        assert!(!m.iniciar_download_modelo(&QWEN_2B));
+        let estado = m.modelo.lock().unwrap();
+        let EstadoModelo::Conectando(alvo, feito) = *estado else {
+            panic!("esperava conexão pendente");
+        };
+        assert_eq!(alvo, &QWEN);
+        assert_eq!(feito, parcial);
     }
 
     /// M7: um .gguf avulso na pasta, mesmo escolhido nas preferências, não é usado nem listado.

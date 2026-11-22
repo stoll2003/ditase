@@ -147,7 +147,7 @@ export default function App() {
   return (
     // Com "user", quem pediu movimento reduzido no sistema fica sem deslocamento e sem escala: só fades.
     <MotionConfig reducedMotion="user">
-    <div className={cn("flex h-full bg-surface", win ? "p-0" : "p-1.5 pl-0")}
+    <div className="flex h-full bg-surface p-1.5 pl-0"
       onDragEnter={(event) => { if (deArquivo(event)) { event.preventDefault(); ninho.current++; arrastar(true); } }}
       onDragOver={(event) => { if (deArquivo(event)) { event.preventDefault(); event.dataTransfer.dropEffect = disponivel ? "copy" : "none"; } }}
       onDragLeave={() => { ninho.current = Math.max(0, ninho.current - 1); if (!ninho.current) arrastar(false); }}
@@ -159,7 +159,7 @@ export default function App() {
       <input ref={entrada} type="file" hidden multiple accept={aceite}
         onChange={(event) => { adicionar(Array.from(event.target.files ?? [])); event.target.value = ""; }} />
       {/* O topo da lateral fica livre no Mac (botões da janela); no Windows a barra de título é nativa. */}
-      <nav aria-label="Seções" className={cn("flex w-[13rem] shrink-0 flex-col px-3 pb-3", win ? "pt-1" : "pt-12")}>
+      <nav aria-label="Seções" className={cn("flex w-[13rem] shrink-0 flex-col px-3 pb-3", win ? "pt-2" : "pt-12")}>
         {!win && <p className="px-2 pb-4 text-[0.9375rem] font-semibold tracking-tight">Dita.se</p>}
         <ul className="flex flex-col gap-0.5">
           {paginas.map(({ id, nome, icone: Icone }) => (
@@ -177,7 +177,7 @@ export default function App() {
                 onDragLeave={() => window.clearTimeout(mola.current)}
                 className={cn(
                   "relative isolate flex w-full items-center gap-2.5 font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-                  win ? "h-9 rounded-[4px] px-3 text-[0.875rem]" : "h-8 rounded-lg px-2 text-[0.8125rem]",
+                  win ? "h-9 rounded-lg px-3 text-[0.875rem]" : "h-8 rounded-lg px-2 text-[0.8125rem]",
                   atual === id ? "text-foreground" : "text-muted-foreground hover:bg-foreground/[0.04] hover:text-foreground",
                 )}
               >
@@ -185,10 +185,7 @@ export default function App() {
                   <motion.span
                     layoutId="nav-ativo"
                     transition={indicador}
-                    className={cn(
-                      "absolute inset-0 -z-10",
-                      win ? "rounded-[4px] bg-foreground/[0.06]" : "rounded-lg bg-foreground/[0.08]",
-                    )}
+                    className="absolute inset-0 -z-10 rounded-lg bg-foreground/[0.08]"
                   >
                     {win && (
                       <span
@@ -215,12 +212,7 @@ export default function App() {
       <div className="relative flex min-w-0 flex-1">
       <main
         ref={rolagem}
-        className={cn(
-          "rolagem min-w-0 flex-1 bg-surface-inset",
-          win
-            ? "rounded-none rounded-tl-lg border-t border-l border-(--traco-camada)"
-            : "rounded-2xl",
-        )}
+        className={cn("rolagem min-w-0 flex-1 bg-surface-inset", win ? "rounded-xl" : "rounded-2xl")}
       >
         {/* A página nova entra subindo 6 px; a antiga some na hora, então navegar não espera animação. */}
         <motion.div

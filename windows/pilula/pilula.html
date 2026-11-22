@@ -4,65 +4,29 @@
 <meta charset="utf-8">
 <title>Dita.se</title>
 <style>
+  /* Ilha do Windows 1.0.2 (SPEC-windows-identidade.md §2): a pílula do Mac no topo da tela.
+     Escura e igual nos dois temas do sistema. Sem atributo style no HTML: o Tauri põe hashes na
+     style-src e o navegador passa a descartar style inline (era o que deslocava a casca no app). */
   :root {
-    color-scheme: light dark;
-    --ease-entrada: cubic-bezier(0.23, 1, 0.32, 1);
-    --ease-saida: cubic-bezier(0.32, 0, 0.67, 0);
-    --ease-troca: cubic-bezier(0.77, 0, 0.175, 1);
-    --dur-aceno: 120ms;
-    --dur-entrada: 240ms;
-    --dur-saida: 180ms;
-    --dur-conteudo-in: 160ms;
-    --dur-conteudo-out: 100ms;
-    --dur-fade-reduzido: 120ms;
-
-    --ilha-fundo: #FBFBFB;
-    --ilha-borda: #DFDFDF;
-    --ilha-texto: #1A1A1A;
-    --ilha-texto-2: #5C5C5C;
-    --ilha-gravando: #C42B1C;
-    --ilha-acento: #005FB8;
-    --ilha-sobre-acento: #FFFFFF;
-    --ilha-ponta-contorno: #FFFFFF;
-    --ilha-hover: rgba(0, 0, 0, .06);
-    --ilha-pressionado: rgba(0, 0, 0, .09);
-    --ilha-chip: #EDEDED;
-    --ilha-brilho: #0078D4;
-  }
-
-  @media (prefers-color-scheme: dark) {
-    :root:not([data-tema="claro"]) {
-      --ilha-fundo: #2C2C2C;
-      --ilha-borda: #424242;
-      --ilha-texto: #FFFFFF;
-      --ilha-texto-2: #C5C5C5;
-      --ilha-gravando: #FF99A4;
-      --ilha-acento: #60CDFF;
-      --ilha-sobre-acento: #000000;
-      --ilha-ponta-contorno: #000000;
-      --ilha-hover: rgba(255, 255, 255, .08);
-      --ilha-pressionado: rgba(255, 255, 255, .05);
-      --ilha-chip: #3D3D3D;
-      --ilha-brilho: #99EBFF;
-    }
-  }
-
-  :root[data-tema="claro"] { color-scheme: light; }
-
-  :root[data-tema="escuro"] {
-    color-scheme: dark;
-    --ilha-fundo: #2C2C2C;
-    --ilha-borda: #424242;
+    /* Sem color-scheme: com "dark", o fundo da página deixa de ser transparente sobre papel claro. */
+    --ilha-fundo: #121212;
+    --ilha-fundo-aberta: #1A1A1A;
+    --ilha-traco: rgba(255, 255, 255, .16);
+    --ilha-traco-barrinha: rgba(255, 255, 255, .40);
+    --ilha-traco-aceno: rgba(255, 255, 255, .55);
+    --ilha-aro: rgba(0, 0, 0, .45);
     --ilha-texto: #FFFFFF;
-    --ilha-texto-2: #C5C5C5;
-    --ilha-gravando: #FF99A4;
-    --ilha-acento: #60CDFF;
-    --ilha-sobre-acento: #000000;
-    --ilha-ponta-contorno: #000000;
-    --ilha-hover: rgba(255, 255, 255, .08);
-    --ilha-pressionado: rgba(255, 255, 255, .05);
-    --ilha-chip: #3D3D3D;
-    --ilha-brilho: #99EBFF;
+    --ilha-texto-2: #B3B3B3;
+    --ilha-hover: rgba(255, 255, 255, .10);
+    --ilha-pressionado: rgba(255, 255, 255, .06);
+    --ilha-chip: rgba(255, 255, 255, .08);
+    --ilha-divisor: rgba(255, 255, 255, .16);
+    --ilha-gravar: #FF453A;
+    --ilha-progresso: #0A84FF;
+    --ilha-aviso: #FF9F0A;
+    --ilha-info: #0A84FF;
+    --ilha-fonte: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    --ilha-mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
   }
 
   html, body {
@@ -73,325 +37,211 @@
     overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
-    font: 14px/18px "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+    font: 600 12px/16px var(--ilha-fonte);
     color: var(--ilha-texto);
   }
 
-  /* O palco tem o tamanho exato da janela (W x H do estado). A ilha fica centrada no topo. */
-  .palco {
-    position: relative;
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
-  }
+  .palco { position: relative; width: 100%; height: 100%; overflow: hidden; }
 
-  /* Contorno único: meia elipse com topo reto (rx = W/2, ry = H), desenhada em SVG.
-     O mesmo contorno vira o recorte nativo (CreateEllipticRgn) e o arco de progresso. */
-  .forma {
+  /* Uma forma só: barrinha, recolhida e aberta são a mesma .casca com outro tamanho. Tamanho,
+     topo e raio vêm do laço da forma (pilula.js), via CSSOM. */
+  /* Centraliza mesmo quando o host redimensiona a janela depois do último quadro. */
+  .casca, .tracos {
     position: absolute;
     left: 50%;
-    top: 0;
-    overflow: visible;
-    pointer-events: none;
+    transform: translateX(-50%);
   }
-
-  .forma .fundo { fill: var(--ilha-fundo); }
-  .forma .borda { fill: none; stroke: var(--ilha-borda); stroke-width: 1; }
-
-  /* Repouso e aceno: bordinha sólida em acento com contorno oposto de 1 px. */
-  .ponta .fundo { fill: var(--ilha-acento); }
-  .ponta .borda { stroke: var(--ilha-ponta-contorno); }
-
-  .ponta {
-    z-index: 3;
-    transition: opacity var(--dur-aceno) var(--ease-entrada);
+  .casca {
+    box-sizing: border-box;
+    background: var(--ilha-fundo-aberta);
+    box-shadow: inset 0 0 0 1px var(--ilha-traco), 0 0 0 1px var(--ilha-aro);
+    overflow: hidden;
+    transition: background-color 180ms ease, box-shadow 180ms ease;
   }
+  .palco[data-estado="repouso"] .casca {
+    background: var(--ilha-fundo);
+    box-shadow: inset 0 0 0 1px var(--ilha-traco-barrinha), 0 0 0 1px rgba(0, 0, 0, .35);
+  }
+  .palco[data-estado="aceno"] .casca {
+    background: var(--ilha-fundo);
+    box-shadow: inset 0 0 0 1px var(--ilha-traco-aceno), 0 0 0 1px rgba(0, 0, 0, .35);
+  }
+  .palco[data-recolhida="1"] .casca { background: var(--ilha-fundo); }
 
+  /* Alvo da barrinha: a janela inteira de 72x14 (maior que a barrinha). */
   .alvo-ponta {
     position: absolute;
-    left: 50%;
-    top: 0;
-    transform: translateX(-50%);
+    inset: 0;
     cursor: pointer;
     z-index: 4;
   }
+  .palco:not([data-estado="repouso"]):not([data-estado="aceno"]) .alvo-ponta { display: none; }
 
-  .palco:not([data-estado="repouso"]):not([data-estado="aceno"]) .ponta,
-  .palco:not([data-estado="repouso"]):not([data-estado="aceno"]) .alvo-ponta {
-    opacity: 0;
+  /* Contorno de progresso e segmento: caminho fechado da cápsula recuado 1 px (§2.4). */
+  .tracos {
+    overflow: visible;
     pointer-events: none;
+    z-index: 3;
+  }
+  .tracos path { fill: none; stroke: var(--ilha-progresso); stroke-width: 2; stroke-linecap: round; }
+
+  .tracos .contorno {
+    stroke-dasharray: var(--fracao, 0) 1;
+    opacity: 0;
+    transition: stroke-dasharray 240ms ease, opacity 160ms ease;
+  }
+  .palco[data-contorno="ativo"] .tracos .contorno { opacity: 1; }
+  .palco[data-estado="erro"] .tracos .contorno {
+    stroke: var(--ilha-gravar);
+    stroke-width: 1.5;
+    stroke-dasharray: none;
+    opacity: 1;
   }
 
-  .casca {
+  /* Processando sem fração (§2.5): segmento de 22% girando em 1,2 s linear, sentido horário a
+     partir do topo. A mesma animação vale em todos os estados do segmento, então trocar de
+     estado (recolhida/aberta, saída) não reinicia a volta. */
+  .tracos .segmento {
+    stroke-dasharray: 0.22 0.78;
+    stroke-dashoffset: 0;
+    opacity: 0;
+    transition: opacity 160ms ease;
+  }
+  .tracos .inteiro { stroke-width: 1.5; opacity: 0; }
+  .palco[data-segmento] .tracos .segmento { animation: girar-arco 1.2s linear infinite; }
+  .palco[data-segmento="girando"] .tracos .segmento { opacity: 1; transition: opacity 120ms ease; }
+
+  .palco[data-segmento="saindo"] .tracos .segmento { animation-play-state: paused; }
+
+  @keyframes girar-arco {
+    from { stroke-dashoffset: 0; }
+    to { stroke-dashoffset: -1; }
+  }
+
+  /* Conteúdo parado na posição final, cortado pela casca. */
+  .conteudo {
     position: absolute;
     left: 50%;
     top: 0;
-    transform: translateX(-50%) translateY(0);
-    will-change: transform;
-    transition:
-      transform var(--dur-entrada) var(--ease-entrada),
-      opacity var(--dur-aceno) var(--ease-entrada);
-  }
-
-  .palco[data-recolhendo="1"] .casca {
-    transition:
-      transform var(--dur-saida) var(--ease-saida),
-      opacity var(--dur-saida) var(--ease-saida);
-  }
-
-  .palco[data-recolhendo="1"] button {
-    pointer-events: none;
-  }
-
-  .palco[data-estado="repouso"] .casca,
-  .palco[data-estado="aceno"] .casca {
-    transform: translateX(-50%) translateY(-100%);
-    opacity: 0;
-    pointer-events: none;
-  }
-
-  .forma .arco-erro {
-    fill: none;
-    stroke: var(--ilha-gravando);
-    stroke-width: 2.5;
-    stroke-linecap: round;
-    stroke-dasharray: 0.64 1;
-    stroke-dashoffset: -0.18;
-    opacity: 0;
-    transition: opacity 200ms var(--ease-entrada);
-  }
-
-  .palco[data-estado="erro"] .forma .arco-erro {
-    opacity: 1;
-  }
-
-  /* Arco de progresso: mesma meia elipse, 1 px para dentro. */
-  .contorno {
-    position: absolute;
-    left: 0;
-    top: 0;
-    overflow: visible;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity 250ms var(--ease-entrada);
-  }
-
-  .contorno.ativo {
-    opacity: 1;
-  }
-
-  .contorno path {
-    fill: none;
-    stroke: var(--ilha-acento);
-    stroke-width: 2;
-    stroke-linecap: round;
-    stroke-dasharray: 1;
-    stroke-dashoffset: 1;
-    transition: stroke 120ms ease;
-  }
-
-  .contorno.brilho path { stroke: var(--ilha-brilho); }
-  .contorno.erro path { stroke: var(--ilha-gravando); }
-
-  /* Linha de conteúdo: centrada em X, centro vertical por estado (--centro). */
-  .conteudo {
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: calc(var(--centro, 22px) - 16px);
-    height: 32px;
+    height: 100%;
+    transform: translateX(-50%);
     display: flex;
+    align-items: center;
     justify-content: center;
-    align-items: center;
-    opacity: 1;
-    transition: opacity var(--dur-conteudo-in) var(--ease-entrada) 60ms;
-  }
-
-  .palco[data-estado="repouso"] .conteudo,
-  .palco[data-estado="aceno"] .conteudo {
+    white-space: nowrap;
     opacity: 0;
-    transition: opacity var(--dur-conteudo-out) var(--ease-saida) 0ms;
+    transition: opacity 100ms ease;
+    pointer-events: none;
   }
+  .palco[data-conteudo="visivel"] .conteudo { opacity: 1; transition: opacity 160ms ease; }
+  .palco[data-conteudo="visivel"][data-interativo="1"] .conteudo { pointer-events: auto; }
 
-  .vista {
-    display: none;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .vista.ativa {
-    display: flex;
-  }
+  .vista { display: none; align-items: center; gap: 8px; flex-shrink: 0; }
+  .vista.ativa { display: flex; }
 
   .btn-ditar {
     all: unset;
     box-sizing: border-box;
     display: inline-flex;
     align-items: center;
-    justify-content: center;
     gap: 6px;
-    width: 84px;
-    height: 32px;
-    border-radius: 16px;
-    background: var(--ilha-acento);
-    color: var(--ilha-sobre-acento);
-    font-weight: 600;
-    font-size: 14px;
+    height: 28px;
+    padding: 0 12px;
+    border-radius: 14px;
+    color: var(--ilha-texto);
+    font: 600 12px/16px var(--ilha-fonte);
     cursor: pointer;
-    transition: transform 100ms var(--ease-entrada), filter 100ms ease;
+    transition: background-color 120ms ease;
   }
+  .btn-ditar:hover { background: var(--ilha-hover); }
+  .btn-ditar:active { background: var(--ilha-pressionado); }
 
-  .btn-ditar:hover { filter: brightness(1.06); }
-  .btn-ditar:active { transform: scale(0.96); filter: brightness(0.95); }
+  .divisor { width: 1px; height: 14px; background: var(--ilha-divisor); margin: 0 0; }
 
-  .chip {
+  .kbd {
     display: inline-flex;
     align-items: center;
-    justify-content: center;
-    min-width: 64px;
-    max-width: 80px;
-    height: 24px;
-    padding: 0 10px;
-    box-sizing: border-box;
-    border-radius: 12px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 6px;
     background: var(--ilha-chip);
     color: var(--ilha-texto-2);
-    font: 12px/16px "Segoe UI Variable Small", "Segoe UI", system-ui, sans-serif;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    font-weight: 500;
   }
 
-  /* Botões circulares 32x32. */
-  .btn-icone {
+  .ponto { width: 6px; height: 6px; border-radius: 50%; background: var(--ilha-gravar); flex: none; }
+  .ponto-aviso { width: 7px; height: 7px; border-radius: 50%; background: var(--ilha-info); flex: none; }
+  .palco[data-alerta="1"] .ponto-aviso { background: var(--ilha-aviso); }
+  .palco[data-estado="erro"] .ponto-aviso { background: var(--ilha-gravar); }
+
+  .barras { display: flex; align-items: center; gap: 3px; height: 18px; }
+  .barras i {
+    display: block;
+    width: 3px;
+    height: 18px;
+    border-radius: 1.5px;
+    background: #FFFFFF;
+    opacity: 0.55;
+    transform: scaleY(0.22);
+    transform-origin: center;
+  }
+
+  .tempo {
+    width: 34px;
+    font: 500 12px/16px var(--ilha-mono);
+    font-variant-numeric: tabular-nums;
+    color: var(--ilha-texto-2);
+  }
+
+  .btn-circ {
     all: unset;
     box-sizing: border-box;
     display: grid;
     place-items: center;
-    width: 32px;
-    height: 32px;
-    border-radius: 16px;
-    background: var(--ilha-chip);
-    color: var(--ilha-texto);
+    width: 28px;
+    height: 28px;
+    border-radius: 14px;
+    background: var(--ilha-hover);
     cursor: pointer;
     flex-shrink: 0;
-    transition: filter 120ms ease;
+    transition: background-color 120ms ease;
   }
+  .btn-circ svg { opacity: 0.8; }
+  .btn-circ.cancelar:hover { background: var(--ilha-gravar); }
+  .btn-circ.cancelar:hover svg { opacity: 1; }
+  .btn-circ.parar { background: var(--ilha-gravar); }
+  .btn-circ.parar:hover { filter: brightness(1.1); }
+  .btn-circ.parar b { width: 10px; height: 10px; border-radius: 2px; background: #FFFFFF; display: block; }
 
-  .btn-icone:hover { filter: brightness(0.96); }
-  .btn-icone:active { filter: brightness(0.92); }
-
-  .barras {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    height: 22px;
-  }
-
-  .barras i {
-    display: block;
-    width: 3px;
-    height: 22px;
-    border-radius: 1.5px;
-    background: var(--ilha-gravando);
-    transform: scaleY(0.18);
-    transform-origin: center;
-  }
-
-  .barras.compacta {
-    gap: 4px;
-    height: 18px;
-  }
-
-  .barras.compacta i {
-    height: 18px;
-    transform: scaleY(0.22);
-  }
-
-  .tempo {
-    font-variant-numeric: tabular-nums;
-    font-size: 14px;
-    line-height: 18px;
-    color: var(--ilha-texto);
-    min-width: 30px;
-    text-align: left;
-  }
-
-  .quadrado-parar {
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
-    background: var(--ilha-gravando);
-  }
-
-  .pontos {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    flex-shrink: 0;
-  }
-
+  .pontos { display: flex; gap: 4px; flex-shrink: 0; }
   .pontos i {
-    display: block;
-    width: 4px;
-    height: 4px;
+    width: 5px;
+    height: 5px;
     border-radius: 50%;
-    background: var(--ilha-acento);
+    background: #FFFFFF;
+    display: block;
     animation: onda 1.15s ease-in-out infinite;
   }
-
   .pontos i:nth-child(2) { animation-delay: 130ms; }
   .pontos i:nth-child(3) { animation-delay: 260ms; }
-
   /* Sem animação fora do processamento (0% de CPU em repouso). */
   .vista:not(.ativa) .pontos i { animation: none; }
-
   @keyframes onda {
-    0%, 100% { transform: translateY(0); opacity: 0.5; }
-    50% { transform: translateY(-3px); opacity: 1; }
+    0%, 100% { transform: translateY(0); opacity: 0.45; }
+    50% { transform: translateY(-2px); opacity: 1; }
   }
 
-  .etapa-texto {
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: var(--texto-max, 168px);
-  }
-
-  .acento { color: var(--ilha-acento); flex-shrink: 0; }
-
-  .pct-compacto {
-    font: 600 12px/16px "Segoe UI Variable Small", "Segoe UI", system-ui, sans-serif;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .v-baix-comp { gap: 6px; }
-
-  .icone-aviso {
-    flex-shrink: 0;
-    color: var(--ilha-acento);
-  }
-
-  .palco[data-estado="erro"] .icone-aviso { color: var(--ilha-gravando); }
+  .etapa-texto { overflow: hidden; text-overflow: ellipsis; max-width: var(--texto-max, 168px); }
+  .mono { font: 500 12px/16px var(--ilha-mono); font-variant-numeric: tabular-nums; }
 
   .texto-aviso {
-    display: -webkit-box;
-    -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-    font-size: 13px;
+    display: flex;
+    flex-direction: column;
+    white-space: normal;
+    max-width: var(--texto-max, 300px);
     line-height: 16px;
-    max-width: var(--texto-max, 200px);
-    word-break: break-word;
   }
-
-  .palco[data-estado="erro"] .texto-aviso > span:first-child { font-weight: 600; }
-
-  .texto-aviso .linha2 {
-    display: block;
-    color: var(--ilha-texto-2);
-  }
+  .texto-aviso .linha2 { color: var(--ilha-texto-2); font-weight: 400; }
 
   [hidden] { display: none !important; }
 
@@ -407,133 +257,107 @@
     border: 0;
   }
 
-  /* Movimento reduzido: sem translateY, só opacidade em 120 ms. */
+  /* Movimento reduzido: forma troca direto (o JS pula o laço), fades de 120 ms, nada gira; o
+     perímetro fica azul fixo de 1,5 a 70% e os pontos param (0,45, 0,75 e 1). */
   @media (prefers-reduced-motion: reduce) {
-    .casca,
-    .palco[data-recolhendo="1"] .casca {
-      transition: opacity var(--dur-fade-reduzido) ease;
-    }
-    .palco[data-estado="repouso"] .casca,
-    .palco[data-estado="aceno"] .casca {
-      transform: translateX(-50%) translateY(0);
-    }
-    .ponta { transition: opacity var(--dur-fade-reduzido) ease; }
-    .btn-ditar:active { transform: none; }
-    .pontos i { animation: onda-reduzida 0.9s ease-in-out infinite; }
-    @keyframes onda-reduzida {
-      0%, 100% { opacity: 0.6; }
-      50% { opacity: 1; }
-    }
+    .conteudo, .palco[data-conteudo="visivel"] .conteudo { transition: opacity 120ms ease; }
+    .pontos i { animation: none; }
+    .pontos i:nth-child(1) { opacity: 0.45; }
+    .pontos i:nth-child(2) { opacity: 0.75; }
+    .palco[data-segmento] .tracos .segmento { animation: none; opacity: 0; }
+    .tracos .inteiro { transition: opacity 120ms ease; }
+    .palco[data-segmento="girando"] .tracos .inteiro { opacity: 0.7; }
+    .tracos .contorno { transition: opacity 120ms ease; }
   }
 
-  /* Alto contraste */
   @media (forced-colors: active) {
-    .forma .fundo { fill: Canvas; }
-    .forma .borda { stroke: CanvasText; }
-    .ponta .fundo { fill: Highlight; }
-    .ponta .borda { stroke: CanvasText; }
+    .casca,
+    .palco[data-estado="repouso"] .casca,
+    .palco[data-estado="aceno"] .casca { background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
     .palco { color: CanvasText; }
-    .barras i,
-    .pontos i,
-    .quadrado-parar { background: Highlight; }
-    .contorno path,
-    .forma .arco-erro { stroke: Highlight; }
-    .btn-ditar {
-      background: ButtonFace;
-      color: ButtonText;
-      border: 2px solid ButtonText;
-    }
-    .btn-icone {
-      background: ButtonFace;
-      color: ButtonText;
-      border: 1px solid ButtonText;
-    }
+    .tracos path { stroke: Highlight; }
+    .barras i, .pontos i, .ponto, .ponto-aviso, .btn-circ.parar b { background: Highlight; }
+    .btn-ditar, .btn-circ { border: 1px solid ButtonText; color: ButtonText; }
+    .tempo, .kbd, .texto-aviso .linha2 { color: CanvasText; }
   }
 </style>
 </head>
 <body>
 <div class="palco" id="palco" data-estado="repouso">
-  <svg class="forma ponta" id="ponta-svg" aria-hidden="true">
-    <path class="fundo" id="ponta-fundo"/>
-    <path class="borda" id="ponta-borda"/>
-  </svg>
-  <div class="alvo-ponta" id="ponta" role="button" aria-label="Dita.se. Clique para ditar" title="Dita.se: clique para ditar"></div>
   <div class="casca" id="casca">
-    <svg class="forma" id="casca-svg" style="left:0" aria-hidden="true">
-      <path class="fundo" id="casca-fundo"/>
-      <path class="borda" id="casca-borda"/>
-      <path class="arco-erro" id="arco-erro" pathLength="1"/>
-    </svg>
-    <svg class="contorno" id="contorno" aria-hidden="true">
-      <path id="contorno-path" pathLength="1"/>
-    </svg>
     <div class="conteudo" id="conteudo">
       <!-- 3. Aberta, ociosa -->
-      <div class="vista v-ociosa" id="v-ociosa">
-        <button class="btn-ditar" id="btn-ditar" type="button" title="Ditar em mãos livres">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>
+      <div class="vista" id="v-ociosa">
+        <button class="btn-ditar" id="btn-ditar" type="button" aria-label="Ditar" title="Ditar em mãos livres">
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="#fff" aria-hidden="true"><rect x="4" y="1" width="4" height="7" rx="2"/><path d="M2.5 6a3.5 3.5 0 0 0 7 0" stroke="#fff" fill="none" stroke-width="1.2"/><rect x="5.4" y="9.3" width="1.2" height="1.8"/></svg>
           <span>Ditar</span>
         </button>
-        <span class="chip" id="chip-atalho">Ctrl dir.</span>
+        <span class="divisor" aria-hidden="true"></span>
+        <span class="kbd" id="chip-atalho">Ctrl dir.</span>
       </div>
 
-      <!-- 4. Gravando, compacta (5 barras) -->
-      <div class="vista v-grav-comp" id="v-grav-comp">
-        <div class="barras compacta" id="barras-5" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+      <!-- 4. Gravando, recolhida -->
+      <div class="vista" id="v-grav-comp">
+        <span class="ponto" aria-hidden="true"></span>
+        <div class="barras" id="barras-c" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
       </div>
 
       <!-- 5. Gravando, aberta -->
-      <div class="vista v-grav-aberta" id="v-grav-aberta">
-        <div class="barras" id="barras-9a" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div class="vista" id="v-grav-aberta">
+        <span class="ponto" aria-hidden="true"></span>
+        <div class="barras" id="barras-a" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
         <span class="tempo" id="tempo-a">0:00</span>
-        <button class="btn-icone" id="btn-cancelar-a" type="button" aria-label="Cancelar ditado" title="Cancelar ditado">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        <button class="btn-circ cancelar" id="btn-cancelar-a" type="button" aria-label="Cancelar ditado" title="Cancelar ditado">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>
         </button>
       </div>
 
       <!-- 6. Mãos livres -->
-      <div class="vista v-maos" id="v-maos">
-        <button class="btn-icone" id="btn-cancelar-m" type="button" aria-label="Cancelar ditado" title="Cancelar ditado">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      <div class="vista" id="v-maos">
+        <button class="btn-circ cancelar" id="btn-cancelar-m" type="button" aria-label="Cancelar ditado" title="Cancelar ditado">
+          <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3 3l6 6M9 3l-6 6" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg>
         </button>
-        <div class="barras" id="barras-9m" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="barras" id="barras-m" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
         <span class="tempo" id="tempo-m">0:00</span>
-        <button class="btn-icone" id="btn-parar" type="button" aria-label="Parar e colar" title="Parar e colar">
-          <span class="quadrado-parar" aria-hidden="true"></span>
-        </button>
+        <button class="btn-circ parar" id="btn-parar" type="button" aria-label="Parar e inserir texto" title="Parar e inserir texto"><b aria-hidden="true"></b></button>
       </div>
 
-      <!-- 7. Processando, compacta -->
-      <div class="vista v-proc-comp" id="v-proc-comp">
+      <!-- 7. Processando, recolhida -->
+      <div class="vista" id="v-proc-comp">
         <div class="pontos" aria-hidden="true"><i></i><i></i><i></i></div>
       </div>
 
       <!-- 8. Processando, aberta -->
-      <div class="vista v-proc-aberta" id="v-proc-aberta">
+      <div class="vista" id="v-proc-aberta">
         <div class="pontos" aria-hidden="true"><i></i><i></i><i></i></div>
         <span class="etapa-texto" id="etapa-texto">Transcrevendo</span>
       </div>
 
-      <!-- 9. Baixando o modelo, compacta -->
-      <div class="vista v-baix-comp" id="v-baix-comp">
-        <svg class="acento" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"/></svg>
-        <span class="pct-compacto" id="baixando-pct">0%</span>
+      <!-- 9. Baixando o modelo, recolhida -->
+      <div class="vista" id="v-baix-comp">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5v7M3 5.8 6 8.8l3-3M2 10.5h8" stroke="#fff" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>
+        <span class="mono" id="baixando-pct">0%</span>
       </div>
 
       <!-- 10. Baixando o modelo, aberta -->
-      <div class="vista v-baix-aberta" id="v-baix-aberta">
-        <svg class="acento" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11m0 0l-4-4m4 4l4-4M5 19h14"/></svg>
+      <div class="vista" id="v-baix-aberta">
+        <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 1.5v7M3 5.8 6 8.8l3-3M2 10.5h8" stroke="#fff" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>
         <span class="etapa-texto" id="baixando-texto">Baixando o modelo · 0%</span>
       </div>
 
       <!-- 11 e 12. Aviso / Erro -->
-      <div class="vista v-aviso" id="v-aviso">
-        <svg class="icone-aviso" id="icone-info" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
-        <svg class="icone-aviso" id="icone-erro" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="display:none"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+      <div class="vista" id="v-aviso">
+        <span class="ponto-aviso" aria-hidden="true"></span>
         <span class="texto-aviso" id="texto-aviso"></span>
       </div>
     </div>
   </div>
+  <svg class="tracos" id="tracos" aria-hidden="true">
+    <path class="contorno" id="contorno-path" pathLength="1"/>
+    <path class="inteiro" id="inteiro-path" pathLength="1"/>
+    <path class="segmento" id="segmento-path" pathLength="1"/>
+  </svg>
+  <div class="alvo-ponta" id="ponta" role="button" aria-label="Dita.se. Clique para ditar" title="Dita.se: clique para ditar"></div>
   <!-- Região viva dedicada: o relógio nunca é anunciado. -->
   <span class="sr-only" id="leitor" role="status" aria-live="polite"></span>
 </div>

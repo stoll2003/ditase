@@ -125,14 +125,14 @@ export function Dialog({
                   className={cn(
                     surface,
                     "w-full p-1.5",
-                    win ? "rounded-lg" : "rounded-[1.375rem]",
+                    "rounded-[1.375rem]",
                     sizes[size],
                     className,
                   )}
                 >
                   <Header title={title} description={description} />
                   {children && (
-                    <div className={cn("bg-surface-inset p-4 text-sm", win ? "rounded-[4px]" : "rounded-2xl")}>
+                    <div className="rounded-2xl bg-surface-inset p-4 text-sm">
                       {children}
                     </div>
                   )}

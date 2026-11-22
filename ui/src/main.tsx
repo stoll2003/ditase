@@ -5,7 +5,16 @@ import App from "./App.tsx";
 import { plataforma } from "./lib/plataforma";
 import "./index.css";
 
-document.documentElement.dataset.plataforma = plataforma();
+const raiz = document.documentElement;
+raiz.dataset.plataforma = plataforma();
+
+// Campos e menus podem receber :focus-visible mesmo no clique.
+if (raiz.dataset.plataforma === "windows") {
+  window.addEventListener("pointerdown", () => { raiz.dataset.entrada = "ponteiro"; }, true);
+  window.addEventListener("keydown", (evento) => {
+    if (evento.key === "Tab" || evento.key.startsWith("Arrow")) delete raiz.dataset.entrada;
+  }, true);
+}
 
 // O tema acompanha o sistema. `?tema=claro|escuro` força um deles (usado na conferência visual).
 const forcado = new URLSearchParams(location.search).get("tema");

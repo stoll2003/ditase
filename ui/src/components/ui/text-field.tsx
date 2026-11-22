@@ -2,14 +2,10 @@
 
 import { MagnifyingGlass, X } from "@phosphor-icons/react";
 import { useId } from "react";
-import { plataforma } from "@/lib/plataforma";
 import { cn } from "@/lib/utils";
 
 const control =
   "w-full bg-foreground/[0.06] text-sm text-foreground outline-none transition-[background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] placeholder:text-muted-foreground hover:bg-foreground/[0.08] focus-visible:bg-foreground/[0.1] disabled:opacity-40 aria-invalid:bg-negative/10";
-
-const controlWin =
-  "w-full bg-(--campo) border border-(--campo-borda) border-b-(--campo-linha) text-sm text-foreground outline-none transition-[border-color,background-color] duration-150 ease-[cubic-bezier(0.23,1,0.32,1)] placeholder:text-muted-foreground focus-visible:border-b-2 focus-visible:border-b-brand disabled:opacity-40 aria-invalid:border-b-negative";
 
 type FieldProps = {
   label?: React.ReactNode;
@@ -69,11 +65,10 @@ export function TextField({
   className,
   ...props
 }: TextFieldProps) {
-  const win = plataforma() === "windows";
   return (
     <Field label={label} description={description} error={error} className={className}>
       {(ids) => (
-        <input {...ids} {...props} className={cn(win ? controlWin : control, "h-9 px-3.5", win ? "rounded-[4px]" : "rounded-full")} />
+        <input {...ids} {...props} className={cn(control, "h-9 rounded-full px-3.5")} />
       )}
     </Field>
   );
@@ -94,7 +89,6 @@ export function SearchField({
   placeholder = "Search",
   ...props
 }: SearchFieldProps) {
-  const win = plataforma() === "windows";
   return (
     <Field label={label} description={description} error={error} className={className}>
       {(ids) => (
@@ -112,9 +106,8 @@ export function SearchField({
             aria-label={label ? undefined : placeholder}
             {...props}
             className={cn(
-              win ? controlWin : control,
-              "h-9 pr-9 pl-8 [&::-webkit-search-cancel-button]:hidden",
-              win ? "rounded-[4px]" : "rounded-full",
+              control,
+              "h-9 rounded-full pr-9 pl-8 [&::-webkit-search-cancel-button]:hidden",
             )}
           />
           {onClear && value !== undefined && value !== "" && (
@@ -144,7 +137,6 @@ export function TextArea({
   rows = 3,
   ...props
 }: TextAreaProps) {
-  const win = plataforma() === "windows";
   return (
     <Field label={label} description={description} error={error} className={className}>
       {(ids) => (
@@ -152,7 +144,7 @@ export function TextArea({
           {...ids}
           rows={rows}
           {...props}
-          className={cn(win ? controlWin : control, "resize-none px-3.5 py-2.5 leading-relaxed", win ? "rounded-[4px]" : "rounded-xl")}
+          className={cn(control, "resize-none rounded-xl px-3.5 py-2.5 leading-relaxed")}
         />
       )}
     </Field>

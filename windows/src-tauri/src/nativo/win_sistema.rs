@@ -90,12 +90,6 @@ pub fn tema_app_escuro() -> bool {
     dword_personalize("AppsUseLightTheme") == Some(0)
 }
 
-/// Mica só no Windows 11 (build >= 22000) com "Efeitos de transparência" ligado (`EnableTransparency == 1`).
-pub fn suporta_mica() -> bool {
-    let build = registro("CurrentBuild").parse::<u32>().unwrap_or(0);
-    build >= 22000 && dword_personalize("EnableTransparency") == Some(1)
-}
-
 /// Programa em primeiro plano: (executável, nome para exibir). Nunca o título da janela,
 /// que pode ter nome de documento ou conversa.
 pub fn app_em_foco() -> (String, String) {
