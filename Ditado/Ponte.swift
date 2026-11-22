@@ -311,7 +311,7 @@ final class Ponte: NSObject, WKScriptMessageHandlerWithReply {
             "fase": controlador.fase.rawValue,
             "maosLivres": controlador.maosLivres,
             "reconhecedor": ["estado": reconhecedor.0, "detalhe": reconhecedor.1, "nome": "Parakeet Ultra"],
-            "limpador": ["estado": limpador.0, "detalhe": limpador.1, "ligado": controlador.prefs.limpezaIA, "modelo": controlador.prefs.modelo.replacingOccurrences(of: ".gguf", with: "")],
+            "limpador": ["estado": limpador.0, "detalhe": limpador.1, "ligado": controlador.prefs.limpezaIA, "modelo": controlador.modeloEmUso.replacingOccurrences(of: ".gguf", with: "")],
             "modeloIA": modeloIA,
             "permissoes": ["microfone": Gravador.permissao, "acessibilidade": Insersor.temAcessibilidade ? "concedida" : "pendente"],
             "atalho": ["tecla": tecla.rawValue, "nome": tecla.nome, "simbolo": tecla.simbolo, "instalado": controlador.atalho.instalado],

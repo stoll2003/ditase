@@ -21,18 +21,20 @@ use windows::Win32::{
         CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetWindowRgn, MonitorFromWindow,
         PtInRegion, SetWindowRgn, COMPLEXREGION, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY,
     },
-    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentProcessId},
+    System::LibraryLoader::GetModuleHandleW,
     UI::{
         Accessibility::{SetWinEventHook, HWINEVENTHOOK},
         HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW,
-            GetWindowLongPtrW, GetWindowRect, IsWindowVisible, RegisterClassW, SetWindowLongPtrW,
-            SetWindowPos, TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND,
-            GWL_EXSTYLE, HWND_TOPMOST, MSG, OBJID_WINDOW, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WINDOW_EX_STYLE,
-            WINEVENT_OUTOFCONTEXT, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WNDCLASSW,
-            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetDesktopWindow,
+            GetForegroundWindow, GetMessageW, GetWindow, GetWindowLongPtrW, GetWindowRect,
+            IsWindowVisible, RegisterClassW, SetWindowLongPtrW, SetWindowPos, TranslateMessage,
+            EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW,
+            EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE, GW_HWNDPREV, HWND_TOPMOST, MSG, OBJID_CLIENT,
+            OBJID_WINDOW, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
+            WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_NOACTIVATE,
+            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
 };
@@ -215,6 +217,34 @@ pub fn reafirmar_topo(hwnd: isize) {
     }
 }
 
+/// O app em foco pode virar uma janela sem borda sem receber outro evento de foco.
+fn conferir_ordem(ilha: HWND, frente: HWND) {
+    if frente.is_invalid() || frente == ilha {
+        return;
+    }
+    let Some((x, y, w, h)) = retangulo(ilha.0 as isize) else {
+        return;
+    };
+    let Some((fx, fy, fw, fh)) = retangulo(frente.0 as isize) else {
+        return;
+    };
+    if x >= fx + fw || fx >= x + w || y >= fy + fh || fy >= y + h {
+        return;
+    }
+    // Limita a caminhada porque outras janelas podem mudar de posição durante a consulta.
+    let mut acima = ilha;
+    for _ in 0..128 {
+        let Ok(anterior) = (unsafe { GetWindow(acima, GW_HWNDPREV) }) else {
+            break;
+        };
+        if anterior == frente {
+            reafirmar_topo(ilha.0 as isize);
+            break;
+        }
+        acima = anterior;
+    }
+}
+
 /// Verdadeiro quando o ponteiro está fora do retângulo da janela ampliado em `lado` px para os
 /// lados e `baixo` px para baixo; com `ate_o_topo`, a zona sobe até a borda de cima da tela.
 pub fn cursor_fora_da_zona(hwnd: isize, lado: i32, baixo: i32, ate_o_topo: bool) -> bool {
@@ -255,26 +285,36 @@ unsafe extern "system" fn gancho_foco(
     avisar_tela("primeiro-plano");
 }
 
-/// Deriva: a ilha saiu do retângulo que pedimos (ex.: o tao reposiciona depois do
-/// `WM_DPICHANGED`, sobrescrevendo o nosso `SetWindowPos`).
-unsafe extern "system" fn gancho_posicao(
+unsafe extern "system" fn gancho_janela(
     _hook: HWINEVENTHOOK,
-    _event: u32,
+    evento: u32,
     hwnd: HWND,
     id_object: i32,
-    _id_child: i32,
+    id_child: i32,
     _event_thread: u32,
     _event_time: u32,
 ) {
-    let ilha = ILHA.load(Ordering::Acquire);
-    if ilha == 0 || hwnd.0 as isize != ilha || id_object != OBJID_WINDOW.0 {
+    if id_child != 0 || (id_object != OBJID_WINDOW.0 && id_object != OBJID_CLIENT.0) {
         return;
     }
-    let Some(esperado) = retangulo_esperado() else {
+    let ilha = ILHA.load(Ordering::Acquire);
+    if ilha == 0 {
         return;
-    };
-    if retangulo(ilha).is_some_and(|real| real != esperado) {
-        avisar_tela("deriva");
+    }
+    if hwnd.0 as isize == ilha {
+        // Ex.: o tao reposiciona a ilha depois do nosso SetWindowPos no WM_DPICHANGED.
+        if evento == EVENT_OBJECT_LOCATIONCHANGE && id_object == OBJID_WINDOW.0 {
+            if let Some(esperado) = retangulo_esperado() {
+                if retangulo(ilha).is_some_and(|real| real != esperado) {
+                    avisar_tela("deriva");
+                }
+            }
+        }
+        return;
+    }
+    let frente = unsafe { GetForegroundWindow() };
+    if hwnd == frente || (evento == EVENT_OBJECT_REORDER && hwnd == unsafe { GetDesktopWindow() }) {
+        conferir_ordem(HWND(ilha as *mut _), frente);
     }
 }
 
@@ -343,16 +383,21 @@ pub fn observar(tela: Arc<dyn Fn(&'static str) + Send + Sync>) {
             if hook.0.is_null() {
                 return;
             }
-            // Só janelas do nosso processo (as do WebView2 são de outro processo).
-            let _ = SetWinEventHook(
+            for evento in [
                 EVENT_OBJECT_LOCATIONCHANGE,
-                EVENT_OBJECT_LOCATIONCHANGE,
-                None,
-                Some(gancho_posicao),
-                GetCurrentProcessId(),
-                0,
-                WINEVENT_OUTOFCONTEXT,
-            );
+                EVENT_OBJECT_SHOW,
+                EVENT_OBJECT_REORDER,
+            ] {
+                let _ = SetWinEventHook(
+                    evento,
+                    evento,
+                    None,
+                    Some(gancho_janela),
+                    0,
+                    0,
+                    WINEVENT_OUTOFCONTEXT,
+                );
+            }
             criar_ouvinte_de_tela();
             let mut msg = MSG::default();
             while GetMessageW(&mut msg, None, 0, 0).as_bool() {

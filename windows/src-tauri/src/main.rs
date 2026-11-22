@@ -249,7 +249,7 @@ pub async fn procurar_atualizacao(app: AppHandle, manual: bool) {
         let url = tauri::Url::parse(CANAL_ESTAVEL)?;
         let atualizador = app.updater_builder().pubkey(CHAVE_DO_CANAL).endpoints(vec![url])?.build()?;
         let Some(nova) = atualizador.check().await? else { return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(None) };
-        let pergunta = format!("A versão de teste {} está disponível (você tem {}). Instalar agora? O Dita.se reinicia.", nova.version, nova.current_version);
+        let pergunta = format!("A versão {} está disponível (você tem {}). Instalar agora? O Dita.se reinicia.", nova.version, nova.current_version);
         let sim = app.dialog().message(pergunta).title("Atualização do Dita.se")
             .buttons(MessageDialogButtons::OkCancelCustom("Instalar".into(), "Depois".into())).blocking_show();
         if !sim { return Ok(Some(false)); }

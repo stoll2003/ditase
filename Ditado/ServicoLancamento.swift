@@ -119,7 +119,7 @@ final class ServicoLancamento {
     private func motor(limpezaIA: Bool = true) -> (MotorLancamento, PreparadorDeTexto) {
         let termos = (try? controlador.banco.termos()) ?? []
         let dicionario = AplicadorDicionario(termos: termos, ehPalavraComum: Ortografia().verificador)
-        let limpador = limpezaIA && controlador.prefs.limpezaIA ? controlador.servidor.limpador(modelo: controlador.prefs.modelo) : nil
+        let limpador = limpezaIA && controlador.prefs.limpezaIA ? controlador.servidor.limpador(modelo: controlador.modeloEmUso) : nil
         return (MotorLancamento(transcritor: controlador.transcritor), MotorLancamento.preparador(dicionario: dicionario, limpador: limpador))
     }
 
@@ -772,7 +772,7 @@ final class ServicoLancamento {
     }
 
     private func concluirResumo(id: String, trabalhoID: String, banco: ArmazemLancamento) async {
-        let resumidor = ResumidorReuniao(servidor: controlador.servidor, modelo: controlador.prefs.modelo)
+        let resumidor = ResumidorReuniao(servidor: controlador.servidor, modelo: controlador.modeloEmUso)
         let campo: ArmazemLancamento.CampoDocumento
         let desfecho: ResultadoProcessamento.Desfecho
         var motivo: String?

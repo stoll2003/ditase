@@ -34,6 +34,15 @@ final class GerenciadorDeModelo {
         modeloEmCurso ?? ModeloRemoto.qwen(arquivo: escolhido) ?? .qwenPadrao
     }
 
+    /// Preserva escolhas válidas. Se um arquivo personalizado sumir, usa o padrão já verificado.
+    func modeloEmUso(escolhido: String) -> String {
+        let pasta = Caminhos.modelos
+        guard ModeloRemoto.qwen(arquivo: escolhido) == nil,
+              !FileManager.default.fileExists(atPath: pasta.appendingPathComponent(escolhido).path),
+              BaixadorDeModelo(modelo: .qwenPadrao, pasta: pasta).instalado else { return escolhido }
+        return ModeloRemoto.qwenPadrao.arquivo
+    }
+
     func situacao(escolhido: String) -> Situacao {
         if ServidorLLM.binario == nil { return .indisponivel }
         let modelo = modeloParaDownload(escolhido: escolhido)

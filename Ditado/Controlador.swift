@@ -13,6 +13,7 @@ final class Controlador {
     let transcritor = TranscritorParakeet()
     let servidor: ServidorLLM
     let modeloIA = GerenciadorDeModelo()
+    var modeloEmUso: String { modeloIA.modeloEmUso(escolhido: prefs.modelo) }
     lazy var lancamento = ServicoLancamento(controlador: self)
     let atalho = Atalho()
     let pilula = JanelaDaPilula()
@@ -114,7 +115,7 @@ final class Controlador {
     /// Download terminado e conferido: passa a usar o modelo e já o carrega, para o estado
     /// chegar a "Pronta" e o primeiro ditado não esperar.
     private func modeloInstalado(_ modelo: String) {
-        guard prefs.limpezaIA, prefs.modelo == modelo else { return }
+        guard prefs.limpezaIA, modeloEmUso == modelo else { return }
         Task.detached { [servidor] in await servidor.garantir(modelo: modelo) }
     }
 
@@ -199,7 +200,7 @@ final class Controlador {
     }
 
     private func aquecerLimpador() {
-        let modelo = prefs.modelo
+        let modelo = modeloEmUso
         Task.detached { [servidor] in await servidor.garantir(modelo: modelo) }
     }
 
@@ -224,7 +225,7 @@ final class Controlador {
         let banco = banco
         let termos = (try? banco.termos()) ?? []
         let dicionario = AplicadorDicionario(termos: termos, ehPalavraComum: ortografia.verificador)
-        let limpador = prefs.limpezaIA ? servidor.limpador(modelo: prefs.modelo) : nil
+        let limpador = prefs.limpezaIA ? servidor.limpador(modelo: modeloEmUso) : nil
         if prefs.limpezaIA { aquecerLimpador() }
         let nova = SessaoDitado(transcritor: transcritor, limpador: limpador, dicionario: dicionario, aoTrecho: { ordem, bruto in
             do { try banco.gravarTrecho(ditado: id, ordem: ordem, bruto: bruto) } catch { Registro.nota("trecho \(ordem) do ditado \(id) não foi gravado: \(error)") }
@@ -425,7 +426,7 @@ final class Controlador {
             return
         }
         let termos = (try? banco.termos()) ?? []
-        let limpador = prefs.limpezaIA ? servidor.limpador(modelo: prefs.modelo) : nil
+        let limpador = prefs.limpezaIA ? servidor.limpador(modelo: modeloEmUso) : nil
         let nova = SessaoDitado(transcritor: transcritor, limpador: limpador, dicionario: AplicadorDicionario(termos: termos, ehPalavraComum: ortografia.verificador))
         pilula.modelo.suspenderProgresso()
         trabalhoNaPilula = nil
