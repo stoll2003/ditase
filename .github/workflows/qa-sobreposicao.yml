@@ -14,7 +14,7 @@ permissions:
 jobs:
   teste:
     runs-on: windows-2025
-    timeout-minutes: 22
+    timeout-minutes: 12
     env:
       GH_TOKEN: ${{ github.token }}
       CI_RUN: '44984592224'
@@ -26,12 +26,12 @@ jobs:
         run: |
           $dados = gh run view $env:CI_RUN --json headSha,status,conclusion | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $dados.headSha -ne $env:CANDIDATO) { throw 'SHA divergente' }
-          if ($dados.status -ne 'completed') { gh run watch $env:CI_RUN --interval 15 --exit-status }
-          if ($LASTEXITCODE -ne 0) { throw 'CI candidato falhou' }
+          if ($dados.status -ne 'completed' -or $dados.conclusion -ne 'success') { throw 'CI candidato ainda não passou' }
           gh run download $env:CI_RUN --name ditase-windows-nsis --dir "$env:RUNNER_TEMP\pacote"
           if ($LASTEXITCODE -ne 0) { throw 'Falha ao obter o instalador' }
       - name: Instalar e testar mudança para janela sem borda
-        shell: powershell
+        shell: pwsh
+        timeout-minutes: 7
         run: |
           $pacote = Get-ChildItem "$env:RUNNER_TEMP\pacote" -Filter '*-setup.exe' | Select-Object -First 1
           if (-not $pacote) { throw 'Instalador não encontrado' }

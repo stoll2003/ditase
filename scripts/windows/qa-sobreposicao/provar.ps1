@@ -1,9 +1,10 @@
-param(
+﻿param(
     [Parameter(Mandatory)][string]$Instalador,
     [Parameter(Mandatory)][string]$Saida
 )
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Saida | Out-Null
+Write-Host "Carregar WinForms e Win32 na sessão $((Get-Process -Id $PID).SessionId)."
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
@@ -18,6 +19,8 @@ public static class JanelaQa {
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumProc f, IntPtr arg);
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
     [DllImport("user32.dll")] private static extern int GetWindowLong(IntPtr h, int indice);
+    [DllImport("user32.dll")] private static extern int SetWindowLong(IntPtr h, int indice, int estilo);
+    [DllImport("user32.dll")] private static extern bool SetWindowPos(IntPtr h, IntPtr apos, int x, int y, int w, int hgt, uint flags);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr h, uint codigo);
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(Ponto p);
@@ -44,6 +47,14 @@ public static class JanelaQa {
         }, IntPtr.Zero);
         return ilha;
     }
+    public static bool SemBorda(IntPtr hwnd, int x, int y, int largura, int altura) {
+        const int GwlStyle = -16;
+        const int WsOverlappedWindow = 0x00CF0000;
+        const uint SwpFrameChangedNoActivate = 0x0030;
+        int estilo = GetWindowLong(hwnd, GwlStyle);
+        if (SetWindowLong(hwnd, GwlStyle, estilo & ~WsOverlappedWindow) == 0) return false;
+        return SetWindowPos(hwnd, new IntPtr(-1), x, y, largura, altura, SwpFrameChangedNoActivate);
+    }
     public static bool Acima(IntPtr ilha, IntPtr externa) {
         IntPtr atual = externa;
         for (int i = 0; i < 128; i++) {
@@ -57,7 +68,7 @@ public static class JanelaQa {
 }
 '@
 [void][JanelaQa]::SetProcessDpiAwarenessContext([IntPtr](-4))
-$dir = Join-Path $Saida 'instalado'
+$dir = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) ('Dita.se QA ' + [Guid]::NewGuid().ToString('N'))
 $env:DITASE_RAIZ = Join-Path $Saida 'dados'
 $rel = [ordered]@{ instaladorSHA256 = (Get-FileHash $Instalador).Hash; etapas = @() }
 $app = $null
@@ -105,11 +116,17 @@ function Medir($nome) {
 }
 
 try {
-    $inst = Start-Process -FilePath $Instalador -ArgumentList "/S /D=$dir" -Wait -PassThru
+    Write-Host "Instalar em $dir."
+    $inst = Start-Process -FilePath $Instalador -ArgumentList "/S /D=$dir" -PassThru
+    if (-not $inst.WaitForExit(120000)) {
+        $inst.Kill()
+        throw 'Instalador excedeu 120 segundos.'
+    }
     if ($inst.ExitCode -ne 0) { throw "NSIS retornou $($inst.ExitCode)" }
     $exe = Get-ChildItem $dir -Filter '*.exe' | Where-Object { $_.Name -notmatch 'uninstall' } | Select-Object -First 1
     if (-not $exe) { throw 'Executável não encontrado' }
-    $app = Start-Process $exe.FullName -PassThru
+    Write-Host "Abrir $($exe.FullName)."
+    $app = Start-Process $exe.FullName -WorkingDirectory $dir -PassThru
     $encontrou = Esperar {
         if ([JanelaQa]::Ilha([uint32]$app.Id) -ne [IntPtr]::Zero) { return $true }
     } 20000
@@ -132,9 +149,10 @@ try {
     Start-Sleep -Milliseconds 1200
 
     # Muda estilo e geometria com SetWindowLong/SetWindowPos sobre o HWND existente.
-    $form.FormBorderStyle = 'None'
-    $form.Bounds = $tela
-    $form.TopMost = $true
+    Write-Host 'Mudar a janela em foco para sem borda e topmost.'
+    if (-not [JanelaQa]::SemBorda($externa, $tela.X, $tela.Y, $tela.Width, $tela.Height)) {
+        throw 'Win32 não aplicou a mudança para janela sem borda.'
+    }
     if ($form.Handle -ne $externa) { throw 'O cenário de teste trocou de HWND' }
     [void](Esperar {
         $h = [JanelaQa]::Ilha([uint32]$app.Id)
@@ -156,8 +174,11 @@ try {
     $centro = [JanelaQa]::Alvo($meio, [int](($r.Y + $r.Base) / 2))
     $rel.alvos = @{ canto = $canto.ToInt64(); centro = $centro.ToInt64() }
     if ($canto -ne $externa -or $centro -ne $ilha) { throw 'O teste de clique encontrou uma janela inesperada' }
+} catch {
+    $rel['erro'] = $_.ToString()
+    throw
 } finally {
+    $rel | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $Saida 'sobreposicao.json') -Encoding UTF8
     if ($form) { $form.Dispose() }
     if ($app -and -not $app.HasExited) { $app.Kill() }
-    $rel | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $Saida 'sobreposicao.json') -Encoding UTF8
 }
