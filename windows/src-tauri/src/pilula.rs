@@ -1161,6 +1161,13 @@ fn coletar_monitores(j: &WebviewWindow) -> Vec<RetanguloMonitor> {
 mod testes {
     use super::*;
 
+    fn codigo_da_pilula_sem_testes() -> &'static str {
+        include_str!("pilula.rs")
+            .split_once("\nmod testes {")
+            .expect("início do módulo de testes de pilula.rs")
+            .0
+    }
+
     fn monitor(x: i32, y: i32, w: i32, h: i32, escala: f64, principal: bool) -> RetanguloMonitor {
         RetanguloMonitor {
             x,
@@ -1406,11 +1413,7 @@ mod testes {
         assert!(!l.permitir(t3));
         assert_eq!(l.espera(t3), Duration::from_millis(7000));
         assert!(l.permitir(t3 + l.espera(t3)));
-        let producao = include_str!("pilula.rs");
-        let producao = producao
-            .split("#[cfg(test)]\nmod testes")
-            .next()
-            .unwrap_or(producao);
+        let producao = codigo_da_pilula_sem_testes();
         assert!(producao.contains("self.reconferir_depois(espera"));
     }
 
@@ -1424,11 +1427,7 @@ mod testes {
     /// tao), e a camada nativa ouve resolução, configuração, deriva e DPI.
     #[test]
     fn gatilhos_de_tela_estao_ligados() {
-        let pilula = include_str!("pilula.rs");
-        let producao = pilula
-            .split("#[cfg(test)]\nmod testes")
-            .next()
-            .unwrap_or(pilula);
+        let producao = codigo_da_pilula_sem_testes();
         let trecho = producao
             .split("WindowEvent::ScaleFactorChanged")
             .nth(1)
@@ -1614,11 +1613,7 @@ mod testes {
                 "win_janela.rs não pode usar {proibido}"
             );
         }
-        let pilula = include_str!("pilula.rs");
-        let producao = pilula
-            .split("#[cfg(test)]\nmod testes")
-            .next()
-            .unwrap_or(pilula);
+        let producao = codigo_da_pilula_sem_testes();
         assert!(
             producao.contains("pub fn aplicar_janela"),
             "corte do código de produção errado"
@@ -1663,11 +1658,7 @@ mod testes {
 
     #[test]
     fn pilula_nunca_chama_show_do_tauri() {
-        let codigo = include_str!("pilula.rs");
-        let producao = codigo
-            .split("#[cfg(test)]\nmod testes")
-            .next()
-            .unwrap_or(codigo);
+        let producao = codigo_da_pilula_sem_testes();
         assert!(
             !producao.contains(".show()"),
             "pilula.rs não pode chamar WebviewWindow::show(), que pode ativar a janela"
