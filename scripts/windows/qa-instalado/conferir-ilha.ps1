@@ -7,7 +7,7 @@
 
 # Conferência nativa da ilha instalada (spec SPEC-dynamic-island.md §6), com o app aberto:
 # - posição e tamanho físicos: centro da área de trabalho do monitor principal, y = work_y,
-#   w/h = round(lógico * escala) (repouso 92 x 7; aceno 112 x 11; aberta 248 x 54);
+#   w/h = ceil(lógico * escala) (repouso e aceno 72 x 14; aberta 188 x 44);
 # - recorte: região da janela (GetWindowRgn/PtInRegion) e WindowFromPoint nos cantos;
 # - clique através dos cantos e foco: Bloco de Notas maximizado em primeiro plano continua em
 #   primeiro plano depois de hover e clique na ilha, e o clique no canto cai nele;
@@ -202,8 +202,8 @@ function Medir($h) {
 }
 
 function Esperado($m, $wLog, $hLog) {
-    $w = [int][Math]::Round($wLog * $m.escala, [MidpointRounding]::AwayFromZero)
-    $h = [int][Math]::Round($hLog * $m.escala, [MidpointRounding]::AwayFromZero)
+    $w = [int][Math]::Ceiling($wLog * $m.escala)
+    $h = [int][Math]::Ceiling($hLog * $m.escala)
     $x = $m.workX + [int][Math]::Round(($m.workW - $w) / 2.0, [MidpointRounding]::AwayFromZero)
     [ordered]@{ x = $x; y = $m.workY; w = $w; h = $h }
 }
@@ -247,17 +247,21 @@ function Esperar-Tamanho($h, $wLog, $hLog, $segundos) {
     return @($m, $e, $false)
 }
 
+function Alvo-Repouso($h, $m) {
+    $canto = Raiz-Em ($m.x + 1) ($m.y + $m.h - 2)
+    $centro = Raiz-Em ([int]($m.x + $m.w / 2)) ($m.y + 2)
+    ($centro -eq $h) -and ($canto -eq $h)
+}
+
 function Conferir-Recorte($h, $m, $rotulo) {
     $cx = [int]($m.x + $m.w / 2)
-    $dentroCentro = $false; $t = [QaIlha]::Regiao($h, [int]($m.w / 2), 1, [ref]$dentroCentro)
-    $dentroCanto = $true; [void][QaIlha]::Regiao($h, 1, $m.h - 2, [ref]$dentroCanto)
-    Checar "$rotulo regiao_eliptica" ($t -ge 2 -and $dentroCentro -and -not $dentroCanto) ([ordered]@{ tipoRegiao = $t; centroDentro = $dentroCentro; cantoInfEsqDentro = $dentroCanto })
-    $raizCentro = Raiz-Em $cx ($m.y + 1)
+    $cy = [int]($m.y + ($m.h / 2))
+    $raizCentro = Raiz-Em $cx $cy
+    $raizTopo = Raiz-Em $cx ($m.y + 1)
     $raizEsq = Raiz-Em ($m.x + 1) ($m.y + $m.h - 2)
     $raizDir = Raiz-Em ($m.x + $m.w - 2) ($m.y + $m.h - 2)
-    Checar "$rotulo hit_test_cantos" (($raizCentro -eq $h) -and ($raizEsq -ne $h) -and ($raizDir -ne $h)) ([ordered]@{
-        centroEhIlha = ($raizCentro -eq $h); cantoEsqEhIlha = ($raizEsq -eq $h); cantoDirEhIlha = ($raizDir -eq $h)
-        classeSobCantoEsq = [QaIlha]::Classe($raizEsq) })
+    Checar "$rotulo hit_test_capsula" (($raizCentro -eq $h) -and ($raizTopo -ne $h) -and ($raizEsq -ne $h) -and ($raizDir -ne $h)) ([ordered]@{
+        centroEhIlha = ($raizCentro -eq $h); vaoTopoEhIlha = ($raizTopo -eq $h); cantoEsqEhIlha = ($raizEsq -eq $h); cantoDirEhIlha = ($raizDir -eq $h) })
 }
 
 $ilha = [IntPtr]::Zero
@@ -293,25 +297,28 @@ if (-not $focoPreparado) { $rel.limites += 'Não consegui pôr o Bloco de Notas 
 $alvoFoco = $fgInicial
 
 # 1. Repouso (preferência pilulaSempreVisivel=1 gravada pelo executor).
-$r = Esperar-Tamanho $ilha 92 7 15
+$r = Esperar-Tamanho $ilha 72 14 15
 Checar 'repouso_posicao_tamanho' $r[2] ([ordered]@{ medido = $r[0]; esperado = $r[1] })
 Recortar $r[0] 'ilha-repouso.png'
-if ($r[2]) { Conferir-Recorte $ilha $r[0] 'repouso' }
+if ($r[2]) { Checar 'repouso_alvo_retangular' (Alvo-Repouso $ilha $r[0]) $r[0] }
 $rep = $r[0]
 
 # 2. Hover: aceno e depois aberta (300 ms parado). Sem clicar, para não depender do tempo do aceno.
 [void][QaIlha]::SetCursorPos([int]($rep.x + $rep.w / 2) - 2, $rep.y + 2)
 Start-Sleep -Milliseconds 50
 [QaIlha]::mouse_event(0x0001, 2, 0, 0, [UIntPtr]::Zero)  # MOUSEEVENTF_MOVE relativo: gera pointermove real
-$a = Esperar-Tamanho $ilha 248 54 4
+$a = Esperar-Tamanho $ilha 188 44 4
 Checar 'hover_abre_aberta' $a[2] ([ordered]@{ medido = $a[0]; esperado = $a[1] })
 Checar 'foco_apos_hover' ([QaIlha]::GetForegroundWindow() -eq $alvoFoco) ([ordered]@{ primeiroPlano = [int64][QaIlha]::GetForegroundWindow(); esperado = [int64]$alvoFoco })
 Recortar $a[0] 'ilha-aberta.png'
 if ($a[2]) {
+    Start-Sleep -Milliseconds 500
     $ab = $a[0]
     Conferir-Recorte $ilha $ab 'aberta'
     # Clique numa área vazia dentro da curva (abaixo dos controles): não pode ativar a ilha.
-    [QaIlha]::Clicar([int]($ab.x + $ab.w / 2), $ab.y + [int](46 * $ab.escala))
+    $ix = $ab.x + [int](32 * $ab.escala); $iy = $ab.y + [int](24 * $ab.escala)
+    Checar 'ponto_de_clique_dentro_da_ilha' ((Raiz-Em $ix $iy) -eq $ilha) ([ordered]@{ x = $ix; y = $iy })
+    [QaIlha]::Clicar($ix, $iy)
     Start-Sleep -Milliseconds 300
     Checar 'foco_apos_clique_na_ilha' ([QaIlha]::GetForegroundWindow() -eq $alvoFoco) ([ordered]@{ primeiroPlano = [int64][QaIlha]::GetForegroundWindow(); classe = [QaIlha]::Classe([QaIlha]::GetForegroundWindow()) })
     # Clique real no canto inferior esquerdo, fora da curva: vai para a janela de baixo.
@@ -320,10 +327,10 @@ if ($a[2]) {
     [QaIlha]::Clicar($cx, $cy)
     Start-Sleep -Milliseconds 300
     $fg = [QaIlha]::GetForegroundWindow()
-    Checar 'clique_no_canto_atravessa' (($raiz -ne $ilha) -and ($fg -ne $ilha)) ([ordered]@{ janelaSobCanto = [QaIlha]::Classe($raiz); primeiroPlanoDepois = [QaIlha]::Classe($fg); ehBlocoDeNotas = ($raiz -eq $hNp) })
+    Checar 'clique_no_canto_atravessa' (($raiz -eq $hNp) -and ($fg -eq $hNp)) ([ordered]@{ janelaSobCanto = [QaIlha]::Classe($raiz); primeiroPlanoDepois = [QaIlha]::Classe($fg); ehBlocoDeNotas = ($raiz -eq $hNp) })
 }
 [void][QaIlha]::SetCursorPos(400, 400)
-$v = Esperar-Tamanho $ilha 92 7 5
+$v = Esperar-Tamanho $ilha 72 14 5
 Checar 'volta_ao_repouso' $v[2] ([ordered]@{ medido = $v[0]; esperado = $v[1] })
 
 # 3. Escalas possíveis no monitor do runner, trocadas em tempo de execução e restauradas.
@@ -339,7 +346,7 @@ try {
     foreach ($pct in $possiveis) {
         $rc = [QaIlha]::DefinirEscala($pct)
         Start-Sleep -Milliseconds 1500
-        $m = Esperar-Tamanho $ilha 92 7 6
+        $m = Esperar-Tamanho $ilha 72 14 6
         $aplicada = [Math]::Round($m[0].escala * 100)
         # Fonte independente: o que o sistema diz da escala e do DPI efetivo do monitor da ilha.
         $sistema = [QaIlha]::LerEscala()[1]
@@ -348,15 +355,8 @@ try {
         $item = [ordered]@{ pedida = $pct; codigo = $rc; escalaDoSistema = $sistema; dpiDoMonitor = $dpiMon; aplicadaNoSistema = $noSistema
             aplicadaNaIlha = $aplicada; medido = $m[0]; esperado = $m[1]; ok = ($m[2] -and $aplicada -eq $pct) }
         if ($item.ok) {
-            $d1 = $false; $tipoR = [QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$d1)
-            $d2 = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$d2)
-            $raizC = Raiz-Em ([int]($m[0].x + $m[0].w / 2)) ($m[0].y + 1)
-            $raizE = Raiz-Em ($m[0].x + 1) ($m[0].y + $m[0].h - 1)
-            # tipo 1 = vazia, 2 = retângulo, 3 = complexa (elipse); 0 = sem região.
-            $item.regiao = [ordered]@{ hwnd = [int64]$ilha; tipo = $tipoR; centroDentro = $d1; cantoDentro = $d2
-                centroEhIlha = ($raizC -eq $ilha); cantoEhIlha = ($raizE -eq $ilha); classeSobCanto = [QaIlha]::Classe($raizE) }
-            $item.recorte = ($d1 -and -not $d2 -and ($raizE -ne $ilha))
-            $item.ok = $item.recorte
+            $item.alvoCompleto = Alvo-Repouso $ilha $m[0]
+            $item.ok = $item.alvoCompleto
         }
         $rel.escalas += $item
         Recortar $m[0] ("ilha-repouso-{0}.png" -f $pct)
@@ -379,17 +379,16 @@ try {
         $t0 = Get-Date
         foreach ($pct in $rajada) { [void][QaIlha]::DefinirEscala($pct); Start-Sleep -Milliseconds 6500 }
         Start-Sleep -Seconds 22  # o limite libera ~20 s depois da 1ª recriação; sem nova troca
-        $m = Esperar-Tamanho $ilha 92 7 8
-        $dR = $false; $tipoR = [QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$dR)
-        $cR = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$cR)
+        $m = Esperar-Tamanho $ilha 72 14 8
+        $alvoCompleto = Alvo-Repouso $ilha $m[0]
         $novas = if ($logApp -and (Test-Path $logApp)) { @(Get-Content -LiteralPath $logApp | Select-Object -Skip $linhasAntes | Where-Object { $_ -match 'ilha:' } | ForEach-Object { [string]$_ }) } else { @() }
         $retentativa = @($novas | Where-Object { $_ -match 'ilha: retentativa:.*-> Recriar' })
         $limite = @($novas | Where-Object { $_ -match 'limite atingido' })
         $escFinal = [Math]::Round($m[0].escala * 100)
-        $rel.rajada = [ordered]@{ duracaoS = [int]((Get-Date) - $t0).TotalSeconds; medido = $m[0]; esperado = $m[1]; regiaoTipo = $tipoR
+        $rel.rajada = [ordered]@{ duracaoS = [int]((Get-Date) - $t0).TotalSeconds; medido = $m[0]; esperado = $m[1]; alvoCompleto = $alvoCompleto
             limiteAtingido = $limite.Count; retentativas = $retentativa.Count; linhasIlha = $novas }
-        Checar 'rajada_limite_e_retentativa' (($limite.Count -ge 1) -and ($retentativa.Count -ge 1) -and $m[2] -and ($escFinal -eq 175) -and $dR -and -not $cR) ([ordered]@{
-            limiteAtingido = $limite.Count; retentativas = $retentativa.Count; escalaFinal = $escFinal; medido = $m[0]; esperado = $m[1]; recorteOk = ($dR -and -not $cR) })
+        Checar 'rajada_limite_e_retentativa' (($limite.Count -ge 1) -and ($retentativa.Count -ge 1) -and $m[2] -and ($escFinal -eq 175) -and $alvoCompleto) ([ordered]@{
+            limiteAtingido = $limite.Count; retentativas = $retentativa.Count; escalaFinal = $escFinal; medido = $m[0]; esperado = $m[1]; recorteOk = ($alvoCompleto) })
         Recortar $m[0] 'ilha-rajada-175.png'
     } else {
         $rel.limites += 'Rajada não executada: o monitor não aceita 125, 150 e 175%.'
@@ -411,11 +410,10 @@ try {
                 Checar "abertura_em_$pctAlta" $false ([ordered]@{ motivo = 'ilha não apareceu após reiniciar' })
                 continue
             }
-            $m = Esperar-Tamanho $ilha 92 7 20
-            $d1 = $false; [void][QaIlha]::Regiao($ilha, [int]($m[0].w / 2), 1, [ref]$d1)
-            $d2 = $true; [void][QaIlha]::Regiao($ilha, 1, $m[0].h - 1, [ref]$d2)
+            $m = Esperar-Tamanho $ilha 72 14 20
+            $alvoCompleto = Alvo-Repouso $ilha $m[0]
             $esc = [Math]::Round($m[0].escala * 100)
-            Checar "abertura_em_$pctAlta" ($m[2] -and $esc -eq $pctAlta -and $d1 -and -not $d2) ([ordered]@{ medido = $m[0]; esperado = $m[1]; recorteOk = ($d1 -and -not $d2) })
+            Checar "abertura_em_$pctAlta" ($m[2] -and $esc -eq $pctAlta -and $alvoCompleto) ([ordered]@{ medido = $m[0]; esperado = $m[1]; recorteOk = ($alvoCompleto) })
             Recortar $m[0] ("ilha-abertura-{0}.png" -f $pctAlta)
         }
         Stop-Process -Id $script:ProcessoApp -Force -ErrorAction SilentlyContinue

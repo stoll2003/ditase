@@ -11,6 +11,7 @@
 //   --esperado=defeito   instalador original: a tela tem de ficar presa em indisponível.
 //   --esperado=corrigido candidato: a tela tem de destravar e os fluxos têm de passar.
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
@@ -424,17 +425,12 @@ async function conectarPilula() {
   return ClienteCdp.conectar(alvo.webSocketDebuggerUrl);
 }
 
-/** Centro físico (px de tela) do controle visível da pílula cujo rótulo casa com `padrao`. */
-function controleNaPilula(cp, padrao, excluir = "cancelar") {
+/** Centro físico (px de tela) do controle visível da pílula identificado pelo seletor. */
+function controleNaPilula(cp, seletor) {
   return cp.avaliar(`(() => {
-    const re = new RegExp(${JSON.stringify(padrao)}, "i"), ex = new RegExp(${JSON.stringify(excluir)}, "i");
-    const vis = (e) => { const r = e.getBoundingClientRect(), c = getComputedStyle(e);
-      return r.width > 0 && r.height > 0 && c.visibility !== "hidden" && Number(c.opacity) > 0.05 && !e.closest("[hidden]"); };
-    const el = [...document.querySelectorAll("button,[role=button]")].filter(vis).find((e) => {
-      const t = [e.getAttribute("aria-label"), e.title, e.textContent].join(" ");
-      return re.test(t) && !ex.test(t);
-    });
-    if (!el) return null;
+    const el = document.querySelector(${JSON.stringify(seletor)});
+    if (!el?.checkVisibility({ opacityProperty: true, visibilityProperty: true })) return null;
+    if (getComputedStyle(el.closest(".conteudo")).pointerEvents === "none") return null;
     const r = el.getBoundingClientRect(), d = devicePixelRatio;
     return { x: Math.round((screenX + r.left + r.width / 2) * d), y: Math.round((screenY + r.top + r.height / 2) * d),
       rotulo: (el.getAttribute("aria-label") || el.title || el.textContent).trim().slice(0, 40), cursor: getComputedStyle(el).cursor };
@@ -465,15 +461,15 @@ async function faseDitado(relatorio, chaves) {
     const marco = (nome, extra = {}) => marcos.push({ nome, t: Number((Date.now() / 1000).toFixed(3)), ...extra });
 
     await acaoDesk(["mover", "-X", String(cx), "-Y", String(Math.round(jan.sy * d) + 2)]);
-    const ditar = await esperarCondicao(5000, "botão Ditar visível na pílula", () => controleNaPilula(cp, "ditar"));
+    const ditar = await esperarCondicao(5000, "botão Ditar visível na pílula", () => controleNaPilula(cp, "#btn-ditar"));
     marco("hover_aberta", { ditar });
     const c1 = JSON.parse(await acaoDesk(["clicar", "-X", String(ditar.x), "-Y", String(ditar.y)]));
     marco("clique_ditar", c1);
-    const parar = await esperarCondicao(8000, "botão Parar e colar (gravando em mãos livres)", () => controleNaPilula(cp, "parar"));
+    const parar = await esperarCondicao(8000, "botão Parar e colar (gravando em mãos livres)", () => controleNaPilula(cp, "#btn-parar"));
     marco("gravando", { parar });
     await rodarProcesso("powershell", ["-NoProfile", "-Command", `(New-Object Media.SoundPlayer '${WAV.replace(/'/g, "''")}').PlaySync()`]);
     marco("fala_terminou");
-    const parar2 = (await controleNaPilula(cp, "parar")) || parar;
+    const parar2 = (await controleNaPilula(cp, "#btn-parar")) || parar;
     const c2 = JSON.parse(await acaoDesk(["clicar", "-X", String(parar2.x), "-Y", String(parar2.y)]));
     marco("clique_parar_e_colar", c2);
 
@@ -531,19 +527,30 @@ async function faseModelo4B(cdp, relatorio) {
     const m = (await consultarPonte(cdp, "estado")).modeloIA;
     return m.estado !== "baixando" && m.estado !== "conferindo" && (m.feito || 0) > 0 ? m : null;
   });
-  marco("cancelado", { estado: cancelado.estado, feito: cancelado.feito });
+  const arquivo = path.join(process.env.DITASE_PASTA_MODELOS, MODELO_4B);
+  const salvo = fs.statSync(arquivo + ".part").size;
+  marco("cancelado", { estado: cancelado.estado, feito: cancelado.feito, salvo });
+  if (salvo !== cancelado.feito) throw new ErroDeProva("produto_parcial_divergente", "parcial em disco diferente da UI", { salvo, ui: cancelado.feito });
   const retomar = await esperarCondicao(10_000, "botão Continuar download", () =>
     cdp.avaliar(`Array.from(document.querySelectorAll("button")).some(b => /Continuar download/.test(b.textContent || ""))`));
   relatorio.screenshots.push(await cdp.screenshot("08-ajustes-continuar.png"));
   const bcont = await clicarBotaoPorTexto(cdp, "Continuar download");
   if (!retomar || !bcont.ok) throw new ErroDeProva("produto_sem_retomada", "sem botão para continuar o download", bcont);
   marco("continuar");
-  // A retomada tem de começar do parcial, não do zero.
-  const pos = await esperarCondicao(60_000, "download retomado", async () => {
+  const pos = await esperarCondicao(60_000, "primeiro progresso HTTP da retomada", async () => {
     const m = (await consultarPonte(cdp, "estado")).modeloIA;
-    return m.estado === "baixando" ? m : null;
+    if (m.estado === "falhou") throw new ErroDeProva("produto_download_falhou", m.detalhe || "download falhou", m);
+    if (m.conectando && m.feito !== salvo) throw new ErroDeProva("produto_parcial_divergente", "progresso mudou antes da resposta HTTP", m);
+    return (m.estado === "baixando" && !m.conectando) || m.estado === "instalado" ? m : null;
   });
-  et.retomouDe = { parcial: cancelado.feito, primeiroDepois: pos.feito, doZero: pos.feito < cancelado.feito * 0.5 };
+  const log = path.join(process.env.DITASE_RAIZ, "ditado.log");
+  const retomada = fs.readFileSync(log, "utf8").split(/\r?\n/).find((linha) =>
+    linha.includes(`retomada de modelo: solicitado byte ${salvo},`));
+  et.retomouDe = { parcial: salvo, primeiroDepois: pos.feito, resposta: retomada ?? null };
+  if (!retomada?.includes(`HTTP 206, Content-Range bytes ${salvo}-`) ||
+    (pos.estado === "baixando" && pos.feito < salvo)) {
+    throw new ErroDeProva("produto_retomada_sem_parcial", "o servidor não confirmou a retomada exata do parcial", et.retomouDe);
+  }
   const fim = await esperarCondicao(15 * 60_000, "4B instalado (SHA conferido)", async () => {
     const m = (await consultarPonte(cdp, "estado")).modeloIA;
     if (m.estado === "falhou") throw new ErroDeProva("produto_download_falhou", m.detalhe || "download falhou", m);
@@ -553,7 +560,13 @@ async function faseModelo4B(cdp, relatorio) {
   const aj1 = await consultarPonte(cdp, "ajustes.ler");
   et.final = { modeloIA: fim, prefModelo: aj1?.valores?.modelo, modelos: aj1?.modelos, limpador: (await consultarPonte(cdp, "estado")).limpador };
   relatorio.screenshots.push(await cdp.screenshot("09-ajustes-instalado.png"));
-  if (et.retomouDe.doZero) throw new ErroDeProva("produto_retomada_do_zero", "o download recomeçou do zero", et.retomouDe);
+  const hash = createHash("sha256");
+  for await (const bloco of fs.createReadStream(arquivo)) hash.update(bloco);
+  et.final.integridade = { tamanho: fs.statSync(arquivo).size, sha256: hash.digest("hex"), marcador: fs.existsSync(arquivo + ".conferido") };
+  if (et.final.integridade.tamanho !== 2740937888 || !et.final.integridade.marcador ||
+    et.final.integridade.sha256 !== "00fe7986ff5f6b463e62455821146049db6f9313603938a70800d1fb69ef11a4") {
+    throw new ErroDeProva("produto_integridade_4b", "4B instalado diverge do catálogo", et.final.integridade);
+  }
   return true;
 }
 
