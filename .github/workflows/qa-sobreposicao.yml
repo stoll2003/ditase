@@ -3,6 +3,10 @@ on:
   push:
     branches: [qa-ilha-102-final]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   actions: read
   contents: read
@@ -13,8 +17,8 @@ jobs:
     timeout-minutes: 22
     env:
       GH_TOKEN: ${{ github.token }}
-      CI_RUN: '44984374176'
-      CANDIDATO: '0719ad793d89113e709d112429688c31f1d968da'
+      CI_RUN: '44984592224'
+      CANDIDATO: '6ac17c87266aef1de94c0b32517deb76171ccc38'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Obter o mesmo instalador do CI
