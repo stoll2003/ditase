@@ -6,7 +6,6 @@ $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Saida | Out-Null
 Write-Host "Carregar WinForms e Win32 na sessão $((Get-Process -Id $PID).SessionId)."
 Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -29,7 +28,6 @@ public static class JanelaQa {
     [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
     [DllImport("user32.dll")] public static extern IntPtr SetProcessDpiAwarenessContext(IntPtr modo);
     public static IntPtr Ilha(uint pid) {
         IntPtr ilha = IntPtr.Zero;
@@ -76,22 +74,10 @@ $form = $null
 function Esperar([scriptblock]$acao, [int]$tempo = 5000) {
     $relogio = [Diagnostics.Stopwatch]::StartNew()
     do {
-        [Windows.Forms.Application]::DoEvents()
         $resultado = & $acao
         if ($resultado) { return $resultado }
         Start-Sleep -Milliseconds 35
     } while ($relogio.ElapsedMilliseconds -lt $tempo)
-}
-
-function Foto($nome, $r) {
-    $w = ($r.Dir - $r.X) + 28
-    $h = ($r.Base - $r.Y) + 36
-    $bitmap = New-Object Drawing.Bitmap($w, $h)
-    $gfx = [Drawing.Graphics]::FromImage($bitmap)
-    try {
-        $gfx.CopyFromScreen(($r.X - 14), $r.Y, 0, 0, $bitmap.Size)
-        $bitmap.Save((Join-Path $Saida "$nome.png"), [Drawing.Imaging.ImageFormat]::Png)
-    } finally { $gfx.Dispose(); $bitmap.Dispose() }
 }
 
 function Medir($nome) {
@@ -105,7 +91,6 @@ function Medir($nome) {
         $r = New-Object JanelaQa+Retangulo
         [void][JanelaQa]::GetWindowRect($ilha, [ref]$r)
         $resultado['tamanho'] = @(($r.Dir - $r.X), ($r.Base - $r.Y))
-        Foto $nome $r
     }
     $script:rel.etapas += $resultado
     Write-Host ($resultado | ConvertTo-Json -Compress)
@@ -127,10 +112,15 @@ try {
     if (-not $exe) { throw 'Executável não encontrado' }
     Write-Host "Abrir $($exe.FullName)."
     $app = Start-Process $exe.FullName -WorkingDirectory $dir -PassThru
+    Write-Host "Processo lançado. Aguardar a ilha do PID $($app.Id)."
     $encontrou = Esperar {
         if ([JanelaQa]::Ilha([uint32]$app.Id) -ne [IntPtr]::Zero) { return $true }
     } 20000
-    if (-not $encontrou) { throw 'Ilha ausente na abertura' }
+    if (-not $encontrou) {
+        $app.Refresh()
+        throw "Ilha ausente na abertura. Processo saiu: $($app.HasExited). Logs: $((Get-ChildItem $Saida -Recurse -File | Select-Object -ExpandProperty Name) -join ', ')"
+    }
+    Write-Host 'Ilha encontrada. Criar a janela externa.'
     $tela = [Windows.Forms.Screen]::PrimaryScreen.Bounds
     [void][JanelaQa]::SetCursorPos(($tela.X + 100), ($tela.Y + 120))
     $form = New-Object Windows.Forms.Form
@@ -139,10 +129,9 @@ try {
     $form.StartPosition = 'Manual'
     $form.Bounds = New-Object Drawing.Rectangle(($tela.X + 80), ($tela.Y + 80), 360, 240)
     $form.Show()
+    Write-Host 'Janela externa criada.'
     $externa = $form.Handle
-    [JanelaQa]::keybd_event(0x12, 0, 0, [UIntPtr]::Zero)
-    try { [void][JanelaQa]::SetForegroundWindow($externa) }
-    finally { [JanelaQa]::keybd_event(0x12, 0, 2, [UIntPtr]::Zero) }
+    [void][JanelaQa]::SetForegroundWindow($externa)
     $foco = Esperar { if ([JanelaQa]::GetForegroundWindow() -eq $externa) { return $true } }
     if (-not $foco) { throw 'A sessão de teste não deu foco à janela externa' }
     [void](Medir 'janela-com-moldura')

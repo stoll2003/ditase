@@ -31,7 +31,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Falha ao obter o instalador' }
       - name: Instalar e testar mudança para janela sem borda
         shell: pwsh
-        timeout-minutes: 7
+        timeout-minutes: 4
         run: |
           $pacote = Get-ChildItem "$env:RUNNER_TEMP\pacote" -Filter '*-setup.exe' | Select-Object -First 1
           if (-not $pacote) { throw 'Instalador não encontrado' }
@@ -42,6 +42,6 @@ jobs:
           name: ilha-sobreposicao-evidencias
           path: |
             ${{ runner.temp }}/ilha-prova/*.json
-            ${{ runner.temp }}/ilha-prova/*.png
+            ${{ runner.temp }}/ilha-prova/dados/**/*.log
           if-no-files-found: warn
           retention-days: 7
