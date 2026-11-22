@@ -13,8 +13,8 @@ jobs:
     timeout-minutes: 22
     env:
       GH_TOKEN: ${{ github.token }}
-      CI_RUN: '44983926240'
-      CANDIDATO: '0b9fa5f816d9509ec343a80390ce40105478647f'
+      CI_RUN: '44984374176'
+      CANDIDATO: '0719ad793d89113e709d112429688c31f1d968da'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - name: Obter o mesmo instalador do CI
