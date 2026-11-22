@@ -21,7 +21,7 @@ use windows::Win32::{
         CreateRectRgn, CreateRoundRectRgn, DeleteObject, GetWindowRgn, MonitorFromWindow,
         PtInRegion, SetWindowRgn, COMPLEXREGION, HGDIOBJ, MONITOR_DEFAULTTOPRIMARY,
     },
-    System::LibraryLoader::GetModuleHandleW,
+    System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentProcessId},
     UI::{
         Accessibility::{SetWinEventHook, HWINEVENTHOOK},
         HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
@@ -33,8 +33,8 @@ use windows::Win32::{
             EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE, GW_HWNDPREV, HWND_TOPMOST, MSG, OBJID_CLIENT,
             OBJID_WINDOW, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE,
             SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
-            WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WNDCLASSW, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            WINEVENT_SKIPOWNPROCESS, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WNDCLASSW,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
 };
@@ -285,7 +285,29 @@ unsafe extern "system" fn gancho_foco(
     avisar_tela("primeiro-plano");
 }
 
-unsafe extern "system" fn gancho_janela(
+/// Uma mudança do tao no DPI pode mover a ilha depois do nosso SetWindowPos.
+unsafe extern "system" fn gancho_posicao_ilha(
+    _hook: HWINEVENTHOOK,
+    _evento: u32,
+    hwnd: HWND,
+    id_object: i32,
+    id_child: i32,
+    _event_thread: u32,
+    _event_time: u32,
+) {
+    let ilha = ILHA.load(Ordering::Acquire);
+    if ilha == 0 || hwnd.0 as isize != ilha || id_object != OBJID_WINDOW.0 || id_child != 0 {
+        return;
+    }
+    let Some(esperado) = retangulo_esperado() else {
+        return;
+    };
+    if retangulo(ilha).is_some_and(|real| real != esperado) {
+        avisar_tela("deriva");
+    }
+}
+
+unsafe extern "system" fn gancho_janela_externa(
     _hook: HWINEVENTHOOK,
     evento: u32,
     hwnd: HWND,
@@ -294,26 +316,17 @@ unsafe extern "system" fn gancho_janela(
     _event_thread: u32,
     _event_time: u32,
 ) {
-    if id_child != 0 || (id_object != OBJID_WINDOW.0 && id_object != OBJID_CLIENT.0) {
+    let janela = id_object == OBJID_WINDOW.0;
+    let ordem = evento == EVENT_OBJECT_REORDER;
+    if id_child != 0 || !(janela || (ordem && id_object == OBJID_CLIENT.0)) {
         return;
     }
     let ilha = ILHA.load(Ordering::Acquire);
     if ilha == 0 {
         return;
     }
-    if hwnd.0 as isize == ilha {
-        // Ex.: o tao reposiciona a ilha depois do nosso SetWindowPos no WM_DPICHANGED.
-        if evento == EVENT_OBJECT_LOCATIONCHANGE && id_object == OBJID_WINDOW.0 {
-            if let Some(esperado) = retangulo_esperado() {
-                if retangulo(ilha).is_some_and(|real| real != esperado) {
-                    avisar_tela("deriva");
-                }
-            }
-        }
-        return;
-    }
     let frente = unsafe { GetForegroundWindow() };
-    if hwnd == frente || (evento == EVENT_OBJECT_REORDER && hwnd == unsafe { GetDesktopWindow() }) {
+    if hwnd == frente || (ordem && hwnd == unsafe { GetDesktopWindow() }) {
         conferir_ordem(HWND(ilha as *mut _), frente);
     }
 }
@@ -383,6 +396,15 @@ pub fn observar(tela: Arc<dyn Fn(&'static str) + Send + Sync>) {
             if hook.0.is_null() {
                 return;
             }
+            let _ = SetWinEventHook(
+                EVENT_OBJECT_LOCATIONCHANGE,
+                EVENT_OBJECT_LOCATIONCHANGE,
+                None,
+                Some(gancho_posicao_ilha),
+                GetCurrentProcessId(),
+                0,
+                WINEVENT_OUTOFCONTEXT,
+            );
             for evento in [
                 EVENT_OBJECT_LOCATIONCHANGE,
                 EVENT_OBJECT_SHOW,
@@ -392,10 +414,10 @@ pub fn observar(tela: Arc<dyn Fn(&'static str) + Send + Sync>) {
                     evento,
                     evento,
                     None,
-                    Some(gancho_janela),
+                    Some(gancho_janela_externa),
                     0,
                     0,
-                    WINEVENT_OUTOFCONTEXT,
+                    WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
                 );
             }
             criar_ouvinte_de_tela();
