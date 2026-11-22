@@ -93,7 +93,7 @@ function Medir($nome) {
     if ($ilha -ne [IntPtr]::Zero) {
         $r = New-Object JanelaQa+Retangulo
         [void][JanelaQa]::GetWindowRect($ilha, [ref]$r)
-        $resultado['tamanho'] = @($r.Dir - $r.X, $r.Base - $r.Y)
+        $resultado['tamanho'] = @(($r.Dir - $r.X), ($r.Base - $r.Y))
         Foto $nome $r
     }
     $script:rel.etapas += $resultado

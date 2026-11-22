@@ -36,6 +36,8 @@ jobs:
         if: always()
         with:
           name: ilha-sobreposicao-evidencias
-          path: ${{ runner.temp }}/ilha-prova
+          path: |
+            ${{ runner.temp }}/ilha-prova/*.json
+            ${{ runner.temp }}/ilha-prova/*.png
           if-no-files-found: warn
           retention-days: 7
