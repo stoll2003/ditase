@@ -71,17 +71,10 @@ pub mod janela {
     }
     pub fn esconder(_hwnd: isize) {}
     pub fn recortar(_hwnd: isize, _regiao: Option<(i32, i32, i32, i32, i32)>) {}
-    pub fn tela_cheia_ativa() -> bool {
-        false
-    }
     pub fn cursor_fora_da_zona(_hwnd: isize, _lado: i32, _baixo: i32, _ate_o_topo: bool) -> bool {
         false
     }
-    pub fn observar(
-        _tela_cheia: Arc<dyn Fn(bool) + Send + Sync>,
-        _tela: Arc<dyn Fn(&'static str) + Send + Sync>,
-    ) {
-    }
+    pub fn observar(_tela: Arc<dyn Fn(&'static str) + Send + Sync>) {}
     pub fn registrar_ilha(_hwnd: isize) {}
     pub fn retangulo_esperado() -> Option<(i32, i32, i32, i32)> {
         None

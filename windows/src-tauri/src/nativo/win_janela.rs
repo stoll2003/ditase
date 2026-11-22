@@ -1,8 +1,8 @@
 //! Ilha no topo da tela sem roubar o foco:
 //! - `WS_EX_NOACTIVATE` faz o clique não ativar a janela (o texto continua indo para o app em foco).
 //! - `WS_EX_TOOLWINDOW` tira da barra de tarefas e do Alt+Tab.
-//! - `SetWindowPos` com `SWP_NOACTIVATE | SWP_NOZORDER` posiciona, redimensiona e mostra numa
-//!   chamada só, sem ativar a janela nem mostrar quadro deslocado.
+//! - `SetWindowPos` com `HWND_TOPMOST` e `SWP_NOACTIVATE` mostra a ilha acima das outras
+//!   janelas sem ativá-la. Na troca de foco, a ordem é reafirmada sem mover ou mostrar a janela.
 //! - `SetWindowRgn` com uma `CreateRoundRectRgn` recorta a janela na cápsula da ilha (1 px físico
 //!   maior que o desenho): o clique nas quinas e no vão de cima atravessa para a janela de baixo
 //!   (pixel transparente do WebView2 ainda pegaria).
@@ -10,8 +10,6 @@
 //!   `WM_DISPLAYCHANGE` e `WM_SETTINGCHANGE`, e um gancho `EVENT_OBJECT_LOCATIONCHANGE` só do nosso
 //!   processo avisa quando alguém (o tao no `WM_DPICHANGED`, por exemplo) move a ilha para fora do
 //!   lugar que pedimos. Nada disso faz consulta periódica.
-//! - `SHQueryUserNotificationState` detecta tela cheia / apresentação na troca de janela em foco
-//!   (`EVENT_SYSTEM_FOREGROUND`), sem consulta periódica.
 use std::sync::{
     atomic::{AtomicIsize, Ordering},
     Arc, Mutex, OnceLock,
@@ -27,17 +25,13 @@ use windows::Win32::{
     UI::{
         Accessibility::{SetWinEventHook, HWINEVENTHOOK},
         HiDpi::{GetDpiForMonitor, GetDpiForWindow, MDT_EFFECTIVE_DPI},
-        Shell::{
-            SHQueryUserNotificationState, QUNS_BUSY, QUNS_PRESENTATION_MODE,
-            QUNS_RUNNING_D3D_FULL_SCREEN,
-        },
         WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW,
-            GetWindowLongPtrW, GetWindowRect, RegisterClassW, SetWindowLongPtrW, SetWindowPos,
-            TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND, GWL_EXSTYLE,
-            MSG, OBJID_WINDOW, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-            SWP_NOZORDER, SWP_SHOWWINDOW, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
-            WINEVENT_SKIPOWNPROCESS, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WNDCLASSW,
+            GetWindowLongPtrW, GetWindowRect, IsWindowVisible, RegisterClassW, SetWindowLongPtrW,
+            SetWindowPos, TranslateMessage, EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_FOREGROUND,
+            GWL_EXSTYLE, HWND_TOPMOST, MSG, OBJID_WINDOW, SWP_ASYNCWINDOWPOS, SWP_HIDEWINDOW,
+            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, WINDOW_EX_STYLE,
+            WINEVENT_OUTOFCONTEXT, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_SETTINGCHANGE, WNDCLASSW,
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
@@ -156,11 +150,11 @@ pub fn posicionar_sem_ativar(hwnd: isize, x: i32, y: i32, w: i32, h: i32, mostra
         *ESPERADO.lock().unwrap() = Some((x, y, w, h));
     }
     unsafe {
-        let mut flags = SWP_NOACTIVATE | SWP_NOZORDER;
+        let mut flags = SWP_NOACTIVATE;
         if mostrar {
             flags |= SWP_SHOWWINDOW;
         }
-        let _ = SetWindowPos(HWND(hwnd as *mut _), None, x, y, w, h, flags);
+        let _ = SetWindowPos(HWND(hwnd as *mut _), Some(HWND_TOPMOST), x, y, w, h, flags);
     }
 }
 
@@ -202,17 +196,22 @@ pub fn esconder(hwnd: isize) {
     }
 }
 
-/// Verdadeiro quando há aplicativo em tela cheia ou modo de apresentação.
-pub fn tela_cheia_ativa() -> bool {
+/// Reafirma a ordem de uma ilha visível, inclusive diante de outra janela topmost.
+pub fn reafirmar_topo(hwnd: isize) {
     unsafe {
-        match SHQueryUserNotificationState() {
-            Ok(estado) => {
-                estado == QUNS_BUSY
-                    || estado == QUNS_RUNNING_D3D_FULL_SCREEN
-                    || estado == QUNS_PRESENTATION_MODE
-            }
-            Err(_) => false,
+        let janela = HWND(hwnd as *mut _);
+        if !IsWindowVisible(janela).as_bool() {
+            return;
         }
+        let _ = SetWindowPos(
+            janela,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_ASYNCWINDOWPOS,
+        );
     }
 }
 
@@ -230,7 +229,6 @@ pub fn cursor_fora_da_zona(hwnd: isize, lado: i32, baixo: i32, ate_o_topo: bool)
     }
 }
 
-static AO_MUDAR_FOCO: OnceLock<Arc<dyn Fn(bool) + Send + Sync>> = OnceLock::new();
 static AO_MUDAR_TELA: OnceLock<Arc<dyn Fn(&'static str) + Send + Sync>> = OnceLock::new();
 
 fn avisar_tela(motivo: &'static str) {
@@ -248,8 +246,9 @@ unsafe extern "system" fn gancho_foco(
     _event_thread: u32,
     _event_time: u32,
 ) {
-    if let Some(cb) = AO_MUDAR_FOCO.get() {
-        cb(tela_cheia_ativa());
+    let ilha = ILHA.load(Ordering::Acquire);
+    if ilha != 0 {
+        reafirmar_topo(ilha);
     }
     // Rede de segurança sem consulta periódica: ao voltar das Configurações (ou de qualquer
     // janela), a ilha confere se a tela mudou.
@@ -322,17 +321,13 @@ unsafe fn criar_ouvinte_de_tela() {
     );
 }
 
-/// Observa trocas de janela em primeiro plano (`EVENT_SYSTEM_FOREGROUND`, para tela cheia) e as
+/// Observa trocas de janela em primeiro plano e as
 /// mudanças de tela (resolução, escala, área de trabalho e deriva da ilha). Roda em thread própria
 /// com laço de mensagens Win32; zero consulta periódica em repouso.
-pub fn observar(
-    tela_cheia: Arc<dyn Fn(bool) + Send + Sync>,
-    tela: Arc<dyn Fn(&'static str) + Send + Sync>,
-) {
-    if AO_MUDAR_FOCO.set(tela_cheia).is_err() {
+pub fn observar(tela: Arc<dyn Fn(&'static str) + Send + Sync>) {
+    if AO_MUDAR_TELA.set(tela).is_err() {
         return;
     }
-    let _ = AO_MUDAR_TELA.set(tela);
     let _ = std::thread::Builder::new()
         .name("ditase.tela".into())
         .spawn(|| unsafe {
@@ -343,7 +338,7 @@ pub fn observar(
                 Some(gancho_foco),
                 0,
                 0,
-                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+                WINEVENT_OUTOFCONTEXT,
             );
             if hook.0.is_null() {
                 return;

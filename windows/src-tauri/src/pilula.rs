@@ -391,7 +391,6 @@ struct Interno {
     fase: Fase,
     modo: ModoJanela,
     sempre_visivel: bool,
-    tela_cheia: bool,
     baixando_modelo: Option<(u64, u64)>,
     progresso_ativo: bool,
     aviso_ate: Option<Instant>,
@@ -534,7 +533,6 @@ impl Pilula {
                 fase: Fase::Ociosa,
                 modo: ModoJanela::Repouso,
                 sempre_visivel,
-                tela_cheia: crate::nativo::janela::tela_cheia_ativa(),
                 baixando_modelo: None,
                 progresso_ativo: false,
                 aviso_ate: None,
@@ -556,22 +554,13 @@ impl Pilula {
         let _ = p.eu.set(Arc::downgrade(&p));
         let _ = construir_janela(app, Arc::downgrade(&p));
 
-        // Tela cheia (EVENT_SYSTEM_FOREGROUND) e mudanças de tela (WM_DISPLAYCHANGE,
-        // WM_SETTINGCHANGE, deriva da posição): tudo por evento, zero consulta em repouso.
-        let p_cheia = Arc::downgrade(&p);
+        // Mudanças de foco e de tela são tratadas por evento, sem consulta em repouso.
         let p_tela = Arc::downgrade(&p);
-        crate::nativo::janela::observar(
-            Arc::new(move |ativa| {
-                if let Some(p) = p_cheia.upgrade() {
-                    p.definir_tela_cheia(ativa);
-                }
-            }),
-            Arc::new(move |motivo| {
-                if let Some(p) = p_tela.upgrade() {
-                    p.reconferir(motivo);
-                }
-            }),
-        );
+        crate::nativo::janela::observar(Arc::new(move |motivo| {
+            if let Some(p) = p_tela.upgrade() {
+                p.reconferir(motivo);
+            }
+        }));
 
         p.enviar(json!({"tipo": "atalho", "simbolo": atalho}));
         p.mostrar(Fase::Ociosa);
@@ -652,6 +641,10 @@ impl Pilula {
             return;
         };
         let hwnd = h.0 as isize;
+        // Alguns apps ajustam a própria ordem depois de receber o foco.
+        if motivo == "primeiro-plano" {
+            crate::nativo::janela::reafirmar_topo(hwnd);
+        }
         let monitores = coletar_monitores(&j);
         let calculado = escolher_topo(&monitores, w_log, h_log).map(|p| (p.x, p.y, p.w, p.h));
         let dpi_janela = crate::nativo::janela::dpi_da_janela(hwnd);
@@ -819,7 +812,7 @@ impl Pilula {
         if em_atividade {
             true
         } else {
-            i.sempre_visivel && !i.tela_cheia
+            i.sempre_visivel
         }
     }
 
@@ -920,17 +913,6 @@ impl Pilula {
         };
         self.aplicar_janela();
         self.iniciar_vigia_se_preciso(iniciar);
-    }
-
-    pub fn definir_tela_cheia(&self, ativa: bool) {
-        {
-            let mut i = self.interno.lock().unwrap();
-            if i.tela_cheia == ativa {
-                return;
-            }
-            i.tela_cheia = ativa;
-        }
-        self.aplicar_janela();
     }
 
     pub fn fase(&self) -> Fase {
@@ -1592,7 +1574,7 @@ mod testes {
         for exigido in [
             "WS_EX_NOACTIVATE",
             "WS_EX_TOOLWINDOW",
-            "WS_EX_TOPMOST",
+            "HWND_TOPMOST",
             "SWP_NOACTIVATE",
             "CreateRoundRectRgn",
             "SetWindowRgn",
@@ -1670,7 +1652,6 @@ mod testes {
             fase: Fase::Ociosa,
             modo: ModoJanela::Repouso,
             sempre_visivel: true,
-            tela_cheia: false,
             baixando_modelo: None,
             progresso_ativo: false,
             aviso_ate: None,

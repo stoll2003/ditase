@@ -534,8 +534,8 @@ final class JanelaDaPilula: NSPanel {
         isOpaque = false
         backgroundColor = .clear
         hasShadow = false
-        level = .statusBar
-        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        level = .popUpMenu
+        collectionBehavior = [.canJoinAllSpaces, .canJoinAllApplications, .fullScreenAuxiliary, .stationary, .ignoresCycle]
         hidesOnDeactivate = false
         isMovable = false
         ignoresMouseEvents = true
@@ -544,12 +544,20 @@ final class JanelaDaPilula: NSPanel {
         contentView = vista
         posicionar()
         NotificationCenter.default.addObserver(self, selector: #selector(posicionar), name: NSApplication.didChangeScreenParametersNotification, object: nil)
+        let workspace = NSWorkspace.shared.notificationCenter
+        for nome in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.activeSpaceDidChangeNotification] {
+            workspace.addObserver(self, selector: #selector(reafirmarTopo(_:)), name: nome, object: nil)
+        }
         let tipos: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDragged]
         if let global = NSEvent.addGlobalMonitorForEvents(matching: tipos, handler: { [weak self] _ in self?.conferirPonteiro() }) { monitores.append(global) }
         if let local = NSEvent.addLocalMonitorForEvents(matching: tipos, handler: { [weak self] evento in
             self?.conferirPonteiro()
             return evento
         }) { monitores.append(local) }
+    }
+
+    @objc private func reafirmarTopo(_ notificacao: Notification) {
+        if isVisible { orderFrontRegardless() }
     }
 
     override var canBecomeKey: Bool { false }
